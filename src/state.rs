@@ -118,6 +118,15 @@ impl SharedState {
         self.config.read().expect("config RwLock poisoned")
     }
 
+    /// Read run stats under a read lock.
+    ///
+    /// Returns a [`RwLockReadGuard`] — keep the lock short.
+    /// Atomic counters within [`RunStats`] can still be read without
+    /// holding the lock, but [`RunStats::connected_since`] requires it.
+    pub fn read_run_stats(&self) -> RwLockReadGuard<'_, RunStats> {
+        self.run_stats.read().expect("run_stats RwLock poisoned")
+    }
+
     /// Store (or clear) the container handle.
     ///
     /// If a previous handle was stored, it is dropped and the container
