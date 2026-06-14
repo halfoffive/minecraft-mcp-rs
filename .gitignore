@@ -1,0 +1,13 @@
+/target
+
+# Oh My Openagent
+.sisyphus/
+
+# Trae IDE
+.trae/
+
+# IntelliJ IDEA
+.idea/
+
+# Deepseek Reasonix
+.reasonix/
