@@ -6,7 +6,7 @@
 //! oneshot channel.
 
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{debug, error, trace, warn};
 
 use crate::error::BotError;
@@ -180,7 +180,10 @@ mod tests {
         let responder = tokio::spawn(async move {
             let wrapped = receiver.recv().await.expect("should receive command");
             let err = BotError::BlockNotFound(crate::error::BlockPos { x: 1, y: 2, z: 3 });
-            wrapped.respond_to.send(Err(err)).expect("should send error");
+            wrapped
+                .respond_to
+                .send(Err(err))
+                .expect("should send error");
         });
 
         let result = sender.send_command(cmd).await;
@@ -209,7 +212,10 @@ mod tests {
         let result = sender.send_command(cmd).await;
         assert!(result.is_err());
         match result {
-            Err(BotError::CommandTimeout { command, timeout_secs }) => {
+            Err(BotError::CommandTimeout {
+                command,
+                timeout_secs,
+            }) => {
                 assert!(command.contains("Jump"));
                 assert_eq!(timeout_secs, 30);
             }
@@ -256,7 +262,10 @@ mod tests {
 
         let cmd = BotCommand::Jump;
         let (respond_to, _rx) = oneshot::channel();
-        let wrapped = BotCommandWithResponder { command: cmd, respond_to };
+        let wrapped = BotCommandWithResponder {
+            command: cmd,
+            respond_to,
+        };
 
         // Use the internal mpsc sender directly to enqueue a command.
         sender.tx.send(wrapped).await.expect("should send");
@@ -271,7 +280,10 @@ mod tests {
         drop(sender);
 
         let result = receiver.try_recv();
-        assert!(matches!(result, Err(mpsc::error::TryRecvError::Disconnected)));
+        assert!(matches!(
+            result,
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 
     // ── Serialization / single receiver ─────────────────────
@@ -293,12 +305,8 @@ mod tests {
         let s1 = sender.clone();
         let s2 = sender.clone();
 
-        let h1 = tokio::spawn(async move {
-            s1.send_command(BotCommand::Jump).await.unwrap()
-        });
-        let h2 = tokio::spawn(async move {
-            s2.send_command(BotCommand::UseItem).await.unwrap()
-        });
+        let h1 = tokio::spawn(async move { s1.send_command(BotCommand::Jump).await.unwrap() });
+        let h2 = tokio::spawn(async move { s2.send_command(BotCommand::UseItem).await.unwrap() });
 
         let r1 = h1.await.unwrap();
         let r2 = h2.await.unwrap();
@@ -321,12 +329,9 @@ mod tests {
         let (sender, mut receiver) = create_command_channel(10);
         let sender2 = sender.clone();
 
-        let h1 = tokio::spawn(async move {
-            sender.send_command(BotCommand::Jump).await.unwrap()
-        });
-        let h2 = tokio::spawn(async move {
-            sender2.send_command(BotCommand::UseItem).await.unwrap()
-        });
+        let h1 = tokio::spawn(async move { sender.send_command(BotCommand::Jump).await.unwrap() });
+        let h2 =
+            tokio::spawn(async move { sender2.send_command(BotCommand::UseItem).await.unwrap() });
 
         let responder = tokio::spawn(async move {
             let mut count = 0;

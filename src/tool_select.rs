@@ -1,6 +1,6 @@
 //! Tool / inventory selection logic for mining and combat.
 
-use crate::block_data::{ItemStack, BLOCK_TO_TOOL_TYPE, MATERIAL_PRIORITY};
+use crate::block_data::{BLOCK_TO_TOOL_TYPE, ItemStack, MATERIAL_PRIORITY};
 use crate::types::{MaterialTier, ToolType};
 
 /// The result of selecting a tool for a specific block.
@@ -49,9 +49,7 @@ pub fn find_tool_in_inventory(
                 continue;
             }
 
-            let priority = MATERIAL_PRIORITY
-                .iter()
-                .position(|m| m == &found_material);
+            let priority = MATERIAL_PRIORITY.iter().position(|m| m == &found_material);
 
             match (best_priority, priority) {
                 (None, Some(p)) => {
@@ -78,10 +76,7 @@ pub fn find_tool_in_inventory(
 /// 4. Among matches, selects the highest material tier ([`MATERIAL_PRIORITY`] order).
 /// 5. If found in main inventory, marks `needs_move_to_hotbar = true`.
 /// 6. If no tool is found, returns [`ToolType::Hand`].
-pub fn select_tool_for_block(
-    block_type: &str,
-    inventory: &[Option<ItemStack>],
-) -> ToolSelection {
+pub fn select_tool_for_block(block_type: &str, inventory: &[Option<ItemStack>]) -> ToolSelection {
     let required_tool = BLOCK_TO_TOOL_TYPE
         .get(block_type)
         .copied()
@@ -280,12 +275,10 @@ mod tests {
 
     #[test]
     fn test_find_tool_shears() {
-        let inv = vec![
-            Some(ItemStack {
-                item_id: "shears".to_string(),
-                count: 1,
-            }),
-        ];
+        let inv = vec![Some(ItemStack {
+            item_id: "shears".to_string(),
+            count: 1,
+        })];
         assert_eq!(
             find_tool_in_inventory(&ToolType::Shears, &inv),
             Some((MaterialTier::Iron, 0))
@@ -449,12 +442,10 @@ mod tests {
 
     #[test]
     fn test_select_tool_axe_block() {
-        let inv = vec![
-            Some(ItemStack {
-                item_id: "iron_axe".to_string(),
-                count: 1,
-            }),
-        ];
+        let inv = vec![Some(ItemStack {
+            item_id: "iron_axe".to_string(),
+            count: 1,
+        })];
         let sel = select_tool_for_block("oak_log", &inv);
         assert_eq!(sel.tool_type, ToolType::Axe);
         assert_eq!(sel.material, Some(MaterialTier::Iron));
@@ -464,12 +455,10 @@ mod tests {
 
     #[test]
     fn test_select_tool_shovel_block() {
-        let inv = vec![
-            Some(ItemStack {
-                item_id: "diamond_shovel".to_string(),
-                count: 1,
-            }),
-        ];
+        let inv = vec![Some(ItemStack {
+            item_id: "diamond_shovel".to_string(),
+            count: 1,
+        })];
         let sel = select_tool_for_block("dirt", &inv);
         assert_eq!(sel.tool_type, ToolType::Shovel);
         assert_eq!(sel.material, Some(MaterialTier::Diamond));
@@ -479,12 +468,10 @@ mod tests {
 
     #[test]
     fn test_select_tool_shears_block() {
-        let inv = vec![
-            Some(ItemStack {
-                item_id: "shears".to_string(),
-                count: 1,
-            }),
-        ];
+        let inv = vec![Some(ItemStack {
+            item_id: "shears".to_string(),
+            count: 1,
+        })];
         let sel = select_tool_for_block("white_wool", &inv);
         assert_eq!(sel.tool_type, ToolType::Shears);
         assert_eq!(sel.material, Some(MaterialTier::Iron));

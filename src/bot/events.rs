@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use azalea::{Client, Event};
 use azalea::ecs::component::Component;
+use azalea::{Client, Event};
 use tracing::{debug, trace, warn};
 
 use crate::channel::BotCommandReceiver;
@@ -66,29 +66,21 @@ impl Default for BotState {
             .cloned()
             .unwrap_or_else(|| Arc::new(SharedState::new(crate::config::AppConfig::default())));
 
-        let command_receiver = INJECTED_COMMAND_RECEIVER
-            .get()
-            .cloned()
-            .unwrap_or_else(|| {
-                let (_, receiver) = crate::channel::create_command_channel(1);
-                Arc::new(tokio::sync::Mutex::new(receiver))
-            });
+        let command_receiver = INJECTED_COMMAND_RECEIVER.get().cloned().unwrap_or_else(|| {
+            let (_, receiver) = crate::channel::create_command_channel(1);
+            Arc::new(tokio::sync::Mutex::new(receiver))
+        });
 
         let egui_ctx = INJECTED_EGUI_CTX.get().cloned().flatten();
 
-        let snapshot_interval_ms = INJECTED_SNAPSHOT_INTERVAL_MS
-            .get()
-            .copied()
-            .unwrap_or(500);
+        let snapshot_interval_ms = INJECTED_SNAPSHOT_INTERVAL_MS.get().copied().unwrap_or(500);
 
         Self {
             shared_state,
             command_receiver,
             egui_ctx,
             dirty_tracker: Arc::new(Mutex::new(DirtyTracker::new())),
-            last_snapshot_time: Arc::new(Mutex::new(
-                Instant::now() - Duration::from_secs(3600),
-            )),
+            last_snapshot_time: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(3600))),
             snapshot_interval_ms,
         }
     }
@@ -190,7 +182,9 @@ fn handle_death(state: &BotState) {
 
 fn handle_add_player(state: &BotState, info: &azalea::player::PlayerInfo) {
     let mut snapshot = (*state.shared_state.read_snapshot()).clone();
-    snapshot.entities.retain(|e| e.uuid != info.uuid.to_string());
+    snapshot
+        .entities
+        .retain(|e| e.uuid != info.uuid.to_string());
     snapshot.entities.push(EntityEntry {
         id: 0,
         uuid: info.uuid.to_string(),
@@ -205,7 +199,9 @@ fn handle_add_player(state: &BotState, info: &azalea::player::PlayerInfo) {
 
 fn handle_remove_player(state: &BotState, info: &azalea::player::PlayerInfo) {
     let mut snapshot = (*state.shared_state.read_snapshot()).clone();
-    snapshot.entities.retain(|e| e.uuid != info.uuid.to_string());
+    snapshot
+        .entities
+        .retain(|e| e.uuid != info.uuid.to_string());
     state.shared_state.update_snapshot(snapshot);
     trace!("player removed: {}", info.profile.name);
 }
@@ -301,24 +297,23 @@ async fn build_and_update_snapshot(bot: &Client, state: &BotState) -> eyre::Resu
     }
 
     // Chunk summary from the partial world.
-    let chunk_summary = if let Some(world_holder) =
-        bot.get_component::<azalea::local_player::WorldHolder>()
-    {
-        let partial_world = world_holder.partial.read();
-        let storage = &partial_world.chunks;
-        storage
-            .chunks()
-            .enumerate()
-            .filter_map(|(i, chunk)| {
-                chunk.as_ref().map(|_| {
-                    let pos = storage.chunk_pos_from_index(i);
-                    (pos.x, pos.z)
+    let chunk_summary =
+        if let Some(world_holder) = bot.get_component::<azalea::local_player::WorldHolder>() {
+            let partial_world = world_holder.partial.read();
+            let storage = &partial_world.chunks;
+            storage
+                .chunks()
+                .enumerate()
+                .filter_map(|(i, chunk)| {
+                    chunk.as_ref().map(|_| {
+                        let pos = storage.chunk_pos_from_index(i);
+                        (pos.x, pos.z)
+                    })
                 })
-            })
-            .collect()
-    } else {
-        old_snapshot.chunk_summary.clone()
-    };
+                .collect()
+        } else {
+            old_snapshot.chunk_summary.clone()
+        };
 
     builder = builder.with_chunk_summary(chunk_summary);
 
@@ -334,6 +329,7 @@ fn block_state_to_name(block_state: azalea::block::BlockState) -> String {
     // BlockState is a numeric ID; Block (alias for BlockKind) maps that to
     // the block type. We use the deprecated `Block` alias because `BlockKind`
     // itself is private in `azalea_registry::builtin`.
+    #[allow(deprecated)]
     let block_kind = azalea::registry::Block::from(block_state);
     // Block derives Debug with the variant name (e.g. Stone).
     // We convert to snake_case to match Minecraft IDs.
@@ -447,7 +443,9 @@ mod tests {
             profile: azalea::auth::game_profile::GameProfile {
                 uuid: uuid::Uuid::new_v4(),
                 name: "Steve".to_string(),
-                properties: std::sync::Arc::new(azalea::auth::game_profile::GameProfileProperties::default()),
+                properties: std::sync::Arc::new(
+                    azalea::auth::game_profile::GameProfileProperties::default(),
+                ),
             },
             uuid: uuid::Uuid::new_v4(),
             gamemode: azalea::core::game_type::GameMode::Survival,
@@ -467,7 +465,9 @@ mod tests {
             profile: azalea::auth::game_profile::GameProfile {
                 uuid: uuid::Uuid::new_v4(),
                 name: "Steve".to_string(),
-                properties: std::sync::Arc::new(azalea::auth::game_profile::GameProfileProperties::default()),
+                properties: std::sync::Arc::new(
+                    azalea::auth::game_profile::GameProfileProperties::default(),
+                ),
             },
             uuid: uuid::Uuid::new_v4(),
             gamemode: azalea::core::game_type::GameMode::Survival,
@@ -488,7 +488,9 @@ mod tests {
             profile: azalea::auth::game_profile::GameProfile {
                 uuid: uuid::Uuid::new_v4(),
                 name: "Steve".to_string(),
-                properties: std::sync::Arc::new(azalea::auth::game_profile::GameProfileProperties::default()),
+                properties: std::sync::Arc::new(
+                    azalea::auth::game_profile::GameProfileProperties::default(),
+                ),
             },
             uuid,
             gamemode: azalea::core::game_type::GameMode::Survival,
@@ -501,7 +503,9 @@ mod tests {
             profile: azalea::auth::game_profile::GameProfile {
                 uuid: uuid::Uuid::new_v4(),
                 name: "Steve".to_string(),
-                properties: std::sync::Arc::new(azalea::auth::game_profile::GameProfileProperties::default()),
+                properties: std::sync::Arc::new(
+                    azalea::auth::game_profile::GameProfileProperties::default(),
+                ),
             },
             uuid,
             gamemode: azalea::core::game_type::GameMode::Survival,
@@ -511,7 +515,10 @@ mod tests {
         handle_update_player(&state, &info_update);
 
         let snapshot = state.shared_state.read_snapshot();
-        assert_eq!(snapshot.entities[0].display_name, Some("SteveAdmin".to_string()));
+        assert_eq!(
+            snapshot.entities[0].display_name,
+            Some("SteveAdmin".to_string())
+        );
     }
 
     // -- Throttle logic ------------------------------------------------------

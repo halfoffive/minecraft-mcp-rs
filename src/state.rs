@@ -132,7 +132,10 @@ impl SharedState {
     /// If a previous handle was stored, it is dropped and the container
     /// auto-closes.
     pub fn set_container_handle(&self, handle: Option<ContainerHandle>) {
-        let mut guard = self.container_handle.lock().expect("container Mutex poisoned");
+        let mut guard = self
+            .container_handle
+            .lock()
+            .expect("container Mutex poisoned");
         *guard = handle;
     }
 
@@ -142,7 +145,10 @@ impl SharedState {
     /// Unlike [`get_container_handle`](Self::get_container_handle), this does
     /// not consume the handle — the container remains open.
     pub fn has_container_open(&self) -> bool {
-        let guard = self.container_handle.lock().expect("container Mutex poisoned");
+        let guard = self
+            .container_handle
+            .lock()
+            .expect("container Mutex poisoned");
         guard.is_some()
     }
 
@@ -153,13 +159,19 @@ impl SharedState {
     /// caller owns it and the container will auto-close when the returned
     /// value is dropped.
     pub fn get_container_handle(&self) -> Option<ContainerHandle> {
-        let mut guard = self.container_handle.lock().expect("container Mutex poisoned");
+        let mut guard = self
+            .container_handle
+            .lock()
+            .expect("container Mutex poisoned");
         guard.take()
     }
 
     /// Store a chat message, keeping only the last 10.
     pub fn add_chat_message(&self, sender: String, message: String) {
-        let mut guard = self.chat_messages.lock().expect("chat messages Mutex poisoned");
+        let mut guard = self
+            .chat_messages
+            .lock()
+            .expect("chat messages Mutex poisoned");
         guard.push_back((sender, message));
         while guard.len() > 10 {
             guard.pop_front();
@@ -168,7 +180,10 @@ impl SharedState {
 
     /// Return a copy of the last 10 chat messages.
     pub fn get_chat_messages(&self) -> Vec<(String, String)> {
-        let guard = self.chat_messages.lock().expect("chat messages Mutex poisoned");
+        let guard = self
+            .chat_messages
+            .lock()
+            .expect("chat messages Mutex poisoned");
         guard.iter().cloned().collect()
     }
 }

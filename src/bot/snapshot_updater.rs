@@ -72,10 +72,7 @@ impl SnapshotUpdater {
     /// Returns `true` if enough time has passed since the last update.
     /// Resets the timer on success so the caller does not need to.
     fn check_and_update_timer(&self) -> bool {
-        let mut last = self
-            .last_update
-            .lock()
-            .expect("last_update mutex poisoned");
+        let mut last = self.last_update.lock().expect("last_update mutex poisoned");
         if last.elapsed() >= Duration::from_millis(self.interval_ms) {
             *last = Instant::now();
             true
@@ -141,9 +138,7 @@ async fn build_snapshot_inner(
 
     // ── Drain dirty sets ─────────────────────────────────────
     let (dirty_blocks, dirty_chunks) = {
-        let mut tracker = dirty_tracker
-            .lock()
-            .expect("dirty_tracker mutex poisoned");
+        let mut tracker = dirty_tracker.lock().expect("dirty_tracker mutex poisoned");
         tracker.take_dirty_sets()
     };
 
@@ -186,24 +181,23 @@ async fn build_snapshot_inner(
     }
 
     // ── Chunk summary from partial world ─────────────────────
-    let chunk_summary = if let Some(world_holder) =
-        bot.get_component::<azalea::local_player::WorldHolder>()
-    {
-        let partial_world = world_holder.partial.read();
-        let storage = &partial_world.chunks;
-        storage
-            .chunks()
-            .enumerate()
-            .filter_map(|(i, chunk)| {
-                chunk.as_ref().map(|_| {
-                    let pos = storage.chunk_pos_from_index(i);
-                    (pos.x, pos.z)
+    let chunk_summary =
+        if let Some(world_holder) = bot.get_component::<azalea::local_player::WorldHolder>() {
+            let partial_world = world_holder.partial.read();
+            let storage = &partial_world.chunks;
+            storage
+                .chunks()
+                .enumerate()
+                .filter_map(|(i, chunk)| {
+                    chunk.as_ref().map(|_| {
+                        let pos = storage.chunk_pos_from_index(i);
+                        (pos.x, pos.z)
+                    })
                 })
-            })
-            .collect()
-    } else {
-        old_snapshot.chunk_summary.clone()
-    };
+                .collect()
+        } else {
+            old_snapshot.chunk_summary.clone()
+        };
 
     builder = builder.with_chunk_summary(chunk_summary);
 
@@ -215,6 +209,7 @@ async fn build_snapshot_inner(
 // ═══════════════════════════════════════════════════════════════
 
 fn block_state_to_name(block_state: azalea::block::BlockState) -> String {
+    #[allow(deprecated)]
     let block_kind = azalea::registry::Block::from(block_state);
     let debug_name = format!("{block_kind:?}");
     to_snake_case(&debug_name)

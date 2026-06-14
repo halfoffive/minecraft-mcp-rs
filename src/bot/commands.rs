@@ -3,6 +3,12 @@
 //! [`CommandExecutor`] receives [`BotCommand`]s from the MCP server via a
 //! [`BotCommandReceiver`], dispatches them to the azalea [`Client`] API, and
 //! sends a [`BotResult`] back through the oneshot channel.
+//!
+//! > **Note:** Most types and functions in this module are scaffolding for
+//! > the planned command-executor architecture and are not yet wired into
+//! > the main event loop.  They are retained for the integration plan.
+
+#![allow(dead_code)]
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,7 +72,6 @@ pub(crate) trait BotActions {
 
     /// Open a container at the given position.
     fn open_container(&self, pos: &BlockPos);
-
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -623,9 +628,7 @@ impl<B: BotActions> CommandExecutor<B> {
         Ok(BotResult {
             success: true,
             message: format!("{} chunks loaded", snapshot.chunk_summary.len()),
-            data: Some(
-                serde_json::to_value(&snapshot.chunk_summary).unwrap_or_default(),
-            ),
+            data: Some(serde_json::to_value(&snapshot.chunk_summary).unwrap_or_default()),
         })
     }
 }
@@ -637,11 +640,11 @@ impl<B: BotActions> CommandExecutor<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channel::{create_command_channel, BotCommandSender};
+    use crate::channel::{BotCommandSender, create_command_channel};
     use crate::config::AppConfig;
     use crate::types::{BlockEntry, EntityEntry, SelfPlayer, ToolType};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     // ═══════════════════════════════════════════════════════════════
     // MockBotClient
@@ -751,7 +754,11 @@ mod tests {
         }
 
         fn chat(&self, message: &str) {
-            self.log.chat_calls.lock().unwrap().push(message.to_string());
+            self.log
+                .chat_calls
+                .lock()
+                .unwrap()
+                .push(message.to_string());
         }
 
         fn attack_entity(&self, entity_id: u32) -> Result<(), BotError> {
@@ -903,10 +910,7 @@ mod tests {
         let result = send_and_await(&sender, BotCommand::MoveTo(pos)).await;
 
         assert!(result.is_err(), "expected error, got: {:?}", result);
-        assert!(matches!(
-            result,
-            Err(BotError::PathfindingFailed { .. })
-        ));
+        assert!(matches!(result, Err(BotError::PathfindingFailed { .. })));
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -1144,8 +1148,7 @@ mod tests {
         let (executor, sender, _state, log) = make_executor();
         let handle = spawn_executor(executor);
 
-        let result =
-            send_and_await(&sender, BotCommand::SetGameMode(GameMode::Creative)).await;
+        let result = send_and_await(&sender, BotCommand::SetGameMode(GameMode::Creative)).await;
         assert!(result.is_ok());
 
         drop(sender);
@@ -1237,8 +1240,7 @@ mod tests {
         let handle = spawn_executor(executor);
 
         let pos = BlockPos::new(10, 64, 20);
-        let result =
-            send_and_await(&sender, BotCommand::PlaceBlock(pos, "stone".into())).await;
+        let result = send_and_await(&sender, BotCommand::PlaceBlock(pos, "stone".into())).await;
         assert!(result.is_ok());
 
         drop(sender);
@@ -1304,8 +1306,7 @@ mod tests {
         let (executor, sender, _st, _log) = make_executor();
         let handle = spawn_executor(executor);
 
-        let result =
-            send_and_await(&sender, BotCommand::TakeFromContainer(3, 10)).await;
+        let result = send_and_await(&sender, BotCommand::TakeFromContainer(3, 10)).await;
         assert!(result.is_ok());
 
         drop(sender);
@@ -1317,8 +1318,7 @@ mod tests {
         let (executor, sender, _state, _log) = make_executor();
         let handle = spawn_executor(executor);
 
-        let result =
-            send_and_await(&sender, BotCommand::PutIntoContainer(5, 8)).await;
+        let result = send_and_await(&sender, BotCommand::PutIntoContainer(5, 8)).await;
         assert!(result.is_ok());
 
         drop(sender);
@@ -1334,8 +1334,7 @@ mod tests {
         let (executor, sender, _state, _log) = make_executor();
         let handle = spawn_executor(executor);
 
-        let result =
-            send_and_await(&sender, BotCommand::EquipTool(ToolType::Pickaxe)).await;
+        let result = send_and_await(&sender, BotCommand::EquipTool(ToolType::Pickaxe)).await;
         assert!(result.is_ok());
 
         drop(sender);
@@ -1562,12 +1561,8 @@ mod tests {
         let s1 = sender.clone();
         let s2 = sender.clone();
 
-        let h1 = tokio::spawn(async move {
-            s1.send_command(BotCommand::Jump).await
-        });
-        let h2 = tokio::spawn(async move {
-            s2.send_command(BotCommand::UseItem).await
-        });
+        let h1 = tokio::spawn(async move { s1.send_command(BotCommand::Jump).await });
+        let h2 = tokio::spawn(async move { s2.send_command(BotCommand::UseItem).await });
 
         let r1 = h1.await.unwrap();
         let r2 = h2.await.unwrap();

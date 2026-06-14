@@ -3,7 +3,7 @@
 An MCP (Model Context Protocol) server backed by an actual Minecraft bot via the azalea library. Exposes bot capabilities (movement, block manipulation, inventory, combat, chat) as MCP tools consumable by LLM clients. Ships with an egui desktop UI for status and settings.
 
 - **Stack:** Rust nightly, azalea (Minecraft bot), rmcp (MCP server), egui/eframe (desktop UI), tokio (async runtime), bevy_ecs (azalea's ECS), proptest (property testing)
-- **Entry point:** `src/main.rs` — spawns MCP server on background thread + egui on main thread
+- **Entry point:** `src/main.rs` — creates shared state + channel, spawns MCP server on background thread + egui on main thread. Bot connection is spawned on a dedicated OS thread from the UI (azalea's `ClientBuilder::start` internally creates a `LocalSet` which is `!Send`, preventing `tokio::spawn` on a multi-threaded runtime).
 - **Library crate root:** `src/lib.rs`
 
 ## Commands
@@ -76,3 +76,5 @@ tests/
 
 <!-- Quick-add space for future notes -->
 - **规范:** 函数式编程，大量注释。写完后使用`cargo fmt`格式化；及时编写`cargo test`自动化测试，`cargo test`全过才能交付，编写遵循TDD；需要运行`cargo clippy`检验，全过才能交付；最后更新`README.md`、`CHANGELOG.md`和`AGENTS.md`，然后提交并推送git。
+- **Settings panel:** Uses `EditConfig` local edit buffers (in `app.rs`); fields rendered via `TextEdit::singleline`/`DragValue`. Edits applied to `SharedState` only on Connect.
+- **Bot connection:** Spawned on dedicated OS thread (not `tokio::spawn`) because `ConnectionManager::connect()` contains `LocalSet` which is `!Send`.

@@ -96,7 +96,7 @@ impl MineBlockOperation {
             (_, OperationEvent::Failed(err)) => OperationState::Failed(err.clone()),
 
             // Terminal states are sticky
-            (s, _) if matches!(s, OperationState::Completed | OperationState::Failed(_)) => state,
+            (OperationState::Completed | OperationState::Failed(_), _) => state,
 
             // Invalid transition — stay in current state
             _ => state,
@@ -129,10 +129,7 @@ pub struct PlaceBlockOperation {
 
 impl PlaceBlockOperation {
     pub fn new(target: BlockPos, block_type: String) -> Self {
-        Self {
-            target,
-            block_type,
-        }
+        Self { target, block_type }
     }
 
     pub fn advance(&self, state: OperationState, event: OperationEvent) -> OperationState {
@@ -153,7 +150,7 @@ impl PlaceBlockOperation {
             (_, OperationEvent::Failed(err)) => OperationState::Failed(err.clone()),
 
             // Terminal states are sticky
-            (s, _) if matches!(s, OperationState::Completed | OperationState::Failed(_)) => state,
+            (OperationState::Completed | OperationState::Failed(_), _) => state,
 
             // Invalid transition — stay in current state
             _ => state,
@@ -203,7 +200,7 @@ impl OpenContainerOperation {
             (_, OperationEvent::Failed(err)) => OperationState::Failed(err.clone()),
 
             // Terminal states are sticky
-            (s, _) if matches!(s, OperationState::Completed | OperationState::Failed(_)) => state,
+            (OperationState::Completed | OperationState::Failed(_), _) => state,
 
             // Invalid transition — stay in current state
             _ => state,
@@ -248,7 +245,7 @@ impl EquipToolOperation {
             (_, OperationEvent::Failed(err)) => OperationState::Failed(err.clone()),
 
             // Terminal states are sticky
-            (s, _) if matches!(s, OperationState::Completed | OperationState::Failed(_)) => state,
+            (OperationState::Completed | OperationState::Failed(_), _) => state,
 
             // Invalid transition — stay in current state
             _ => state,
@@ -285,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_operation_state_variants() {
-        let states = vec![
+        let states = [
             OperationState::Idle,
             OperationState::MovingToTarget,
             OperationState::EquippingTool,
@@ -316,7 +313,7 @@ mod tests {
 
     #[test]
     fn test_operation_event_variants() {
-        let events = vec![
+        let events = [
             OperationEvent::Start,
             OperationEvent::Arrived,
             OperationEvent::ToolEquipped,
@@ -393,8 +390,10 @@ mod tests {
     fn test_mine_block_fails_from_moving() {
         let op = MineBlockOperation::new(test_pos(), ToolType::Pickaxe);
         let err = test_err();
-        let state =
-            op.advance(OperationState::MovingToTarget, OperationEvent::Failed(err.clone()));
+        let state = op.advance(
+            OperationState::MovingToTarget,
+            OperationEvent::Failed(err.clone()),
+        );
         assert_eq!(state, OperationState::Failed(err));
     }
 
@@ -402,8 +401,10 @@ mod tests {
     fn test_mine_block_fails_from_equipping() {
         let op = MineBlockOperation::new(test_pos(), ToolType::Pickaxe);
         let err = test_err();
-        let state =
-            op.advance(OperationState::EquippingTool, OperationEvent::Failed(err.clone()));
+        let state = op.advance(
+            OperationState::EquippingTool,
+            OperationEvent::Failed(err.clone()),
+        );
         assert_eq!(state, OperationState::Failed(err));
     }
 
@@ -411,8 +412,10 @@ mod tests {
     fn test_mine_block_fails_from_executing() {
         let op = MineBlockOperation::new(test_pos(), ToolType::Pickaxe);
         let err = test_err();
-        let state =
-            op.advance(OperationState::ExecutingAction, OperationEvent::Failed(err.clone()));
+        let state = op.advance(
+            OperationState::ExecutingAction,
+            OperationEvent::Failed(err.clone()),
+        );
         assert_eq!(state, OperationState::Failed(err));
     }
 
@@ -420,8 +423,10 @@ mod tests {
     fn test_mine_block_fails_from_waiting() {
         let op = MineBlockOperation::new(test_pos(), ToolType::Pickaxe);
         let err = test_err();
-        let state =
-            op.advance(OperationState::WaitingForResult, OperationEvent::Failed(err.clone()));
+        let state = op.advance(
+            OperationState::WaitingForResult,
+            OperationEvent::Failed(err.clone()),
+        );
         assert_eq!(state, OperationState::Failed(err));
     }
 
@@ -499,8 +504,10 @@ mod tests {
     fn test_place_block_fails_from_equipping() {
         let op = PlaceBlockOperation::new(test_pos(), "stone".into());
         let err = test_err();
-        let state =
-            op.advance(OperationState::EquippingTool, OperationEvent::Failed(err.clone()));
+        let state = op.advance(
+            OperationState::EquippingTool,
+            OperationEvent::Failed(err.clone()),
+        );
         assert_eq!(state, OperationState::Failed(err));
     }
 
@@ -508,8 +515,10 @@ mod tests {
     fn test_place_block_fails_from_moving() {
         let op = PlaceBlockOperation::new(test_pos(), "stone".into());
         let err = test_err();
-        let state =
-            op.advance(OperationState::MovingToTarget, OperationEvent::Failed(err.clone()));
+        let state = op.advance(
+            OperationState::MovingToTarget,
+            OperationEvent::Failed(err.clone()),
+        );
         assert_eq!(state, OperationState::Failed(err));
     }
 
@@ -517,8 +526,10 @@ mod tests {
     fn test_place_block_fails_from_executing() {
         let op = PlaceBlockOperation::new(test_pos(), "stone".into());
         let err = test_err();
-        let state =
-            op.advance(OperationState::ExecutingAction, OperationEvent::Failed(err.clone()));
+        let state = op.advance(
+            OperationState::ExecutingAction,
+            OperationEvent::Failed(err.clone()),
+        );
         assert_eq!(state, OperationState::Failed(err));
     }
 
@@ -592,8 +603,10 @@ mod tests {
     fn test_open_container_fails_from_moving() {
         let op = OpenContainerOperation::new(test_pos());
         let err = test_err();
-        let state =
-            op.advance(OperationState::MovingToTarget, OperationEvent::Failed(err.clone()));
+        let state = op.advance(
+            OperationState::MovingToTarget,
+            OperationEvent::Failed(err.clone()),
+        );
         assert_eq!(state, OperationState::Failed(err));
     }
 
@@ -601,8 +614,10 @@ mod tests {
     fn test_open_container_fails_from_executing() {
         let op = OpenContainerOperation::new(test_pos());
         let err = test_err();
-        let state =
-            op.advance(OperationState::ExecutingAction, OperationEvent::Failed(err.clone()));
+        let state = op.advance(
+            OperationState::ExecutingAction,
+            OperationEvent::Failed(err.clone()),
+        );
         assert_eq!(state, OperationState::Failed(err));
     }
 
@@ -669,8 +684,10 @@ mod tests {
     fn test_equip_tool_fails_from_equipping() {
         let op = EquipToolOperation::new(ToolType::Sword);
         let err = test_err();
-        let state =
-            op.advance(OperationState::EquippingTool, OperationEvent::Failed(err.clone()));
+        let state = op.advance(
+            OperationState::EquippingTool,
+            OperationEvent::Failed(err.clone()),
+        );
         assert_eq!(state, OperationState::Failed(err));
     }
 

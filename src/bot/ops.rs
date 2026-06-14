@@ -10,6 +10,7 @@ use tokio::time::sleep;
 use tracing::{debug, trace, warn};
 
 use crate::block_data::ItemStack;
+#[allow(unused_imports)]
 use crate::block_data::best_tool_for_block;
 use crate::channel::BotCommandSender;
 use crate::compound_ops::{
@@ -20,7 +21,7 @@ use crate::error::BotError;
 use crate::mining_calc::calculate_mine_time;
 use crate::state::SharedState;
 use crate::tool_select::{find_tool_in_inventory, select_tool_for_block};
-use crate::types::{BlockEntry, BlockPos, BotCommand, BotResult, GameMode, MaterialTier, SelfPlayer, ToolType, WorldSnapshot};
+use crate::types::{BlockPos, BotCommand, BotResult, MaterialTier, ToolType};
 
 // ---------------------------------------------------------------------------
 // Type-conversion helpers
@@ -197,10 +198,7 @@ impl CompoundOpExecutor {
             match op.current_action(&state) {
                 Some(BotCommand::MoveTo(target)) => {
                     trace!(?target, "sending MoveTo");
-                    let result = self
-                        .sender
-                        .send_command(BotCommand::MoveTo(target))
-                        .await?;
+                    let result = self.sender.send_command(BotCommand::MoveTo(target)).await?;
                     if !result.success {
                         state = op.advance(
                             state,
@@ -230,10 +228,7 @@ impl CompoundOpExecutor {
                 }
                 Some(BotCommand::BreakBlock(bp)) => {
                     trace!(?bp, "sending BreakBlock");
-                    let result = self
-                        .sender
-                        .send_command(BotCommand::BreakBlock(bp))
-                        .await?;
+                    let result = self.sender.send_command(BotCommand::BreakBlock(bp)).await?;
                     if !result.success {
                         state = op.advance(
                             state,
@@ -319,10 +314,9 @@ impl CompoundOpExecutor {
 
         // Step 1: Find item in inventory
         let inventory = self.query_inventory().await?;
-        let has_item = inventory.iter().any(|slot| {
-            slot.as_ref()
-                .map_or(false, |item| item.item_id == block_type)
-        });
+        let has_item = inventory
+            .iter()
+            .any(|slot| slot.as_ref().is_some_and(|item| item.item_id == block_type));
 
         if !has_item {
             return Err(BotError::ToolNotFound {
@@ -334,10 +328,7 @@ impl CompoundOpExecutor {
         // Step 2: Select in hotbar
         let slot = inventory
             .iter()
-            .position(|s| {
-                s.as_ref()
-                    .map_or(false, |item| item.item_id == block_type)
-            })
+            .position(|s| s.as_ref().is_some_and(|item| item.item_id == block_type))
             .map(|i| i as u8);
 
         if let Some(s) = slot {
@@ -358,10 +349,7 @@ impl CompoundOpExecutor {
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
             match op.current_action(&state) {
                 Some(BotCommand::MoveTo(target)) => {
-                    let result = self
-                        .sender
-                        .send_command(BotCommand::MoveTo(target))
-                        .await?;
+                    let result = self.sender.send_command(BotCommand::MoveTo(target)).await?;
                     if !result.success {
                         state = op.advance(
                             state,
@@ -399,9 +387,7 @@ impl CompoundOpExecutor {
                     } else {
                         state = op.advance(
                             state,
-                            OperationEvent::Failed(BotError::Internal(
-                                "block not placed".into(),
-                            )),
+                            OperationEvent::Failed(BotError::Internal("block not placed".into())),
                         );
                     }
                 }
@@ -449,10 +435,7 @@ impl CompoundOpExecutor {
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
             match op.current_action(&state) {
                 Some(BotCommand::MoveTo(target)) => {
-                    let result = self
-                        .sender
-                        .send_command(BotCommand::MoveTo(target))
-                        .await?;
+                    let result = self.sender.send_command(BotCommand::MoveTo(target)).await?;
                     if !result.success {
                         state = op.advance(
                             state,
@@ -471,10 +454,8 @@ impl CompoundOpExecutor {
                         .send_command(BotCommand::OpenContainer(target))
                         .await?;
                     if !result.success {
-                        state = op.advance(
-                            state,
-                            OperationEvent::Failed(BotError::ContainerTimeout),
-                        );
+                        state =
+                            op.advance(state, OperationEvent::Failed(BotError::ContainerTimeout));
                         continue;
                     }
                     state = op.advance(state, OperationEvent::ContainerOpened);
@@ -511,10 +492,7 @@ impl CompoundOpExecutor {
     /// 2. Move to hotbar if needed (by switching to the slot).
     /// 3. Drive the `EquipToolOperation` state machine.
     /// 4. Return success.
-    pub async fn execute_equip_tool(
-        &self,
-        tool_type: ToolType,
-    ) -> Result<BotResult, BotError> {
+    pub async fn execute_equip_tool(&self, tool_type: ToolType) -> Result<BotResult, BotError> {
         trace!(?tool_type, "execute_equip_tool start");
 
         if !self.state.is_online() {
@@ -589,6 +567,7 @@ mod tests {
     use super::*;
     use crate::channel::create_command_channel;
     use crate::config::AppConfig;
+    use crate::types::{BlockEntry, GameMode, SelfPlayer, WorldSnapshot};
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -726,7 +705,11 @@ mod tests {
     fn setup(
         inventory: Vec<Option<ItemStack>>,
         snapshot: WorldSnapshot,
-    ) -> (CompoundOpExecutor, tokio::task::JoinHandle<()>, Arc<SharedState>) {
+    ) -> (
+        CompoundOpExecutor,
+        tokio::task::JoinHandle<()>,
+        Arc<SharedState>,
+    ) {
         let (sender, receiver) = create_command_channel(10);
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.update_snapshot(snapshot.clone());
@@ -828,12 +811,10 @@ mod tests {
     async fn test_mine_block_mining_interrupted() {
         let pos = BlockPos::new(10, 64, 20);
         let snapshot = make_snapshot_with_block(pos, "obsidian");
-        let inventory = vec![
-            Some(ItemStack {
-                item_id: "diamond_pickaxe".into(),
-                count: 1,
-            }),
-        ];
+        let inventory = vec![Some(ItemStack {
+            item_id: "diamond_pickaxe".into(),
+            count: 1,
+        })];
         let (sender, mut receiver) = create_command_channel(10);
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.update_snapshot(snapshot.clone());
@@ -951,7 +932,12 @@ mod tests {
 
         // Verify the block was added to snapshot
         let final_snapshot = state.read_snapshot();
-        assert!(final_snapshot.blocks.iter().any(|b| b.position == pos && b.block_type == "stone"));
+        assert!(
+            final_snapshot
+                .blocks
+                .iter()
+                .any(|b| b.position == pos && b.block_type == "stone")
+        );
     }
 
     // ── execute_open_container: offline ───────────────────────────────────

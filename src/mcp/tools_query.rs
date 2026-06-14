@@ -28,9 +28,8 @@ pub fn get_self_info(state: &Arc<SharedState>) -> String {
         return OFFLINE_ERROR.to_string();
     }
     let snapshot = state.read_snapshot();
-    serde_json::to_string(&snapshot.self_player).unwrap_or_else(|e| {
-        json!({"error": format!("Serialization error: {e}")}).to_string()
-    })
+    serde_json::to_string(&snapshot.self_player)
+        .unwrap_or_else(|e| json!({"error": format!("Serialization error: {e}")}).to_string())
 }
 
 /// Get the bot's currently held item slot.
@@ -77,16 +76,13 @@ pub fn get_nearby_blocks(
                 && (b.position.z - center.z).abs() <= r
         })
         .filter(|b| match &filter_type {
-            Some(ft) if !ft.is_empty() => {
-                b.block_type.to_lowercase().contains(&ft.to_lowercase())
-            }
+            Some(ft) if !ft.is_empty() => b.block_type.to_lowercase().contains(&ft.to_lowercase()),
             _ => true,
         })
         .collect();
 
-    serde_json::to_string(&blocks).unwrap_or_else(|e| {
-        json!({"error": format!("Serialization error: {e}")}).to_string()
-    })
+    serde_json::to_string(&blocks)
+        .unwrap_or_else(|e| json!({"error": format!("Serialization error: {e}")}).to_string())
 }
 
 /// Get entities near the bot within the given Chebyshev (square) radius.
@@ -108,9 +104,8 @@ pub fn get_nearby_entities(state: &Arc<SharedState>, radius: u32) -> String {
         })
         .collect();
 
-    serde_json::to_string(&entities).unwrap_or_else(|e| {
-        json!({"error": format!("Serialization error: {e}")}).to_string()
-    })
+    serde_json::to_string(&entities)
+        .unwrap_or_else(|e| json!({"error": format!("Serialization error: {e}")}).to_string())
 }
 
 /// Get a summary of chunks currently loaded around the bot.
@@ -121,9 +116,8 @@ pub fn get_chunk_summary(state: &Arc<SharedState>) -> String {
         return OFFLINE_ERROR.to_string();
     }
     let snapshot = state.read_snapshot();
-    serde_json::to_string(&snapshot.chunk_summary).unwrap_or_else(|e| {
-        json!({"error": format!("Serialization error: {e}")}).to_string()
-    })
+    serde_json::to_string(&snapshot.chunk_summary)
+        .unwrap_or_else(|e| json!({"error": format!("Serialization error: {e}")}).to_string())
 }
 
 /// Check whether the bot is currently connected to a Minecraft server.

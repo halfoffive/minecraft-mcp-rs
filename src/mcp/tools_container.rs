@@ -14,7 +14,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
 use crate::command_validate::validate_block_pos;
@@ -33,9 +33,7 @@ fn schema_from_json(v: Value) -> rmcp::schemars::Schema {
 /// Ensure a container is currently open, returning an error JSON string otherwise.
 fn check_container_open(state: &SharedState) -> Result<(), String> {
     if !state.has_container_open() {
-        return Err(
-            r#"{"success":false,"error":"No container is currently open"}"#.to_string()
-        );
+        return Err(r#"{"success":false,"error":"No container is currently open"}"#.to_string());
     }
     Ok(())
 }
@@ -44,7 +42,8 @@ fn check_container_open(state: &SharedState) -> Result<(), String> {
 fn check_container_not_open(state: &SharedState) -> Result<(), String> {
     if state.has_container_open() {
         return Err(
-            r#"{"success":false,"error":"A container is already open — close it first"}"#.to_string()
+            r#"{"success":false,"error":"A container is already open — close it first"}"#
+                .to_string(),
         );
     }
     Ok(())
@@ -65,9 +64,7 @@ impl rmcp::schemars::JsonSchema for OpenContainerInput {
         Cow::Borrowed("OpenContainerInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -108,8 +105,7 @@ pub async fn handle_open_container(
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::OpenContainer(BlockPos::new(input.x, input.y, input.z));
@@ -135,9 +131,7 @@ impl rmcp::schemars::JsonSchema for TakeFromContainerInput {
         Cow::Borrowed("TakeFromContainerInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -173,14 +167,12 @@ pub async fn handle_take_from_container(
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let count = input.count.unwrap_or(1);
     if count == 0 {
-        return r#"{"success":false,"error":"Count must be greater than 0"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Count must be greater than 0"}"#.to_string();
     }
 
     let cmd = BotCommand::TakeFromContainer(input.slot, count);
@@ -206,9 +198,7 @@ impl rmcp::schemars::JsonSchema for PutIntoContainerInput {
         Cow::Borrowed("PutIntoContainerInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -244,14 +234,12 @@ pub async fn handle_put_into_container(
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let count = input.count.unwrap_or(1);
     if count == 0 {
-        return r#"{"success":false,"error":"Count must be greater than 0"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Count must be greater than 0"}"#.to_string();
     }
 
     let cmd = BotCommand::PutIntoContainer(input.slot, count);
@@ -274,9 +262,7 @@ impl rmcp::schemars::JsonSchema for CloseContainerInput {
         Cow::Borrowed("CloseContainerInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {},
@@ -299,8 +285,7 @@ pub async fn handle_close_container(
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::CloseContainer;
@@ -335,6 +320,7 @@ mod tests {
     /// Since we cannot construct a real `ContainerHandle` in tests,
     /// we use `set_container_handle` to set the internal Option to `Some`.
     /// The actual handle type doesn't matter for `has_container_open()` checks.
+    #[allow(dead_code)]
     fn simulate_container_open(_state: &SharedState) {
         // ContainerHandle can't be constructed in tests — we test the
         // has_container_open() path via the existing state API.
@@ -356,7 +342,11 @@ mod tests {
     async fn test_open_container_invalid_coords() {
         let (state, sender) = setup();
         make_online(&state);
-        let input = OpenContainerInput { x: 0, y: -100, z: 0 };
+        let input = OpenContainerInput {
+            x: 0,
+            y: -100,
+            z: 0,
+        };
         let result = handle_open_container(&state, &sender, input).await;
         assert!(result.contains("out of bounds") || result.contains("out of range"));
     }
@@ -367,7 +357,10 @@ mod tests {
     async fn test_take_from_container_offline() {
         let (state, sender) = setup();
         // No container open — should get "No container is currently open"
-        let input = TakeFromContainerInput { slot: 0, count: Some(1) };
+        let input = TakeFromContainerInput {
+            slot: 0,
+            count: Some(1),
+        };
         let result = handle_take_from_container(&state, &sender, input).await;
         assert!(result.contains("No container is currently open"));
     }
@@ -377,7 +370,10 @@ mod tests {
         let (state, sender) = setup();
         // Even with no container open, we need a container to be "open"
         // to reach the count check. But check_container_open runs first.
-        let input = TakeFromContainerInput { slot: 0, count: Some(0) };
+        let input = TakeFromContainerInput {
+            slot: 0,
+            count: Some(0),
+        };
         let result = handle_take_from_container(&state, &sender, input).await;
         assert!(result.contains("No container is currently open"));
     }
@@ -386,7 +382,10 @@ mod tests {
     async fn test_take_from_container_default_count() {
         let (state, sender) = setup();
         // No container open — error expected
-        let input = TakeFromContainerInput { slot: 5, count: None };
+        let input = TakeFromContainerInput {
+            slot: 5,
+            count: None,
+        };
         let result = handle_take_from_container(&state, &sender, input).await;
         assert!(result.contains("No container is currently open"));
     }
@@ -396,7 +395,10 @@ mod tests {
     #[tokio::test]
     async fn test_put_into_container_offline() {
         let (state, sender) = setup();
-        let input = PutIntoContainerInput { slot: 0, count: Some(1) };
+        let input = PutIntoContainerInput {
+            slot: 0,
+            count: Some(1),
+        };
         let result = handle_put_into_container(&state, &sender, input).await;
         assert!(result.contains("No container is currently open"));
     }
@@ -421,6 +423,9 @@ mod tests {
 
     #[test]
     fn test_take_from_container_schema_name() {
-        assert_eq!(TakeFromContainerInput::schema_name(), "TakeFromContainerInput");
+        assert_eq!(
+            TakeFromContainerInput::schema_name(),
+            "TakeFromContainerInput"
+        );
     }
 }

@@ -4,8 +4,8 @@
 //! for the world snapshot, and uses short-lived read locks for config and stats.
 
 use egui::Ui;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use crate::state::SharedState;
 

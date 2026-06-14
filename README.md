@@ -84,7 +84,9 @@ cargo test --test proptest     # property-based tests
 ## Configuration
 
 All settings have sensible defaults and can be changed at runtime through the
-egui settings panel:
+egui settings panel (fully editable — text inputs for strings, DragValue
+sliders for numeric fields). After editing, click **Connect** to apply the
+settings and spawn the bot connection on a dedicated background thread.
 
 | Field | Default | Description |
 |-------|---------|-------------|
@@ -127,7 +129,7 @@ egui settings panel:
 └──────────────────────────────────────────────────┘
 ```
 
-The bot runs on a background thread with its own tokio runtime. The UI runs on
+The bot runs on a background OS thread with its own tokio runtime. The UI runs on
 the main thread. They communicate through `Arc<SharedState>` (lock-free reads)
 and a `BotCommand` channel (tokio mpsc + oneshot for response).
 

@@ -126,6 +126,7 @@ impl Default for RunStats {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
     use super::*;
     use std::sync::atomic::Ordering;
 

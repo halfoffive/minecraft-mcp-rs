@@ -31,17 +31,22 @@ impl rmcp::schemars::JsonSchema for SendChatInput {
     }
 
     fn json_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        rmcp::schemars::Schema::from(json!({
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "The message to send to the server chat"
-                }
-            },
-            "required": ["message"],
-            "additionalProperties": false
-        }).as_object().unwrap().clone())
+        rmcp::schemars::Schema::from(
+            json!({
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "The message to send to the server chat"
+                    }
+                },
+                "required": ["message"],
+                "additionalProperties": false
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
     }
 }
 
@@ -58,17 +63,22 @@ impl rmcp::schemars::JsonSchema for ExecuteCommandInput {
     }
 
     fn json_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        rmcp::schemars::Schema::from(json!({
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The command to execute (with or without leading /)"
-                }
-            },
-            "required": ["command"],
-            "additionalProperties": false
-        }).as_object().unwrap().clone())
+        rmcp::schemars::Schema::from(
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The command to execute (with or without leading /)"
+                    }
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
     }
 }
 
@@ -182,7 +192,10 @@ mod tests {
     /// Returns `(sender, receiver)` with a small buffer. The receiver side
     /// immediately responds with a successful `BotResult` carrying the
     /// command's debug string as the message.
-    fn make_echo_channel() -> (BotCommandSender, tokio::sync::mpsc::UnboundedReceiver<String>) {
+    fn make_echo_channel() -> (
+        BotCommandSender,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (sender, mut receiver) = create_command_channel(10);
 
@@ -192,13 +205,11 @@ mod tests {
                 let cmd_debug = format!("{:?}", wrapped.command);
                 let msg = format!("executed: {cmd_debug}");
                 let _ = tx.send(cmd_debug.clone());
-                let _ = wrapped
-                    .respond_to
-                    .send(Ok(BotResult {
-                        success: true,
-                        message: msg,
-                        data: None,
-                    }));
+                let _ = wrapped.respond_to.send(Ok(BotResult {
+                    success: true,
+                    message: msg,
+                    data: None,
+                }));
             }
         });
 

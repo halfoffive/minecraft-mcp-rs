@@ -13,7 +13,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
 use crate::state::SharedState;
@@ -39,9 +39,7 @@ impl rmcp::schemars::JsonSchema for SwitchHotbarSlotInput {
         Cow::Borrowed("SwitchHotbarSlotInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -71,8 +69,7 @@ pub async fn handle_switch_hotbar_slot(
         );
     }
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::SwitchHotbarSlot(input.slot);
@@ -98,9 +95,7 @@ impl rmcp::schemars::JsonSchema for DropItemInput {
         Cow::Borrowed("DropItemInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -137,12 +132,10 @@ pub async fn handle_drop_item(
     }
     let count = input.count.unwrap_or(1);
     if count == 0 {
-        return r#"{"success":false,"error":"Count must be greater than 0"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Count must be greater than 0"}"#.to_string();
     }
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::DropItem(input.slot, count);
@@ -167,9 +160,7 @@ impl rmcp::schemars::JsonSchema for UseItemInput {
         Cow::Borrowed("UseItemInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -191,16 +182,13 @@ pub async fn handle_use_item(
     sender: &BotCommandSender,
     input: UseItemInput,
 ) -> String {
-    if let Some(slot) = input.item_slot {
-        if slot > 8 {
-            return format!(
-                r#"{{"success":false,"error":"item_slot must be 0-8, got {slot}"}}"#
-            );
-        }
+    if let Some(slot) = input.item_slot
+        && slot > 8
+    {
+        return format!(r#"{{"success":false,"error":"item_slot must be 0-8, got {slot}"}}"#);
     }
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::UseItem;
@@ -226,9 +214,7 @@ impl rmcp::schemars::JsonSchema for EquipToolInput {
         Cow::Borrowed("EquipToolInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -278,22 +264,17 @@ pub async fn handle_equip_tool(
     };
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::EquipTool(tool);
     match sender.send_command(cmd).await {
         Ok(result) => {
-            let mut json =
-                serde_json::to_value(&result).unwrap_or_default();
-            if let Some(mat) = input.material_preference {
-                if let Some(obj) = json.as_object_mut() {
-                    obj.insert(
-                        "material_preference".to_string(),
-                        Value::String(mat),
-                    );
-                }
+            let mut json = serde_json::to_value(&result).unwrap_or_default();
+            if let Some(mat) = input.material_preference
+                && let Some(obj) = json.as_object_mut()
+            {
+                obj.insert("material_preference".to_string(), Value::String(mat));
             }
             serde_json::to_string(&json).unwrap_or_else(|e| {
                 format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
@@ -325,13 +306,11 @@ mod tests {
         tokio::spawn(async move {
             while let Some(wrapped) = receiver.recv().await {
                 let msg = format!("executed: {:?}", wrapped.command);
-                let _ = wrapped
-                    .respond_to
-                    .send(Ok(crate::types::BotResult {
-                        success: true,
-                        message: msg,
-                        data: None,
-                    }));
+                let _ = wrapped.respond_to.send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: msg,
+                    data: None,
+                }));
             }
         });
 
@@ -346,8 +325,7 @@ mod tests {
     async fn test_switch_hotbar_slot_offline() {
         let (state, sender) = setup();
         let input = SwitchHotbarSlotInput { slot: 0 };
-        let result =
-            handle_switch_hotbar_slot(&state, &sender, input).await;
+        let result = handle_switch_hotbar_slot(&state, &sender, input).await;
         assert!(result.contains("not connected"));
     }
 
@@ -356,8 +334,7 @@ mod tests {
         let (state, sender) = setup();
         make_online(&state);
         let input = SwitchHotbarSlotInput { slot: 9 };
-        let result =
-            handle_switch_hotbar_slot(&state, &sender, input).await;
+        let result = handle_switch_hotbar_slot(&state, &sender, input).await;
         assert!(result.contains("must be 0-8"));
     }
 
@@ -366,12 +343,8 @@ mod tests {
         let (state, sender) = setup();
         make_online(&state);
         for slot in 0..=8u8 {
-            let result = handle_switch_hotbar_slot(
-                &state,
-                &sender,
-                SwitchHotbarSlotInput { slot },
-            )
-            .await;
+            let result =
+                handle_switch_hotbar_slot(&state, &sender, SwitchHotbarSlotInput { slot }).await;
             let _: Value = serde_json::from_str(&result).expect("valid JSON");
         }
     }
@@ -458,8 +431,7 @@ mod tests {
             tool_type: "pickaxe".into(),
             material_preference: None,
         };
-        let result =
-            handle_equip_tool(&state, &sender, input).await;
+        let result = handle_equip_tool(&state, &sender, input).await;
         assert!(result.contains("not connected"));
     }
 
@@ -471,8 +443,7 @@ mod tests {
             tool_type: "hoe".into(),
             material_preference: None,
         };
-        let result =
-            handle_equip_tool(&state, &sender, input).await;
+        let result = handle_equip_tool(&state, &sender, input).await;
         assert!(result.contains("Unknown tool type"));
     }
 
@@ -485,8 +456,7 @@ mod tests {
                 tool_type: tt.into(),
                 material_preference: None,
             };
-            let result =
-                handle_equip_tool(&state, &sender, input).await;
+            let result = handle_equip_tool(&state, &sender, input).await;
             let _: Value = serde_json::from_str(&result).expect("valid JSON");
         }
     }
@@ -499,8 +469,7 @@ mod tests {
             tool_type: "pickaxe".into(),
             material_preference: Some("diamond".into()),
         };
-        let result =
-            handle_equip_tool(&state, &sender, input).await;
+        let result = handle_equip_tool(&state, &sender, input).await;
         assert!(result.contains("material_preference"));
     }
 

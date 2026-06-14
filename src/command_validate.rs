@@ -70,9 +70,7 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         | BotCommand::TakeFromContainer(_, count)
         | BotCommand::PutIntoContainer(_, count) => {
             if *count == 0 {
-                return Err(BotError::Internal(
-                    "Count must be greater than 0".into(),
-                ));
+                return Err(BotError::Internal("Count must be greater than 0".into()));
             }
             Ok(())
         }
@@ -80,9 +78,7 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         // Messages must be non-empty (whitespace-only also rejected).
         BotCommand::SendChat(msg) | BotCommand::ExecuteCommand(msg) => {
             if msg.trim().is_empty() {
-                return Err(BotError::Internal(
-                    "Message cannot be empty".into(),
-                ));
+                return Err(BotError::Internal("Message cannot be empty".into()));
             }
             Ok(())
         }
@@ -126,7 +122,7 @@ pub fn validate_coordinates(x: i32, y: i32, z: i32) -> Result<(), String> {
             "z coordinate {z} out of range (must be between -{WORLD_BORDER} and {WORLD_BORDER})"
         ));
     }
-    if y < MIN_Y || y > MAX_Y {
+    if !(MIN_Y..=MAX_Y).contains(&y) {
         return Err(format!(
             "y coordinate {y} out of range (must be between {MIN_Y} and {MAX_Y})"
         ));
@@ -152,9 +148,7 @@ fn validate_position(pos: &BlockPos) -> Result<(), BotError> {
     if pos.x < -WORLD_BORDER || pos.x > WORLD_BORDER {
         return Err(BotError::Internal(format!(
             "X coordinate {} out of bounds (must be between {} and {})",
-            pos.x,
-            -WORLD_BORDER,
-            WORLD_BORDER
+            pos.x, -WORLD_BORDER, WORLD_BORDER
         )));
     }
     if pos.y < MIN_Y || pos.y > MAX_Y {
@@ -166,9 +160,7 @@ fn validate_position(pos: &BlockPos) -> Result<(), BotError> {
     if pos.z < -WORLD_BORDER || pos.z > WORLD_BORDER {
         return Err(BotError::Internal(format!(
             "Z coordinate {} out of bounds (must be between {} and {})",
-            pos.z,
-            -WORLD_BORDER,
-            WORLD_BORDER
+            pos.z, -WORLD_BORDER, WORLD_BORDER
         )));
     }
     Ok(())
@@ -594,10 +586,7 @@ mod tests {
         let cmd = BotCommand::SendChat(String::new());
         let err = validate_command(&cmd).unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("empty"),
-            "error should mention empty: {msg}"
-        );
+        assert!(msg.contains("empty"), "error should mention empty: {msg}");
     }
 
     #[test]

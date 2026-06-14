@@ -4,8 +4,8 @@
 //! randomly-generated inputs.
 
 use minecraft_mcp_rs::block_data::{
-    best_tool_for_block, calculate_mine_time, find_best_tool_in_inventory,
-    material_from_item_name, ItemStack, MATERIAL_PRIORITY, MATERIAL_TIER_SPEED,
+    ItemStack, MATERIAL_PRIORITY, MATERIAL_TIER_SPEED, best_tool_for_block, calculate_mine_time,
+    find_best_tool_in_inventory, material_from_item_name,
 };
 use minecraft_mcp_rs::command_validate::validate_coordinates;
 use minecraft_mcp_rs::types::{MaterialTier, ToolType};
@@ -190,18 +190,18 @@ proptest! {
                     None => continue,
                 };
 
-                if let Some((found_tool, found_material)) = material_from_item_name(&stack.item_id) {
-                    if found_tool == tool_type {
-                        let found_priority = MATERIAL_PRIORITY
-                            .iter()
-                            .position(|m| m == &found_material)
-                            .unwrap();
-                        prop_assert!(
-                            found_priority >= best_priority,
-                            "Slot {slot} has tool with better priority ({found_priority}) \
-                             than selected slot {best_slot} ({best_priority})"
-                        );
-                    }
+                if let Some((found_tool, found_material)) = material_from_item_name(&stack.item_id)
+                    && found_tool == tool_type
+                {
+                    let found_priority = MATERIAL_PRIORITY
+                        .iter()
+                        .position(|m| m == &found_material)
+                        .unwrap();
+                    prop_assert!(
+                        found_priority >= best_priority,
+                        "Slot {slot} has tool with better priority ({found_priority}) \
+                         than selected slot {best_slot} ({best_priority})"
+                    );
                 }
             }
         }

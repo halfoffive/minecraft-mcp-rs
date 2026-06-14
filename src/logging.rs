@@ -61,7 +61,9 @@ mod tests {
         let buf = buffer.clone();
 
         let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || CapturingWriter { buffer: buf.clone() })
+            .with_writer(move || CapturingWriter {
+                buffer: buf.clone(),
+            })
             .with_env_filter("minecraft_mcp_rs=debug")
             .finish();
 
@@ -70,8 +72,7 @@ mod tests {
         });
 
         let output = buffer.lock().unwrap();
-        let output_str =
-            String::from_utf8(output.clone()).expect("Tracing output is valid UTF-8");
+        let output_str = String::from_utf8(output.clone()).expect("Tracing output is valid UTF-8");
         assert!(
             output_str.contains("logging module test message"),
             "Tracing output should contain the logged message, got: {output_str}"
@@ -93,8 +94,7 @@ mod tests {
         }
 
         // ── orchestrator branch ────────────────────────────────────────
-        let exe =
-            std::env::current_exe().expect("Cannot determine test-binary path");
+        let exe = std::env::current_exe().expect("Cannot determine test-binary path");
         let output = std::process::Command::new(&exe)
             .env("__MCP_LOG_STDERR_TEST", "1")
             .arg("test_logging_goes_to_stderr")

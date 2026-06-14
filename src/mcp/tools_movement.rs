@@ -13,7 +13,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
 use crate::command_validate::validate_block_pos;
@@ -59,9 +59,7 @@ impl rmcp::schemars::JsonSchema for MoveToInput {
         Cow::Borrowed("MoveToInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -98,8 +96,7 @@ pub async fn handle_move_to(
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::MoveTo(BlockPos::new(input.x, input.y, input.z));
@@ -125,9 +122,7 @@ impl rmcp::schemars::JsonSchema for WalkDirectionInput {
         Cow::Borrowed("WalkDirectionInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -168,25 +163,19 @@ pub async fn handle_walk_direction(
     };
 
     if input.distance == 0 {
-        return r#"{"success":false,"error":"Distance must be greater than 0"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Distance must be greater than 0"}"#.to_string();
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::WalkDirection(direction);
     match sender.send_command(cmd).await {
         Ok(result) => {
-            let mut json =
-                serde_json::to_value(&result).unwrap_or_default();
+            let mut json = serde_json::to_value(&result).unwrap_or_default();
             if let Some(obj) = json.as_object_mut() {
-                obj.insert(
-                    "distance".to_string(),
-                    Value::Number(input.distance.into()),
-                );
+                obj.insert("distance".to_string(), Value::Number(input.distance.into()));
             }
             serde_json::to_string(&json).unwrap_or_else(|e| {
                 format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
@@ -207,9 +196,7 @@ impl rmcp::schemars::JsonSchema for JumpInput {
         Cow::Borrowed("JumpInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {},
@@ -227,8 +214,7 @@ pub async fn handle_jump(
     _input: JumpInput,
 ) -> String {
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::Jump;
@@ -255,9 +241,7 @@ impl rmcp::schemars::JsonSchema for TeleportInput {
         Cow::Borrowed("TeleportInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -298,14 +282,12 @@ pub async fn handle_teleport(
     {
         let snap = state.read_snapshot();
         if snap.self_player.gamemode != GameMode::Creative {
-            return r#"{"success":false,"error":"Teleport requires Creative mode"}"#
-                .to_string();
+            return r#"{"success":false,"error":"Teleport requires Creative mode"}"#.to_string();
         }
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::Teleport(BlockPos::new(input.x, input.y, input.z));
@@ -340,13 +322,11 @@ mod tests {
         tokio::spawn(async move {
             while let Some(wrapped) = receiver.recv().await {
                 let msg = format!("executed: {:?}", wrapped.command);
-                let _ = wrapped
-                    .respond_to
-                    .send(Ok(crate::types::BotResult {
-                        success: true,
-                        message: msg,
-                        data: None,
-                    }));
+                let _ = wrapped.respond_to.send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: msg,
+                    data: None,
+                }));
             }
         });
 
@@ -435,7 +415,11 @@ mod tests {
     async fn test_move_to_valid() {
         let (state, sender) = setup();
         make_online(&state);
-        let input = MoveToInput { x: 10, y: 64, z: -5 };
+        let input = MoveToInput {
+            x: 10,
+            y: 64,
+            z: -5,
+        };
         let result = handle_move_to(&state, &sender, input).await;
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
     }
@@ -445,7 +429,10 @@ mod tests {
     #[tokio::test]
     async fn test_walk_direction_offline() {
         let (state, sender) = setup();
-        let input = WalkDirectionInput { direction: "north".into(), distance: 1 };
+        let input = WalkDirectionInput {
+            direction: "north".into(),
+            distance: 1,
+        };
         let result = handle_walk_direction(&state, &sender, input).await;
         assert!(result.contains("not connected"));
     }
@@ -454,7 +441,10 @@ mod tests {
     async fn test_walk_direction_invalid_direction() {
         let (state, sender) = setup();
         make_online(&state);
-        let input = WalkDirectionInput { direction: "left".into(), distance: 1 };
+        let input = WalkDirectionInput {
+            direction: "left".into(),
+            distance: 1,
+        };
         let result = handle_walk_direction(&state, &sender, input).await;
         assert!(result.contains("Invalid direction"));
     }
@@ -463,7 +453,10 @@ mod tests {
     async fn test_walk_direction_zero_distance() {
         let (state, sender) = setup();
         make_online(&state);
-        let input = WalkDirectionInput { direction: "north".into(), distance: 0 };
+        let input = WalkDirectionInput {
+            direction: "north".into(),
+            distance: 0,
+        };
         let result = handle_walk_direction(&state, &sender, input).await;
         assert!(result.contains("greater than 0"));
     }
@@ -472,10 +465,17 @@ mod tests {
     async fn test_walk_direction_valid() {
         let (state, sender) = make_echo_channel();
         make_online(&state);
-        let input = WalkDirectionInput { direction: "north".into(), distance: 3 };
+        let input = WalkDirectionInput {
+            direction: "north".into(),
+            distance: 3,
+        };
         let result = handle_walk_direction(&state, &sender, input).await;
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
-        assert!(json.get("success").and_then(|v| v.as_bool()).unwrap_or(false));
+        assert!(
+            json.get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
     }
 
     // ── jump ────────────────────────────────────────────────────
@@ -503,7 +503,11 @@ mod tests {
     async fn test_teleport_offline() {
         let (state, sender) = setup();
         make_creative(&state);
-        let input = TeleportInput { x: 100, y: 64, z: 200 };
+        let input = TeleportInput {
+            x: 100,
+            y: 64,
+            z: 200,
+        };
         let result = handle_teleport(&state, &sender, input).await;
         assert!(result.contains("not connected"));
     }
@@ -513,7 +517,11 @@ mod tests {
         let (state, sender) = setup();
         make_online(&state);
         // Default snapshot is Survival mode
-        let input = TeleportInput { x: 100, y: 64, z: 200 };
+        let input = TeleportInput {
+            x: 100,
+            y: 64,
+            z: 200,
+        };
         let result = handle_teleport(&state, &sender, input).await;
         assert!(result.contains("requires Creative"));
     }
@@ -533,7 +541,11 @@ mod tests {
         let (state, sender) = setup();
         make_online(&state);
         make_creative(&state);
-        let input = TeleportInput { x: 100, y: 64, z: 200 };
+        let input = TeleportInput {
+            x: 100,
+            y: 64,
+            z: 200,
+        };
         let result = handle_teleport(&state, &sender, input).await;
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
     }

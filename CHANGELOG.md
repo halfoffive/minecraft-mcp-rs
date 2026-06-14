@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Settings panel now fully editable:** all fields use `TextEdit::singleline`
+  for strings and `DragValue` sliders for numeric values (with appropriate
+  range limits).  Edits are persisted to `SharedState` on Connect.
+- **Connect / Disconnect buttons are wired up:** Connect spawns the bot
+  connection on a dedicated OS thread (bypasses azalea `LocalSet` `!Send`
+  limitation).  Disconnect sets `bot_online = false`.
+
+### Fixed
+
+- **30+ Clippy warnings** resolved across 14 source files:
+  - Removed unused imports (`BlockEntry`, `GameMode`, `SelfPlayer`, `WorldSnapshot`)
+  - Replaced `map_or(false, …)` with `is_some_and(…)` (2 occurrences)
+  - Collapsed redundant `if` guards / nested `if` statements (7 occurrences)
+  - Replaced manual range checks with `RangeInclusive::contains`
+  - Converted `useless_vec!` to arrays (3 occurrences)
+  - Added `#[allow(deprecated)]` on azalea `Block` alias usages
+  - Added `#![allow(dead_code)]` on architecture-scaffolding modules
+  - Removed duplicate `mod` declarations in `main.rs`
+  - Fixed `#[allow(clippy::field_reassign_with_default)]` on test helpers
+  - Added `let _ =` on `unused_must_use`
+
 ## [0.1.0] — 2025-03-27
 
 ### Added

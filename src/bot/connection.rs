@@ -10,8 +10,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use azalea::account::Account;
 use azalea::ClientBuilder;
+use azalea::account::Account;
 use tracing::{info, warn};
 
 use crate::bot::events;
@@ -141,6 +141,7 @@ impl ConnectionManager {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
     use super::*;
     use crate::config::AppConfig;
 
@@ -220,10 +221,7 @@ mod tests {
         let state = Arc::new(SharedState::new(config.clone()));
         let manager = ConnectionManager::new(config, Arc::clone(&state));
 
-        assert_eq!(
-            manager.reconnect_backoff(0),
-            Duration::from_millis(5000)
-        );
+        assert_eq!(manager.reconnect_backoff(0), Duration::from_millis(5000));
     }
 
     #[test]
@@ -316,8 +314,7 @@ mod tests {
     fn test_client_builder_exists_and_takes_handler() {
         // Verify that ClientBuilder::new().set_handler(events::handle_event) compiles.
         // We don't call .start() since there's no server.
-        let _builder = ClientBuilder::new()
-            .set_handler(events::handle_event);
+        let _builder = ClientBuilder::new().set_handler(events::handle_event);
     }
 
     // -- Integration: state transitions during connect lifecycle -------------

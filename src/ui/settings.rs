@@ -1,100 +1,115 @@
-//! Settings panel: AppConfig fields + Connect/Disconnect buttons.
+//! Settings panel: editable [`AppConfig`] fields + Connect / Disconnect buttons.
 //!
-//! Renders each [`AppConfig`] field as a read-only label (full editing with
-//! text inputs requires mutable local state, planned for a follow-up).
-//! Connect and Disconnect buttons dispatch bot lifecycle commands through
-//! the [`BotCommandSender`] channel.
+//! All config fields are rendered as editable widgets (text inputs for strings,
+//! [`DragValue`] for numbers).  Edits accumulate in [`EditConfig`] which is
+//! persisted to [`SharedState`] when the user clicks **Connect**.  The
+//! **Disconnect** button sets the bot offline.
 
-use egui::Ui;
+use egui::{DragValue, TextEdit, Ui};
 use std::sync::Arc;
 
 use crate::channel::BotCommandSender;
 use crate::state::SharedState;
+use crate::ui::app::EditConfig;
 
 /// Render the settings panel.
 ///
-/// Displays all [`AppConfig`] fields and provides Connect / Disconnect
-/// buttons that toggle the bot connection.  Fields are currently read-only;
-/// the config can be updated programmatically via the MCP server.
-pub fn settings_panel(ui: &mut Ui, state: &Arc<SharedState>, sender: &BotCommandSender) {
-    let config = state.read_config().clone();
+/// Returns `true` when the Connect button is clicked (caller should persist
+/// edits and spawn the connection task).
+pub fn settings_panel(
+    ui: &mut Ui,
+    state: &Arc<SharedState>,
+    sender: &BotCommandSender,
+    edit: &mut EditConfig,
+) -> bool {
+    let mut connect_clicked = false;
 
+    // ── Minecraft Server ──────────────────────────────────────
     ui.label("Minecraft Server");
     ui.horizontal(|ui| {
         ui.label("Address:");
-        ui.label(&config.mc_address);
+        ui.add(TextEdit::singleline(&mut edit.mc_address).desired_width(180.0));
     });
     ui.horizontal(|ui| {
         ui.label("Port:");
-        ui.label(config.mc_port.to_string());
+        ui.add(DragValue::new(&mut edit.mc_port).range(1..=65535));
     });
 
     ui.separator();
+
+    // ── Bot Identity ──────────────────────────────────────────
     ui.label("Bot Identity");
     ui.horizontal(|ui| {
         ui.label("Username:");
-        ui.label(&config.ai_username);
+        ui.add(TextEdit::singleline(&mut edit.ai_username).desired_width(180.0));
     });
 
     ui.separator();
+
+    // ── MCP Server ────────────────────────────────────────────
     ui.label("MCP Server");
     ui.horizontal(|ui| {
         ui.label("Bind Address:");
-        ui.label(&config.mcp_address);
+        ui.add(TextEdit::singleline(&mut edit.mcp_address).desired_width(180.0));
     });
     ui.horizontal(|ui| {
         ui.label("Bind Port:");
-        ui.label(config.mcp_port.to_string());
+        ui.add(DragValue::new(&mut edit.mcp_port).range(1..=65535));
     });
 
     ui.separator();
+
+    // ── Scanning ──────────────────────────────────────────────
     ui.label("Scanning");
     ui.horizontal(|ui| {
         ui.label("Chunk Scan Radius (1-16):");
-        ui.label(config.chunk_scan_radius.to_string());
+        ui.add(DragValue::new(&mut edit.chunk_scan_radius).range(1..=16));
     });
     ui.horizontal(|ui| {
         ui.label("Block Perception Radius (8-64):");
-        ui.label(config.block_perception_radius.to_string());
+        ui.add(DragValue::new(&mut edit.block_perception_radius).range(8..=64));
     });
     ui.horizontal(|ui| {
         ui.label("Snapshot Interval (ms):");
-        ui.label(config.snapshot_interval_ms.to_string());
+        ui.add(DragValue::new(&mut edit.snapshot_interval_ms).range(100..=10000));
     });
 
     ui.separator();
+
+    // ── Timing ────────────────────────────────────────────────
     ui.label("Timing");
     ui.horizontal(|ui| {
         ui.label("Reconnect Initial Delay (ms):");
-        ui.label(config.reconnect_initial_delay_ms.to_string());
+        ui.add(DragValue::new(&mut edit.reconnect_initial_delay_ms).range(1000..=300000));
     });
     ui.horizontal(|ui| {
         ui.label("Reconnect Max Delay (ms):");
-        ui.label(config.reconnect_max_delay_ms.to_string());
+        ui.add(DragValue::new(&mut edit.reconnect_max_delay_ms).range(5000..=600000));
     });
     ui.horizontal(|ui| {
         ui.label("Command Timeout (s):");
-        ui.label(config.command_timeout_secs.to_string());
+        ui.add(DragValue::new(&mut edit.command_timeout_secs).range(1..=300));
     });
 
     ui.separator();
 
+    // ── Connect / Disconnect ──────────────────────────────────
     let is_online = state.is_online();
 
     ui.horizontal(|ui| {
-        let connect_btn = ui.button("🔌 Connect");
-        let disconnect_btn = ui.button("⏻ Disconnect");
+        let connect_btn = ui.add_enabled(!is_online, egui::Button::new("🔌 Connect"));
+        let disconnect_btn = ui.add_enabled(is_online, egui::Button::new("⏻ Disconnect"));
 
-        if connect_btn.clicked() && !is_online {
-            tracing::info!("Connect button pressed — dispatching connect command");
+        if connect_btn.clicked() {
+            tracing::info!("Connect button pressed");
             let _ = sender;
-            // TODO: dispatch BotCommand to initiate connection
+            connect_clicked = true;
         }
 
-        if disconnect_btn.clicked() && is_online {
-            tracing::info!("Disconnect button pressed — dispatching disconnect command");
+        if disconnect_btn.clicked() {
+            tracing::info!("Disconnect button pressed — setting bot offline");
+            state.set_online(false);
             let _ = sender;
-            // TODO: dispatch BotCommand to terminate connection
         }
     });
 
@@ -103,4 +118,6 @@ pub fn settings_panel(ui: &mut Ui, state: &Arc<SharedState>, sender: &BotCommand
     } else {
         ui.colored_label(egui::Color32::RED, "● Disconnected");
     }
+
+    connect_clicked
 }

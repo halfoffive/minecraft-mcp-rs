@@ -59,7 +59,9 @@ pub enum ToolType {
 /// Material tiers for tools/armor, ordered by quality/durability.
 ///
 /// Order: Wood < Gold < Stone < Iron < Diamond < Netherite
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub enum MaterialTier {
     Wood,
     Gold,
@@ -168,9 +170,15 @@ pub enum GameEvent {
     /// A player left the game.
     PlayerLeave { username: String },
     /// A block was broken.
-    BlockBreak { position: BlockPos, block_type: String },
+    BlockBreak {
+        position: BlockPos,
+        block_type: String,
+    },
     /// A block was placed.
-    BlockPlace { position: BlockPos, block_type: String },
+    BlockPlace {
+        position: BlockPos,
+        block_type: String,
+    },
     /// An entity spawned.
     EntitySpawn { entity: Box<EntityEntry> },
     /// An entity despawned.
@@ -299,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_tool_type_has_6_variants() {
-        let tools = vec![
+        let tools = [
             ToolType::Pickaxe,
             ToolType::Axe,
             ToolType::Shovel,
@@ -629,7 +637,14 @@ mod tests {
     fn test_json_schema_for_block_pos() {
         let schema = schemars::schema_for!(BlockPos);
         assert_eq!(
-            schema.schema.metadata.as_ref().unwrap().title.as_ref().unwrap(),
+            schema
+                .schema
+                .metadata
+                .as_ref()
+                .unwrap()
+                .title
+                .as_ref()
+                .unwrap(),
             "BlockPos"
         );
     }
@@ -638,7 +653,14 @@ mod tests {
     fn test_json_schema_for_bot_command() {
         let schema = schemars::schema_for!(BotCommand);
         assert_eq!(
-            schema.schema.metadata.as_ref().unwrap().title.as_ref().unwrap(),
+            schema
+                .schema
+                .metadata
+                .as_ref()
+                .unwrap()
+                .title
+                .as_ref()
+                .unwrap(),
             "BotCommand"
         );
     }
@@ -647,7 +669,14 @@ mod tests {
     fn test_json_schema_for_game_mode() {
         let schema = schemars::schema_for!(GameMode);
         assert_eq!(
-            schema.schema.metadata.as_ref().unwrap().title.as_ref().unwrap(),
+            schema
+                .schema
+                .metadata
+                .as_ref()
+                .unwrap()
+                .title
+                .as_ref()
+                .unwrap(),
             "GameMode"
         );
     }
@@ -656,7 +685,14 @@ mod tests {
     fn test_json_schema_for_direction() {
         let schema = schemars::schema_for!(Direction);
         assert_eq!(
-            schema.schema.metadata.as_ref().unwrap().title.as_ref().unwrap(),
+            schema
+                .schema
+                .metadata
+                .as_ref()
+                .unwrap()
+                .title
+                .as_ref()
+                .unwrap(),
             "Direction"
         );
     }
@@ -665,7 +701,14 @@ mod tests {
     fn test_json_schema_for_world_snapshot() {
         let schema = schemars::schema_for!(WorldSnapshot);
         assert_eq!(
-            schema.schema.metadata.as_ref().unwrap().title.as_ref().unwrap(),
+            schema
+                .schema
+                .metadata
+                .as_ref()
+                .unwrap()
+                .title
+                .as_ref()
+                .unwrap(),
             "WorldSnapshot"
         );
     }

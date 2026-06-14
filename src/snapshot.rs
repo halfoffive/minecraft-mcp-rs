@@ -341,8 +341,8 @@ mod tests {
         // Chunk (0,0) contains positions where x>>4==0 and z>>4==0
         let old = make_snapshot(
             vec![
-                block(BlockPos::new(0, 64, 0), "stone"),   // chunk (0,0)
-                block(BlockPos::new(16, 64, 0), "dirt"),  // chunk (1,0)
+                block(BlockPos::new(0, 64, 0), "stone"), // chunk (0,0)
+                block(BlockPos::new(16, 64, 0), "dirt"), // chunk (1,0)
             ],
             vec![],
         );
@@ -414,9 +414,9 @@ mod tests {
     fn test_builder_dirty_block_and_chunk_together() {
         let old = make_snapshot(
             vec![
-                block(BlockPos::new(0, 64, 0), "stone"),   // chunk (0,0)
-                block(BlockPos::new(1, 64, 0), "dirt"),    // chunk (0,0)
-                block(BlockPos::new(16, 64, 0), "grass"),  // chunk (1,0)
+                block(BlockPos::new(0, 64, 0), "stone"),  // chunk (0,0)
+                block(BlockPos::new(1, 64, 0), "dirt"),   // chunk (0,0)
+                block(BlockPos::new(16, 64, 0), "grass"), // chunk (1,0)
             ],
             vec![],
         );
@@ -481,10 +481,7 @@ mod tests {
     #[test]
     fn test_blocks_in_radius_3d_diagonal() {
         // Distance from (0,0,0) to (3,3,3) = sqrt(27) ≈ 5.196
-        let snapshot = make_snapshot(
-            vec![block(BlockPos::new(3, 3, 3), "diagonal")],
-            vec![],
-        );
+        let snapshot = make_snapshot(vec![block(BlockPos::new(3, 3, 3), "diagonal")], vec![]);
         let found = snapshot.blocks_in_radius(BlockPos::new(0, 0, 0), 5);
         assert!(found.is_empty()); // 5.196 > 5
         let found = snapshot.blocks_in_radius(BlockPos::new(0, 0, 0), 6);
@@ -507,10 +504,7 @@ mod tests {
 
     #[test]
     fn test_entities_in_radius_zero_radius() {
-        let snapshot = make_snapshot(
-            vec![],
-            vec![entity(1, BlockPos::new(0, 0, 0), "zombie")],
-        );
+        let snapshot = make_snapshot(vec![], vec![entity(1, BlockPos::new(0, 0, 0), "zombie")]);
         let found = snapshot.entities_in_radius(BlockPos::new(0, 0, 0), 0);
         // Distance is exactly 0, so it should match
         assert_eq!(found.len(), 1);
@@ -518,10 +512,7 @@ mod tests {
 
     #[test]
     fn test_blocks_in_radius_negative_coords() {
-        let snapshot = make_snapshot(
-            vec![block(BlockPos::new(-5, 0, -5), "neg")],
-            vec![],
-        );
+        let snapshot = make_snapshot(vec![block(BlockPos::new(-5, 0, -5), "neg")], vec![]);
         let found = snapshot.blocks_in_radius(BlockPos::new(0, 0, 0), 8);
         // Distance = sqrt(50) ≈ 7.07 < 8
         assert_eq!(found.len(), 1);

@@ -1,17 +1,12 @@
 //! Minecraft MCP Server — binary entry point.
 //!
 //! Architecture:
-//! - Main thread: spawns tokio runtime in background for MCP, runs egui UI.
-//! - Background thread: own tokio runtime, runs MCP server on stdio transport.
+//! - Main thread: runs egui UI.
+//! - MCP server thread: own tokio runtime, runs MCP on stdio transport.
+//! - Bot connection thread: spawned on demand from the UI, own tokio runtime.
 //! - All logs → stderr, stdout = MCP channel only.
 //!
-//! Shared state is accessed lock-free by both threads.
-
-// Module declarations for tests in the binary crate.
-mod block_data;
-mod config;
-pub mod logging;
-pub mod types;
+//! Shared state is accessed lock-free by all threads.
 
 use std::sync::Arc;
 
@@ -34,13 +29,16 @@ fn main() {
     tracing::info!("Minecraft MCP server starting");
 
     // ══════════════════════════════════════════════════════════════════
-    // Create shared state and command channel outside any runtime.
+    // Create shared state and command channel.
     // Tokio mpsc channels can be created without an active runtime;
     // only `send` operations (which are async) need the runtime.
     // ══════════════════════════════════════════════════════════════════
     let config = AppConfig::default();
     let state = Arc::new(SharedState::new(config));
-    let (sender, _receiver) = channel::create_command_channel(64);
+    let (sender, receiver) = channel::create_command_channel(64);
+    // Wrap the receiver so it can be shared between the MCP event handler
+    // and the bot connection loop.
+    let receiver = Arc::new(tokio::sync::Mutex::new(receiver));
 
     // ══════════════════════════════════════════════════════════════════
     // Clone for the background MCP thread.
@@ -59,9 +57,6 @@ fn main() {
             let rt = tokio::runtime::Runtime::new()
                 .expect("Failed to create tokio runtime for MCP server");
 
-            // EnterGuard sets this runtime as the current one for the
-            // duration of the guard, enabling `tokio::spawn` calls inside
-            // `serve_stdio`.
             let _guard = rt.enter();
 
             rt.block_on(async {
@@ -77,14 +72,14 @@ fn main() {
     // ══════════════════════════════════════════════════════════════════
     let state_for_egui = Arc::clone(&state);
     let sender_for_egui = sender.clone();
+    let receiver_for_egui = Arc::clone(&receiver);
 
     // ══════════════════════════════════════════════════════════════════
     // Run the egui UI on the main thread.  This call blocks until the
     // window is closed, at which point the process exits.
     // ══════════════════════════════════════════════════════════════════
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([640.0, 480.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([780.0, 560.0]),
         ..Default::default()
     };
 
@@ -95,6 +90,7 @@ fn main() {
             Ok(Box::new(MinecraftApp::new(
                 state_for_egui,
                 sender_for_egui,
+                receiver_for_egui,
             )))
         }),
     )

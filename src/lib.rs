@@ -7,34 +7,34 @@
 //! - `mcp`: Model Context Protocol server and tool implementations
 //! - `ui`: Desktop UI (status, settings, app shell)
 
-pub mod types;
-pub mod error;
-pub mod config;
 pub mod block_data;
-pub mod logging;
-pub mod state;
 pub mod channel;
-pub mod tool_select;
-pub mod mining_calc;
-pub mod snapshot;
 pub mod command_validate;
 pub mod compound_ops;
+pub mod config;
+pub mod error;
+pub mod logging;
+pub mod mining_calc;
+pub mod snapshot;
+pub mod state;
+pub mod tool_select;
+pub mod types;
 pub mod bot {
+    pub mod commands;
     pub mod connection;
     pub mod events;
-    pub mod commands;
     pub mod ops;
     pub mod snapshot_updater;
 }
 pub mod mcp {
     pub mod server;
-    pub mod tools_query;
-    pub mod tools_movement;
     pub mod tools_block;
-    pub mod tools_item;
-    pub mod tools_container;
-    pub mod tools_combat;
     pub mod tools_chat;
+    pub mod tools_combat;
+    pub mod tools_container;
+    pub mod tools_item;
+    pub mod tools_movement;
+    pub mod tools_query;
 }
 pub mod ui {
     pub mod app;

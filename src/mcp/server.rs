@@ -6,27 +6,22 @@
 use std::sync::Arc;
 
 use rmcp::{
-    tool, tool_handler, tool_router,
+    ServerHandler, ServiceExt,
     handler::server::wrapper::Parameters,
     model::{Implementation, ServerCapabilities, ServerInfo},
-    ServerHandler, ServiceExt,
+    tool, tool_handler, tool_router,
     transport::io::stdio,
 };
 use tracing::{error, info};
 
 use crate::channel::BotCommandSender;
-use crate::mcp::tools_block::{
-    BreakBlockInput, PlaceBlockInput, UseItemOnBlockInput,
-};
+use crate::mcp::tools_block::{BreakBlockInput, PlaceBlockInput, UseItemOnBlockInput};
 use crate::mcp::tools_chat::{ExecuteCommandInput, SendChatInput, SetGameModeInput};
 use crate::mcp::tools_combat::{AttackEntityInput, ShieldBlockInput};
 use crate::mcp::tools_container::{
-    CloseContainerInput, OpenContainerInput, PutIntoContainerInput,
-    TakeFromContainerInput,
+    CloseContainerInput, OpenContainerInput, PutIntoContainerInput, TakeFromContainerInput,
 };
-use crate::mcp::tools_item::{
-    DropItemInput, EquipToolInput, SwitchHotbarSlotInput, UseItemInput,
-};
+use crate::mcp::tools_item::{DropItemInput, EquipToolInput, SwitchHotbarSlotInput, UseItemInput};
 use crate::mcp::tools_movement::{JumpInput, MoveToInput, TeleportInput, WalkDirectionInput};
 use crate::state::SharedState;
 
@@ -65,32 +60,50 @@ impl McpBotServer {
     // and `filter_type: Option<String>` parameters.  For now sensible
     // defaults (radius=10, no filter) are baked into the implementations.
 
-    #[tool(description = "Get information about the bot's own player", annotations(read_only_hint = true))]
+    #[tool(
+        description = "Get information about the bot's own player",
+        annotations(read_only_hint = true)
+    )]
     async fn get_self_info(&self) -> String {
         crate::mcp::tools_query::get_self_info(&self.state)
     }
 
-    #[tool(description = "Get the bot's inventory contents", annotations(read_only_hint = true))]
+    #[tool(
+        description = "Get the bot's inventory contents",
+        annotations(read_only_hint = true)
+    )]
     async fn get_inventory(&self) -> String {
         crate::mcp::tools_query::get_inventory(&self.state)
     }
 
-    #[tool(description = "Get blocks near the bot's position (radius=10, no filter)", annotations(read_only_hint = true))]
+    #[tool(
+        description = "Get blocks near the bot's position (radius=10, no filter)",
+        annotations(read_only_hint = true)
+    )]
     async fn get_nearby_blocks(&self) -> String {
         crate::mcp::tools_query::get_nearby_blocks(&self.state, 10, None)
     }
 
-    #[tool(description = "Get entities near the bot's position (radius=10)", annotations(read_only_hint = true))]
+    #[tool(
+        description = "Get entities near the bot's position (radius=10)",
+        annotations(read_only_hint = true)
+    )]
     async fn get_nearby_entities(&self) -> String {
         crate::mcp::tools_query::get_nearby_entities(&self.state, 10)
     }
 
-    #[tool(description = "Get a summary of loaded chunks", annotations(read_only_hint = true))]
+    #[tool(
+        description = "Get a summary of loaded chunks",
+        annotations(read_only_hint = true)
+    )]
     async fn get_chunk_summary(&self) -> String {
         crate::mcp::tools_query::get_chunk_summary(&self.state)
     }
 
-    #[tool(description = "Check if the bot is connected to a Minecraft server", annotations(read_only_hint = true))]
+    #[tool(
+        description = "Check if the bot is connected to a Minecraft server",
+        annotations(read_only_hint = true)
+    )]
     async fn is_connected(&self) -> String {
         crate::mcp::tools_query::is_connected(&self.state)
     }
@@ -98,56 +111,47 @@ impl McpBotServer {
     // ── Movement tools ───────────────────────────────────────
 
     #[tool(description = "Move the bot to a specific position")]
-    async fn move_to(
-        &self,
-        Parameters(input): Parameters<MoveToInput>,
-    ) -> String {
+    async fn move_to(&self, Parameters(input): Parameters<MoveToInput>) -> String {
         crate::mcp::tools_movement::handle_move_to(&self.state, &self.sender, input).await
     }
 
     #[tool(description = "Walk the bot in a cardinal direction")]
-    async fn walk_direction(
-        &self,
-        Parameters(input): Parameters<WalkDirectionInput>,
-    ) -> String {
+    async fn walk_direction(&self, Parameters(input): Parameters<WalkDirectionInput>) -> String {
         crate::mcp::tools_movement::handle_walk_direction(&self.state, &self.sender, input).await
     }
 
     #[tool(description = "Make the bot jump")]
-    async fn jump(
-        &self,
-        Parameters(input): Parameters<JumpInput>,
-    ) -> String {
+    async fn jump(&self, Parameters(input): Parameters<JumpInput>) -> String {
         crate::mcp::tools_movement::handle_jump(&self.state, &self.sender, input).await
     }
 
     #[tool(description = "Teleport the bot to a position (requires Creative mode)")]
-    async fn teleport(
-        &self,
-        Parameters(input): Parameters<TeleportInput>,
-    ) -> String {
+    async fn teleport(&self, Parameters(input): Parameters<TeleportInput>) -> String {
         crate::mcp::tools_movement::handle_teleport(&self.state, &self.sender, input).await
     }
 
     // ── Block tools (destructive) ────────────────────────────
 
-    #[tool(description = "Break a block at the given position", annotations(destructive_hint = true))]
-    async fn break_block(
-        &self,
-        Parameters(input): Parameters<BreakBlockInput>,
-    ) -> String {
+    #[tool(
+        description = "Break a block at the given position",
+        annotations(destructive_hint = true)
+    )]
+    async fn break_block(&self, Parameters(input): Parameters<BreakBlockInput>) -> String {
         crate::mcp::tools_block::handle_break_block(&self.state, &self.sender, input).await
     }
 
-    #[tool(description = "Place a block at the given position", annotations(destructive_hint = true))]
-    async fn place_block(
-        &self,
-        Parameters(input): Parameters<PlaceBlockInput>,
-    ) -> String {
+    #[tool(
+        description = "Place a block at the given position",
+        annotations(destructive_hint = true)
+    )]
+    async fn place_block(&self, Parameters(input): Parameters<PlaceBlockInput>) -> String {
         crate::mcp::tools_block::handle_place_block(&self.state, &self.sender, input).await
     }
 
-    #[tool(description = "Use the held item on a block", annotations(destructive_hint = true))]
+    #[tool(
+        description = "Use the held item on a block",
+        annotations(destructive_hint = true)
+    )]
     async fn use_item_on_block(
         &self,
         Parameters(input): Parameters<UseItemOnBlockInput>,
@@ -157,7 +161,10 @@ impl McpBotServer {
 
     // ── Item tools (destructive) ─────────────────────────────
 
-    #[tool(description = "Switch to a hotbar slot (0-8).", annotations(destructive_hint = true))]
+    #[tool(
+        description = "Switch to a hotbar slot (0-8).",
+        annotations(destructive_hint = true)
+    )]
     async fn switch_hotbar_slot(
         &self,
         Parameters(input): Parameters<SwitchHotbarSlotInput>,
@@ -165,83 +172,94 @@ impl McpBotServer {
         crate::mcp::tools_item::handle_switch_hotbar_slot(&self.state, &self.sender, input).await
     }
 
-    #[tool(description = "Drop items from an inventory slot.", annotations(destructive_hint = true))]
-    async fn drop_item(
-        &self,
-        Parameters(input): Parameters<DropItemInput>,
-    ) -> String {
+    #[tool(
+        description = "Drop items from an inventory slot.",
+        annotations(destructive_hint = true)
+    )]
+    async fn drop_item(&self, Parameters(input): Parameters<DropItemInput>) -> String {
         crate::mcp::tools_item::handle_drop_item(&self.state, &self.sender, input).await
     }
 
-    #[tool(description = "Use the currently held item.", annotations(destructive_hint = true))]
-    async fn use_item(
-        &self,
-        Parameters(input): Parameters<UseItemInput>,
-    ) -> String {
+    #[tool(
+        description = "Use the currently held item.",
+        annotations(destructive_hint = true)
+    )]
+    async fn use_item(&self, Parameters(input): Parameters<UseItemInput>) -> String {
         crate::mcp::tools_item::handle_use_item(&self.state, &self.sender, input).await
     }
 
-    #[tool(description = "Equip the best available tool of a given type.", annotations(destructive_hint = true))]
-    async fn equip_tool(
-        &self,
-        Parameters(input): Parameters<EquipToolInput>,
-    ) -> String {
+    #[tool(
+        description = "Equip the best available tool of a given type.",
+        annotations(destructive_hint = true)
+    )]
+    async fn equip_tool(&self, Parameters(input): Parameters<EquipToolInput>) -> String {
         crate::mcp::tools_item::handle_equip_tool(&self.state, &self.sender, input).await
     }
 
     // ── Container tools (destructive) ────────────────────────
 
-    #[tool(description = "Open a container at the given position", annotations(destructive_hint = true))]
-    async fn open_container(
-        &self,
-        Parameters(input): Parameters<OpenContainerInput>,
-    ) -> String {
+    #[tool(
+        description = "Open a container at the given position",
+        annotations(destructive_hint = true)
+    )]
+    async fn open_container(&self, Parameters(input): Parameters<OpenContainerInput>) -> String {
         crate::mcp::tools_container::handle_open_container(&self.state, &self.sender, input).await
     }
 
-    #[tool(description = "Take items from an open container slot", annotations(destructive_hint = true))]
+    #[tool(
+        description = "Take items from an open container slot",
+        annotations(destructive_hint = true)
+    )]
     async fn take_from_container(
         &self,
         Parameters(input): Parameters<TakeFromContainerInput>,
     ) -> String {
-        crate::mcp::tools_container::handle_take_from_container(&self.state, &self.sender, input).await
+        crate::mcp::tools_container::handle_take_from_container(&self.state, &self.sender, input)
+            .await
     }
 
-    #[tool(description = "Put items into an open container slot", annotations(destructive_hint = true))]
+    #[tool(
+        description = "Put items into an open container slot",
+        annotations(destructive_hint = true)
+    )]
     async fn put_into_container(
         &self,
         Parameters(input): Parameters<PutIntoContainerInput>,
     ) -> String {
-        crate::mcp::tools_container::handle_put_into_container(&self.state, &self.sender, input).await
+        crate::mcp::tools_container::handle_put_into_container(&self.state, &self.sender, input)
+            .await
     }
 
-    #[tool(description = "Close the currently open container", annotations(destructive_hint = true))]
-    async fn close_container(
-        &self,
-        Parameters(input): Parameters<CloseContainerInput>,
-    ) -> String {
+    #[tool(
+        description = "Close the currently open container",
+        annotations(destructive_hint = true)
+    )]
+    async fn close_container(&self, Parameters(input): Parameters<CloseContainerInput>) -> String {
         crate::mcp::tools_container::handle_close_container(&self.state, &self.sender, input).await
     }
 
     // ── Combat / Chat tools (destructive) ────────────────────
 
-    #[tool(description = "Attack an entity by its Minecraft entity ID", annotations(destructive_hint = true))]
-    async fn attack_entity(
-        &self,
-        Parameters(input): Parameters<AttackEntityInput>,
-    ) -> String {
+    #[tool(
+        description = "Attack an entity by its Minecraft entity ID",
+        annotations(destructive_hint = true)
+    )]
+    async fn attack_entity(&self, Parameters(input): Parameters<AttackEntityInput>) -> String {
         crate::mcp::tools_combat::handle_attack_entity(&self.state, &self.sender, input).await
     }
 
-    #[tool(description = "Hold up shield to block incoming attacks", annotations(destructive_hint = true))]
-    async fn shield_block(
-        &self,
-        Parameters(input): Parameters<ShieldBlockInput>,
-    ) -> String {
+    #[tool(
+        description = "Hold up shield to block incoming attacks",
+        annotations(destructive_hint = true)
+    )]
+    async fn shield_block(&self, Parameters(input): Parameters<ShieldBlockInput>) -> String {
         crate::mcp::tools_combat::handle_shield_block(&self.state, &self.sender, input).await
     }
 
-    #[tool(description = "Send a chat message to the server", annotations(destructive_hint = true))]
+    #[tool(
+        description = "Send a chat message to the server",
+        annotations(destructive_hint = true)
+    )]
     async fn send_chat(
         &self,
         Parameters(SendChatInput { message }): Parameters<SendChatInput>,
@@ -249,7 +267,10 @@ impl McpBotServer {
         crate::mcp::tools_chat::handle_send_chat(&self.sender, message).await
     }
 
-    #[tool(description = "Execute a Minecraft command (requires op). The / prefix is auto-added if omitted.", annotations(destructive_hint = true))]
+    #[tool(
+        description = "Execute a Minecraft command (requires op). The / prefix is auto-added if omitted.",
+        annotations(destructive_hint = true)
+    )]
     async fn execute_command(
         &self,
         Parameters(ExecuteCommandInput { command }): Parameters<ExecuteCommandInput>,
@@ -257,7 +278,10 @@ impl McpBotServer {
         crate::mcp::tools_chat::handle_execute_command(&self.sender, command).await
     }
 
-    #[tool(description = "Set the bot's game mode (requires OP permissions). Valid modes: survival, creative, adventure, spectator.", annotations(destructive_hint = true))]
+    #[tool(
+        description = "Set the bot's game mode (requires OP permissions). Valid modes: survival, creative, adventure, spectator.",
+        annotations(destructive_hint = true)
+    )]
     async fn set_game_mode(
         &self,
         Parameters(SetGameModeInput { mode }): Parameters<SetGameModeInput>,
@@ -274,8 +298,7 @@ impl McpBotServer {
 impl ServerHandler for McpBotServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
-        info.server_info =
-            Implementation::new("minecraft-mcp-rs", env!("CARGO_PKG_VERSION"));
+        info.server_info = Implementation::new("minecraft-mcp-rs", env!("CARGO_PKG_VERSION"));
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
             "Minecraft bot control via MCP. Use query tools to inspect world state, \
@@ -304,7 +327,7 @@ pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
         Ok(running) => {
             info!("MCP server initialized, waiting for transport to close");
             // Wait until the transport is closed or the service is cancelled.
-            running.waiting().await;
+            let _ = running.waiting().await;
             info!("MCP server transport closed cleanly");
         }
         Err(e) => {
@@ -378,16 +401,25 @@ mod tests {
         let (sender, _receiver) = create_command_channel(4);
         let server = McpBotServer::new(state, sender);
 
-        let result = server.move_to(Parameters(MoveToInput { x: 0, y: 64, z: 0 })).await;
+        let result = server
+            .move_to(Parameters(MoveToInput { x: 0, y: 64, z: 0 }))
+            .await;
         assert!(result.contains("not connected"));
 
-        let result = server.walk_direction(Parameters(WalkDirectionInput { direction: "north".into(), distance: 1 })).await;
+        let result = server
+            .walk_direction(Parameters(WalkDirectionInput {
+                direction: "north".into(),
+                distance: 1,
+            }))
+            .await;
         assert!(result.contains("not connected"));
 
         let result = server.jump(Parameters(JumpInput {})).await;
         assert!(result.contains("not connected"));
 
-        let result = server.teleport(Parameters(TeleportInput { x: 0, y: 64, z: 0 })).await;
+        let result = server
+            .teleport(Parameters(TeleportInput { x: 0, y: 64, z: 0 }))
+            .await;
         assert!(result.contains("requires Creative") || result.contains("not connected"));
     }
 
@@ -398,16 +430,30 @@ mod tests {
         let (sender, _receiver) = create_command_channel(4);
         let server = McpBotServer::new(state, sender);
 
-        let result = server.open_container(Parameters(OpenContainerInput { x: 0, y: 64, z: 0 })).await;
+        let result = server
+            .open_container(Parameters(OpenContainerInput { x: 0, y: 64, z: 0 }))
+            .await;
         assert!(result.contains("not connected"));
 
-        let result = server.take_from_container(Parameters(TakeFromContainerInput { slot: 0, count: Some(1) })).await;
+        let result = server
+            .take_from_container(Parameters(TakeFromContainerInput {
+                slot: 0,
+                count: Some(1),
+            }))
+            .await;
         assert!(result.contains("No container is currently open"));
 
-        let result = server.put_into_container(Parameters(PutIntoContainerInput { slot: 0, count: Some(1) })).await;
+        let result = server
+            .put_into_container(Parameters(PutIntoContainerInput {
+                slot: 0,
+                count: Some(1),
+            }))
+            .await;
         assert!(result.contains("No container is currently open"));
 
-        let result = server.close_container(Parameters(CloseContainerInput {})).await;
+        let result = server
+            .close_container(Parameters(CloseContainerInput {}))
+            .await;
         assert!(result.contains("No container is currently open"));
     }
 
@@ -418,10 +464,14 @@ mod tests {
         let (sender, _receiver) = create_command_channel(4);
         let server = McpBotServer::new(state, sender);
 
-        let result = server.attack_entity(Parameters(AttackEntityInput { entity_id: 42 })).await;
+        let result = server
+            .attack_entity(Parameters(AttackEntityInput { entity_id: 42 }))
+            .await;
         assert!(result.contains("not found") || result.contains("not connected"));
 
-        let result = server.shield_block(Parameters(ShieldBlockInput { blocking: true })).await;
+        let result = server
+            .shield_block(Parameters(ShieldBlockInput { blocking: true }))
+            .await;
         assert!(result.contains("not connected"));
     }
 

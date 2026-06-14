@@ -14,7 +14,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
 use crate::state::SharedState;
@@ -40,9 +40,7 @@ impl rmcp::schemars::JsonSchema for AttackEntityInput {
         Cow::Borrowed("AttackEntityInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -80,8 +78,7 @@ pub async fn handle_attack_entity(
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::AttackEntity(input.entity_id);
@@ -106,9 +103,7 @@ impl rmcp::schemars::JsonSchema for ShieldBlockInput {
         Cow::Borrowed("ShieldBlockInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -133,20 +128,15 @@ pub async fn handle_shield_block(
     input: ShieldBlockInput,
 ) -> String {
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::ShieldBlock;
     match sender.send_command(cmd).await {
         Ok(result) => {
-            let mut json =
-                serde_json::to_value(&result).unwrap_or_default();
+            let mut json = serde_json::to_value(&result).unwrap_or_default();
             if let Some(obj) = json.as_object_mut() {
-                obj.insert(
-                    "blocking".to_string(),
-                    Value::Bool(input.blocking),
-                );
+                obj.insert("blocking".to_string(), Value::Bool(input.blocking));
             }
             serde_json::to_string(&json).unwrap_or_else(|e| {
                 format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
@@ -183,13 +173,11 @@ mod tests {
         tokio::spawn(async move {
             while let Some(wrapped) = receiver.recv().await {
                 let msg = format!("executed: {:?}", wrapped.command);
-                let _ = wrapped
-                    .respond_to
-                    .send(Ok(crate::types::BotResult {
-                        success: true,
-                        message: msg,
-                        data: None,
-                    }));
+                let _ = wrapped.respond_to.send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: msg,
+                    data: None,
+                }));
             }
         });
 

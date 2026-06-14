@@ -14,7 +14,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
 use crate::command_validate::validate_block_pos;
@@ -44,9 +44,7 @@ impl rmcp::schemars::JsonSchema for BreakBlockInput {
         Cow::Borrowed("BreakBlockInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -90,15 +88,13 @@ pub async fn handle_break_block(
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::BreakBlock(BlockPos::new(input.x, input.y, input.z));
     match sender.send_command(cmd).await {
         Ok(result) => {
-            let mut json =
-                serde_json::to_value(&result).unwrap_or_default();
+            let mut json = serde_json::to_value(&result).unwrap_or_default();
             if let Some(obj) = json.as_object_mut() {
                 obj.insert(
                     "use_best_tool".to_string(),
@@ -129,9 +125,7 @@ impl rmcp::schemars::JsonSchema for PlaceBlockInput {
         Cow::Borrowed("PlaceBlockInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -185,8 +179,7 @@ pub async fn handle_place_block(
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::PlaceBlock(
@@ -217,9 +210,7 @@ impl rmcp::schemars::JsonSchema for UseItemOnBlockInput {
         Cow::Borrowed("UseItemOnBlockInput")
     }
 
-    fn json_schema(
-        _gen: &mut rmcp::schemars::SchemaGenerator,
-    ) -> rmcp::schemars::Schema {
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
         schema_from_json(json!({
             "type": "object",
             "properties": {
@@ -264,17 +255,14 @@ pub async fn handle_use_item_on_block(
     }
 
     // Validate optional item slot
-    if let Some(slot) = input.item_slot {
-        if slot > 8 {
-            return format!(
-                r#"{{"success":false,"error":"item_slot must be 0-8, got {slot}"}}"#
-            );
-        }
+    if let Some(slot) = input.item_slot
+        && slot > 8
+    {
+        return format!(r#"{{"success":false,"error":"item_slot must be 0-8, got {slot}"}}"#);
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#
-            .to_string();
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::UseItemOnBlock(BlockPos::new(input.x, input.y, input.z));
@@ -308,13 +296,11 @@ mod tests {
         tokio::spawn(async move {
             while let Some(wrapped) = receiver.recv().await {
                 let msg = format!("executed: {:?}", wrapped.command);
-                let _ = wrapped
-                    .respond_to
-                    .send(Ok(crate::types::BotResult {
-                        success: true,
-                        message: msg,
-                        data: None,
-                    }));
+                let _ = wrapped.respond_to.send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: msg,
+                    data: None,
+                }));
             }
         });
 

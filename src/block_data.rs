@@ -2,6 +2,11 @@
 //!
 //! Provides lookup functions for block-to-tool mappings, material tier speeds,
 //! tool name patterns, block hardness values, and mining time calculations.
+//!
+//! > **Note:** Most items in this module are lookup tables designed for the
+//! > bot ops layer.  They are retained for the integration plan.
+
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -239,10 +244,7 @@ pub static TOOL_NAMES: LazyLock<HashMap<(ToolType, MaterialTier), Vec<&'static s
         m.insert((ToolType::Axe, MaterialTier::Stone), vec!["stone_axe"]);
         m.insert((ToolType::Axe, MaterialTier::Iron), vec!["iron_axe"]);
         m.insert((ToolType::Axe, MaterialTier::Gold), vec!["golden_axe"]);
-        m.insert(
-            (ToolType::Axe, MaterialTier::Diamond),
-            vec!["diamond_axe"],
-        );
+        m.insert((ToolType::Axe, MaterialTier::Diamond), vec!["diamond_axe"]);
         m.insert(
             (ToolType::Axe, MaterialTier::Netherite),
             vec!["netherite_axe"],
@@ -256,10 +258,7 @@ pub static TOOL_NAMES: LazyLock<HashMap<(ToolType, MaterialTier), Vec<&'static s
             (ToolType::Shovel, MaterialTier::Stone),
             vec!["stone_shovel"],
         );
-        m.insert(
-            (ToolType::Shovel, MaterialTier::Iron),
-            vec!["iron_shovel"],
-        );
+        m.insert((ToolType::Shovel, MaterialTier::Iron), vec!["iron_shovel"]);
         m.insert(
             (ToolType::Shovel, MaterialTier::Gold),
             vec!["golden_shovel"],
@@ -426,11 +425,7 @@ pub fn material_from_item_name(name: &str) -> Option<(ToolType, MaterialTier)> {
 /// If the tool is the wrong type for the block, a 5× penalty is applied.
 /// Unbreakable blocks (hardness < 0) return [`f64::INFINITY`].
 /// Unknown blocks default to 0.5 hardness.
-pub fn calculate_mine_time(
-    block_type: &str,
-    tool_type: &ToolType,
-    material: &MaterialTier,
-) -> f64 {
+pub fn calculate_mine_time(block_type: &str, tool_type: &ToolType, material: &MaterialTier) -> f64 {
     let hardness = BLOCK_HARDNESS.get(block_type).copied().unwrap_or(0.5);
 
     // Unbreakable blocks (bedrock, etc.)
@@ -441,10 +436,7 @@ pub fn calculate_mine_time(
     let speed = if *tool_type == ToolType::Hand {
         1.0
     } else {
-        MATERIAL_TIER_SPEED
-            .get(material)
-            .copied()
-            .unwrap_or(1.0)
+        MATERIAL_TIER_SPEED.get(material).copied().unwrap_or(1.0)
     };
 
     let expected_tool = best_tool_for_block(block_type);
@@ -479,9 +471,7 @@ pub fn find_best_tool_in_inventory(
                 continue;
             }
 
-            let priority = MATERIAL_PRIORITY
-                .iter()
-                .position(|m| m == &found_material);
+            let priority = MATERIAL_PRIORITY.iter().position(|m| m == &found_material);
 
             match (best_priority, priority) {
                 (None, Some(p)) => {
@@ -678,10 +668,7 @@ mod tests {
     #[test]
     fn test_find_best_tool_empty_inventory() {
         let inv: Vec<Option<ItemStack>> = vec![];
-        assert_eq!(
-            find_best_tool_in_inventory(&ToolType::Pickaxe, &inv),
-            None
-        );
+        assert_eq!(find_best_tool_in_inventory(&ToolType::Pickaxe, &inv), None);
     }
 
     #[test]
@@ -696,10 +683,7 @@ mod tests {
                 count: 1,
             }),
         ];
-        assert_eq!(
-            find_best_tool_in_inventory(&ToolType::Pickaxe, &inv),
-            None
-        );
+        assert_eq!(find_best_tool_in_inventory(&ToolType::Pickaxe, &inv), None);
     }
 
     #[test]

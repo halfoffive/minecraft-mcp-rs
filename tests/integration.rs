@@ -107,10 +107,7 @@ async fn test_full_mcp_cycle_initialize_and_query() {
         info.capabilities.tools.is_some(),
         "tools capability must be enabled"
     );
-    assert!(
-        info.instructions.is_some(),
-        "server must have instructions"
-    );
+    assert!(info.instructions.is_some(), "server must have instructions");
     let instructions = info.instructions.unwrap();
     assert!(
         instructions.contains("Minecraft"),
@@ -144,11 +141,8 @@ async fn test_full_mcp_cycle_initialize_and_query() {
             .expect("should respond");
     });
 
-    let chat_response = minecraft_mcp_rs::mcp::tools_chat::handle_send_chat(
-        &sender,
-        "Hello World".into(),
-    )
-    .await;
+    let chat_response =
+        minecraft_mcp_rs::mcp::tools_chat::handle_send_chat(&sender, "Hello World".into()).await;
     assert!(chat_response.contains("message sent"));
 
     responder.await.expect("responder should complete");
@@ -304,10 +298,7 @@ fn test_get_self_info_returns_player_data_from_snapshot() {
     let parsed: serde_json::Value =
         serde_json::from_str(&result).expect("get_self_info should return valid JSON");
 
-    assert_eq!(
-        parsed["uuid"],
-        "550e8400-e29b-41d4-a716-446655440000"
-    );
+    assert_eq!(parsed["uuid"], "550e8400-e29b-41d4-a716-446655440000");
     assert_eq!(parsed["username"], "TestBot");
     assert_eq!(parsed["position"]["x"], 100);
     assert_eq!(parsed["position"]["y"], 64);
@@ -622,10 +613,7 @@ async fn test_auto_reconnect_sequence_simulation() {
         r#"{"connected":false}"#
     );
     let offline_resp = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
-    assert_eq!(
-        offline_resp,
-        r#"{"error":"Bot is currently offline"}"#
-    );
+    assert_eq!(offline_resp, r#"{"error":"Bot is currently offline"}"#);
 
     // Phase 3: Reconnect with fresh snapshot
     state.set_online(true);
@@ -656,10 +644,7 @@ async fn test_auto_reconnect_sequence_simulation() {
     );
 
     let reconnected = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
-    assert!(
-        reconnected.contains("200"),
-        "reconnected: x should be 200"
-    );
+    assert!(reconnected.contains("200"), "reconnected: x should be 200");
     assert!(
         reconnected.contains("20.0"),
         "reconnected: health should be 20.0"
@@ -668,10 +653,7 @@ async fn test_auto_reconnect_sequence_simulation() {
         reconnected.contains("\"hunger\":20"),
         "reconnected: hunger should be 20"
     );
-    assert!(
-        reconnected.contains("300"),
-        "reconnected: z should be 300"
-    );
+    assert!(reconnected.contains("300"), "reconnected: z should be 300");
 }
 
 #[tokio::test]
@@ -703,8 +685,7 @@ async fn test_reconnect_multiple_cycles() {
         );
         let offline_resp = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
         assert_eq!(
-            offline_resp,
-            r#"{"error":"Bot is currently offline"}"#,
+            offline_resp, r#"{"error":"Bot is currently offline"}"#,
             "cycle {cycle}: offline should return error"
         );
     }
@@ -724,16 +705,13 @@ fn test_all_query_tools_exist_and_work() {
     let inventory = minecraft_mcp_rs::mcp::tools_query::get_inventory(&state);
     assert!(inventory.contains("held_item_slot"));
 
-    let nearby_blocks =
-        minecraft_mcp_rs::mcp::tools_query::get_nearby_blocks(&state, 1, None);
+    let nearby_blocks = minecraft_mcp_rs::mcp::tools_query::get_nearby_blocks(&state, 1, None);
     assert!(!nearby_blocks.is_empty());
 
-    let nearby_entities =
-        minecraft_mcp_rs::mcp::tools_query::get_nearby_entities(&state, 1);
+    let nearby_entities = minecraft_mcp_rs::mcp::tools_query::get_nearby_entities(&state, 1);
     assert!(!nearby_entities.is_empty());
 
-    let chunk_summary =
-        minecraft_mcp_rs::mcp::tools_query::get_chunk_summary(&state);
+    let chunk_summary = minecraft_mcp_rs::mcp::tools_query::get_chunk_summary(&state);
     assert!(!chunk_summary.is_empty());
 
     let connected = minecraft_mcp_rs::mcp::tools_query::is_connected(&state);
@@ -749,14 +727,12 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
         while let Some(wrapped) = receiver.recv().await {
             let variant = format!("{:?}", wrapped.command);
             let name = variant
-                .split(|c: char| c == '(' || c == ' ')
+                .split(['(', ' '])
                 .next()
                 .unwrap_or(&variant)
                 .to_string();
             variants_seen.insert(name);
-            let _ = wrapped
-                .respond_to
-                .send(Ok(bot_result(true, "executed")));
+            let _ = wrapped.respond_to.send(Ok(bot_result(true, "executed")));
         }
         variants_seen
     });

@@ -3,8 +3,8 @@
 //! Defines `BotError`, the unified error enum for all Minecraft bot operations.
 //! Each variant carries enough context for AI agents to make informed decisions.
 
-use std::fmt::{self, Display, Formatter};
 use rmcp::model::{ErrorCode, ErrorData};
+use std::fmt::{self, Display, Formatter};
 
 /// A position in the Minecraft world.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -154,18 +154,26 @@ impl Display for BotError {
         match self {
             BotError::Offline(msg) => write!(f, "Bot is offline: {msg}"),
             BotError::ConnectionFailed(msg) => write!(f, "Connection failed: {msg}"),
-            BotError::CommandTimeout { command, timeout_secs } => {
+            BotError::CommandTimeout {
+                command,
+                timeout_secs,
+            } => {
                 write!(f, "Command `{command}` timed out after {timeout_secs}s")
             }
             BotError::BlockNotFound(pos) => write!(f, "Block not found at {pos}"),
             BotError::ChunkNotLoaded(pos) => write!(f, "Chunk not loaded at {pos}"),
-            BotError::ToolNotFound { tool_type, material } => {
-                match material {
-                    Some(mat) => write!(f, "Tool not found: {tool_type} ({mat})"),
-                    None => write!(f, "Tool not found: {tool_type}"),
-                }
-            }
-            BotError::TooFar { target, current, max_distance } => {
+            BotError::ToolNotFound {
+                tool_type,
+                material,
+            } => match material {
+                Some(mat) => write!(f, "Tool not found: {tool_type} ({mat})"),
+                None => write!(f, "Tool not found: {tool_type}"),
+            },
+            BotError::TooFar {
+                target,
+                current,
+                max_distance,
+            } => {
                 write!(
                     f,
                     "Target {target} is too far from current position {current} (max distance: {max_distance})"
@@ -214,7 +222,10 @@ impl From<BotError> for ErrorData {
                 (ErrorCode::RESOURCE_NOT_FOUND, Some(detail))
             }
 
-            BotError::ToolNotFound { tool_type, material } => {
+            BotError::ToolNotFound {
+                tool_type,
+                material,
+            } => {
                 let detail = serde_json::json!({
                     "tool_type": tool_type.to_string(),
                     "material": material.as_ref().map(|m| m.to_string()),
@@ -222,7 +233,11 @@ impl From<BotError> for ErrorData {
                 (ErrorCode::INVALID_PARAMS, Some(detail))
             }
 
-            BotError::TooFar { target, current, max_distance } => {
+            BotError::TooFar {
+                target,
+                current,
+                max_distance,
+            } => {
                 let detail = serde_json::json!({
                     "target": { "x": target.x, "y": target.y, "z": target.z },
                     "current": { "x": current.x, "y": current.y, "z": current.z },
@@ -273,10 +288,7 @@ mod tests {
     #[test]
     fn test_display_connection_failed() {
         let err = BotError::ConnectionFailed("connection refused".into());
-        assert_eq!(
-            err.to_string(),
-            "Connection failed: connection refused"
-        );
+        assert_eq!(err.to_string(), "Connection failed: connection refused");
     }
 
     #[test]
@@ -290,19 +302,24 @@ mod tests {
 
     #[test]
     fn test_display_block_not_found() {
-        let pos = BlockPos { x: 10, y: 64, z: -20 };
+        let pos = BlockPos {
+            x: 10,
+            y: 64,
+            z: -20,
+        };
         let err = BotError::BlockNotFound(pos);
         assert_eq!(err.to_string(), format!("Block not found at {pos}"));
     }
 
     #[test]
     fn test_display_chunk_not_loaded() {
-        let pos = BlockPos { x: 1000, y: 0, z: 1000 };
+        let pos = BlockPos {
+            x: 1000,
+            y: 0,
+            z: 1000,
+        };
         let err = BotError::ChunkNotLoaded(pos);
-        assert_eq!(
-            err.to_string(),
-            format!("Chunk not loaded at {pos}")
-        );
+        assert_eq!(err.to_string(), format!("Chunk not loaded at {pos}"));
     }
 
     #[test]
@@ -311,10 +328,7 @@ mod tests {
             tool_type: ToolType::Pickaxe,
             material: Some(MaterialTier::Diamond),
         };
-        assert_eq!(
-            err.to_string(),
-            "Tool not found: pickaxe (diamond)"
-        );
+        assert_eq!(err.to_string(), "Tool not found: pickaxe (diamond)");
     }
 
     #[test]
@@ -328,7 +342,11 @@ mod tests {
 
     #[test]
     fn test_display_too_far() {
-        let target = BlockPos { x: 100, y: 64, z: 0 };
+        let target = BlockPos {
+            x: 100,
+            y: 64,
+            z: 0,
+        };
         let current = BlockPos { x: 0, y: 64, z: 0 };
         let err = BotError::TooFar {
             target,
@@ -415,10 +433,7 @@ mod tests {
         let err = BotError::Offline("bot is offline".into());
         let mcp: ErrorData = err.into();
         assert_eq!(mcp.code, ErrorCode::INTERNAL_ERROR);
-        assert_eq!(
-            mcp.message.as_ref(),
-            "Bot is offline: bot is offline"
-        );
+        assert_eq!(mcp.message.as_ref(), "Bot is offline: bot is offline");
     }
 
     #[test]
@@ -455,11 +470,7 @@ mod tests {
                 y: 20,
                 z: 30,
             },
-            current: BlockPos {
-                x: 0,
-                y: 0,
-                z: 0,
-            },
+            current: BlockPos { x: 0, y: 0, z: 0 },
             max_distance: 42.0,
         };
         let mcp: ErrorData = err.into();
