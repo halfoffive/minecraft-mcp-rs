@@ -19,9 +19,15 @@ use crate::mcp::tools_block::{
     BreakBlockInput, PlaceBlockInput, UseItemOnBlockInput,
 };
 use crate::mcp::tools_chat::{ExecuteCommandInput, SendChatInput, SetGameModeInput};
+use crate::mcp::tools_combat::{AttackEntityInput, ShieldBlockInput};
+use crate::mcp::tools_container::{
+    CloseContainerInput, OpenContainerInput, PutIntoContainerInput,
+    TakeFromContainerInput,
+};
 use crate::mcp::tools_item::{
     DropItemInput, EquipToolInput, SwitchHotbarSlotInput, UseItemInput,
 };
+use crate::mcp::tools_movement::{JumpInput, MoveToInput, TeleportInput, WalkDirectionInput};
 use crate::state::SharedState;
 
 // ---------------------------------------------------------------------------
@@ -92,23 +98,35 @@ impl McpBotServer {
     // ── Movement tools ───────────────────────────────────────
 
     #[tool(description = "Move the bot to a specific position")]
-    async fn move_to_position(&self) -> String {
-        "not implemented yet".into()
+    async fn move_to(
+        &self,
+        Parameters(input): Parameters<MoveToInput>,
+    ) -> String {
+        crate::mcp::tools_movement::handle_move_to(&self.state, &self.sender, input).await
     }
 
     #[tool(description = "Walk the bot in a cardinal direction")]
-    async fn walk_direction(&self) -> String {
-        "not implemented yet".into()
+    async fn walk_direction(
+        &self,
+        Parameters(input): Parameters<WalkDirectionInput>,
+    ) -> String {
+        crate::mcp::tools_movement::handle_walk_direction(&self.state, &self.sender, input).await
     }
 
     #[tool(description = "Make the bot jump")]
-    async fn jump(&self) -> String {
-        "not implemented yet".into()
+    async fn jump(
+        &self,
+        Parameters(input): Parameters<JumpInput>,
+    ) -> String {
+        crate::mcp::tools_movement::handle_jump(&self.state, &self.sender, input).await
     }
 
-    #[tool(description = "Teleport the bot to a position (requires op)")]
-    async fn teleport(&self) -> String {
-        "not implemented yet".into()
+    #[tool(description = "Teleport the bot to a position (requires Creative mode)")]
+    async fn teleport(
+        &self,
+        Parameters(input): Parameters<TeleportInput>,
+    ) -> String {
+        crate::mcp::tools_movement::handle_teleport(&self.state, &self.sender, input).await
     }
 
     // ── Block tools (destructive) ────────────────────────────
@@ -174,35 +192,53 @@ impl McpBotServer {
     // ── Container tools (destructive) ────────────────────────
 
     #[tool(description = "Open a container at the given position", annotations(destructive_hint = true))]
-    async fn open_container(&self) -> String {
-        "not implemented yet".into()
+    async fn open_container(
+        &self,
+        Parameters(input): Parameters<OpenContainerInput>,
+    ) -> String {
+        crate::mcp::tools_container::handle_open_container(&self.state, &self.sender, input).await
     }
 
     #[tool(description = "Take items from an open container slot", annotations(destructive_hint = true))]
-    async fn take_from_container(&self) -> String {
-        "not implemented yet".into()
+    async fn take_from_container(
+        &self,
+        Parameters(input): Parameters<TakeFromContainerInput>,
+    ) -> String {
+        crate::mcp::tools_container::handle_take_from_container(&self.state, &self.sender, input).await
     }
 
     #[tool(description = "Put items into an open container slot", annotations(destructive_hint = true))]
-    async fn put_into_container(&self) -> String {
-        "not implemented yet".into()
+    async fn put_into_container(
+        &self,
+        Parameters(input): Parameters<PutIntoContainerInput>,
+    ) -> String {
+        crate::mcp::tools_container::handle_put_into_container(&self.state, &self.sender, input).await
     }
 
     #[tool(description = "Close the currently open container", annotations(destructive_hint = true))]
-    async fn close_container(&self) -> String {
-        "not implemented yet".into()
+    async fn close_container(
+        &self,
+        Parameters(input): Parameters<CloseContainerInput>,
+    ) -> String {
+        crate::mcp::tools_container::handle_close_container(&self.state, &self.sender, input).await
     }
 
     // ── Combat / Chat tools (destructive) ────────────────────
 
     #[tool(description = "Attack an entity by its Minecraft entity ID", annotations(destructive_hint = true))]
-    async fn attack_entity(&self) -> String {
-        "not implemented yet".into()
+    async fn attack_entity(
+        &self,
+        Parameters(input): Parameters<AttackEntityInput>,
+    ) -> String {
+        crate::mcp::tools_combat::handle_attack_entity(&self.state, &self.sender, input).await
     }
 
     #[tool(description = "Hold up shield to block incoming attacks", annotations(destructive_hint = true))]
-    async fn shield_block(&self) -> String {
-        "not implemented yet".into()
+    async fn shield_block(
+        &self,
+        Parameters(input): Parameters<ShieldBlockInput>,
+    ) -> String {
+        crate::mcp::tools_combat::handle_shield_block(&self.state, &self.sender, input).await
     }
 
     #[tool(description = "Send a chat message to the server", annotations(destructive_hint = true))]
@@ -335,38 +371,58 @@ mod tests {
         assert!(info.instructions.unwrap().contains("Minecraft"));
     }
 
-    /// Non-query tool stubs (movement) still return "not implemented yet"
-    /// until schemars/rmcp integration is resolved.
+    /// Movement tool integration tests — verify offline rejection.
     #[tokio::test]
-    async fn test_movement_tool_stubs_not_implemented() {
+    async fn test_movement_tools_offline() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         let (sender, _receiver) = create_command_channel(4);
         let server = McpBotServer::new(state, sender);
 
-        // Movement tools remain as stubs (parameter integration blocked by rmcp/schemars)
-        assert_eq!(server.jump().await, "not implemented yet");
-        assert_eq!(server.move_to_position().await, "not implemented yet");
-        assert_eq!(server.walk_direction().await, "not implemented yet");
-        assert_eq!(server.teleport().await, "not implemented yet");
+        let result = server.move_to(Parameters(MoveToInput { x: 0, y: 64, z: 0 })).await;
+        assert!(result.contains("not connected"));
+
+        let result = server.walk_direction(Parameters(WalkDirectionInput { direction: "north".into(), distance: 1 })).await;
+        assert!(result.contains("not connected"));
+
+        let result = server.jump(Parameters(JumpInput {})).await;
+        assert!(result.contains("not connected"));
+
+        let result = server.teleport(Parameters(TeleportInput { x: 0, y: 64, z: 0 })).await;
+        assert!(result.contains("requires Creative") || result.contains("not connected"));
     }
 
-    /// Non-chat tool stubs still return "not implemented yet" until
-    /// the rmcp/schemars parameter integration is resolved.
+    /// Container tool integration tests — verify offline/no-container rejection.
     #[tokio::test]
-    async fn test_non_chat_tool_stubs_not_implemented() {
+    async fn test_container_tools_offline() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         let (sender, _receiver) = create_command_channel(4);
         let server = McpBotServer::new(state, sender);
 
-        // Container tools
-        assert_eq!(server.open_container().await, "not implemented yet");
-        assert_eq!(server.take_from_container().await, "not implemented yet");
-        assert_eq!(server.put_into_container().await, "not implemented yet");
-        assert_eq!(server.close_container().await, "not implemented yet");
+        let result = server.open_container(Parameters(OpenContainerInput { x: 0, y: 64, z: 0 })).await;
+        assert!(result.contains("not connected"));
 
-        // Combat tools
-        assert_eq!(server.attack_entity().await, "not implemented yet");
-        assert_eq!(server.shield_block().await, "not implemented yet");
+        let result = server.take_from_container(Parameters(TakeFromContainerInput { slot: 0, count: Some(1) })).await;
+        assert!(result.contains("No container is currently open"));
+
+        let result = server.put_into_container(Parameters(PutIntoContainerInput { slot: 0, count: Some(1) })).await;
+        assert!(result.contains("No container is currently open"));
+
+        let result = server.close_container(Parameters(CloseContainerInput {})).await;
+        assert!(result.contains("No container is currently open"));
+    }
+
+    /// Combat tool integration tests — verify offline/entity-not-found rejection.
+    #[tokio::test]
+    async fn test_combat_tools_offline() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let (sender, _receiver) = create_command_channel(4);
+        let server = McpBotServer::new(state, sender);
+
+        let result = server.attack_entity(Parameters(AttackEntityInput { entity_id: 42 })).await;
+        assert!(result.contains("not found") || result.contains("not connected"));
+
+        let result = server.shield_block(Parameters(ShieldBlockInput { blocking: true })).await;
+        assert!(result.contains("not connected"));
     }
 
     /// Query tools return offline error when the bot is not connected.
