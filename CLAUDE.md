@@ -1,0 +1,1 @@
+This project uses the generic "AGENTS.md". Please replace "CLAUDE.md" with "AGENTS.md", modify "AGENTS.md", and do not modify this file.
