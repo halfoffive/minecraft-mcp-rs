@@ -196,6 +196,7 @@ pub struct WorldSnapshot {
     pub entities: Vec<EntityEntry>,
     pub self_player: SelfPlayer,
     pub timestamp: u64,
+    pub chunk_summary: Vec<(i32, i32)>,
 }
 
 /// Information about the local player.
@@ -585,6 +586,7 @@ mod tests {
                 held_item_slot: 1,
             },
             timestamp: 1234567890,
+            chunk_summary: vec![(0, 0), (1, 0)],
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let deserialized: WorldSnapshot = serde_json::from_str(&json).unwrap();
@@ -592,6 +594,7 @@ mod tests {
         assert_eq!(deserialized.entities.len(), 1);
         assert_eq!(deserialized.self_player.username, "Player");
         assert_eq!(deserialized.timestamp, 1234567890);
+        assert_eq!(deserialized.chunk_summary, vec![(0, 0), (1, 0)]);
     }
 
     #[test]
