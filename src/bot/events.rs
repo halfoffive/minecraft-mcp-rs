@@ -1,6 +1,6 @@
 //! Event processing from the Minecraft client (chat, move, damage, etc.).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use azalea::{Client, Event};
@@ -11,6 +11,28 @@ use crate::channel::BotCommandReceiver;
 use crate::snapshot::{DirtyTracker, SnapshotBuilder};
 use crate::state::SharedState;
 use crate::types::{BlockEntry, BlockPos, EntityEntry, GameMode, SelfPlayer};
+
+// ---------------------------------------------------------------------------
+// Dependency injection — set before ClientBuilder::start()
+// ---------------------------------------------------------------------------
+
+/// Pre-initialized shared state to inject into [`BotState`] before the bot
+/// starts. Set by [`crate::bot::connection::ConnectionManager::connect`].
+///
+/// If not set, [`BotState::default`] falls back to creating an isolated
+/// [`SharedState`] (useful for unit tests).
+pub(crate) static INJECTED_SHARED_STATE: OnceLock<Arc<SharedState>> = OnceLock::new();
+
+/// Pre-initialized command receiver to inject into [`BotState`].
+/// Set by [`crate::bot::connection::ConnectionManager::connect`].
+pub(crate) static INJECTED_COMMAND_RECEIVER: OnceLock<Arc<tokio::sync::Mutex<BotCommandReceiver>>> =
+    OnceLock::new();
+
+/// Pre-initialized egui context to inject into [`BotState`] (optional).
+pub(crate) static INJECTED_EGUI_CTX: OnceLock<Option<egui::Context>> = OnceLock::new();
+
+/// Pre-initialized snapshot interval to inject into [`BotState`].
+pub(crate) static INJECTED_SNAPSHOT_INTERVAL_MS: OnceLock<u64> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // BotState
@@ -39,16 +61,35 @@ pub struct BotState {
 
 impl Default for BotState {
     fn default() -> Self {
-        let (_, receiver) = crate::channel::create_command_channel(1);
+        let shared_state = INJECTED_SHARED_STATE
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(SharedState::new(crate::config::AppConfig::default())));
+
+        let command_receiver = INJECTED_COMMAND_RECEIVER
+            .get()
+            .cloned()
+            .unwrap_or_else(|| {
+                let (_, receiver) = crate::channel::create_command_channel(1);
+                Arc::new(tokio::sync::Mutex::new(receiver))
+            });
+
+        let egui_ctx = INJECTED_EGUI_CTX.get().cloned().flatten();
+
+        let snapshot_interval_ms = INJECTED_SNAPSHOT_INTERVAL_MS
+            .get()
+            .copied()
+            .unwrap_or(500);
+
         Self {
-            shared_state: Arc::new(SharedState::new(crate::config::AppConfig::default())),
-            command_receiver: Arc::new(tokio::sync::Mutex::new(receiver)),
-            egui_ctx: None,
+            shared_state,
+            command_receiver,
+            egui_ctx,
             dirty_tracker: Arc::new(Mutex::new(DirtyTracker::new())),
             last_snapshot_time: Arc::new(Mutex::new(
                 Instant::now() - Duration::from_secs(3600),
             )),
-            snapshot_interval_ms: 500,
+            snapshot_interval_ms,
         }
     }
 }
