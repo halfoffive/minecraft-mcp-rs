@@ -127,6 +127,16 @@ impl SharedState {
         *guard = handle;
     }
 
+    /// Check if a container is currently open without taking the handle.
+    ///
+    /// Returns `true` if a [`ContainerHandle`] is stored, `false` otherwise.
+    /// Unlike [`get_container_handle`](Self::get_container_handle), this does
+    /// not consume the handle — the container remains open.
+    pub fn has_container_open(&self) -> bool {
+        let guard = self.container_handle.lock().expect("container Mutex poisoned");
+        guard.is_some()
+    }
+
     /// Take the container handle out of shared state.
     ///
     /// Returns `None` if no container is currently open.
@@ -407,6 +417,12 @@ mod tests {
     }
 
     // -- Container handle ----------------------------------------------------
+
+    #[test]
+    fn test_has_container_open_initial() {
+        let state = SharedState::new(AppConfig::default());
+        assert!(!state.has_container_open());
+    }
 
     #[test]
     fn test_set_container_handle_none_clears_previous() {
