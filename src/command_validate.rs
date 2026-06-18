@@ -111,13 +111,17 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
 /// World bounds:
 /// - X / Z: ±30,000,000 (world border)
 /// - Y: -64 to +320 (build height limits)
+///
+/// Note: comparisons use explicit lower/upper bounds rather than `x.abs()`
+/// to avoid the `i32::MIN` overflow (`.abs()` panics in debug and wraps in
+/// release, letting `i32::MIN` slip past an `abs()`-based check).
 pub fn validate_coordinates(x: i32, y: i32, z: i32) -> Result<(), String> {
-    if x.abs() > WORLD_BORDER {
+    if !(-WORLD_BORDER..=WORLD_BORDER).contains(&x) {
         return Err(format!(
             "x coordinate {x} out of range (must be between -{WORLD_BORDER} and {WORLD_BORDER})"
         ));
     }
-    if z.abs() > WORLD_BORDER {
+    if !(-WORLD_BORDER..=WORLD_BORDER).contains(&z) {
         return Err(format!(
             "z coordinate {z} out of range (must be between -{WORLD_BORDER} and {WORLD_BORDER})"
         ));
@@ -268,6 +272,17 @@ mod tests {
     fn test_validate_coordinates_y_out_of_range() {
         assert!(validate_coordinates(0, MIN_Y - 1, 0).is_err());
         assert!(validate_coordinates(0, MAX_Y + 1, 0).is_err());
+    }
+
+    #[test]
+    fn test_validate_coordinates_i32_min_no_overflow() {
+        // Regression: `i32::MIN.abs()` overflows (panics in debug, wraps in
+        // release). The explicit-bound comparison must reject it cleanly.
+        assert!(validate_coordinates(i32::MIN, 64, 0).is_err());
+        assert!(validate_coordinates(0, 64, i32::MIN).is_err());
+        // i32::MAX is also out of bounds (> 30_000_000) and must be rejected.
+        assert!(validate_coordinates(i32::MAX, 64, 0).is_err());
+        assert!(validate_coordinates(0, 64, i32::MAX).is_err());
     }
 
     #[test]

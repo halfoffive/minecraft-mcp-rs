@@ -242,9 +242,24 @@ impl CompoundOpExecutor {
                     // Advance to WaitingForResult (ExecutingAction + ActionStarted → WaitingForResult)
                     state = op.advance(state, OperationEvent::ActionStarted);
 
-                    // Step 9: Wait for mining completion
+                    // Step 9: Wait for mining completion.
                     let mine_time = calculate_mine_time(&block_type, tool_type, material);
                     trace!(mine_time, "waiting for mining completion");
+
+                    // Unbreakable blocks (e.g. bedrock) yield INFINITY, which
+                    // would panic `Duration::from_secs_f64`. Fail fast with a
+                    // clear error instead of crashing the bot thread.
+                    if !mine_time.is_finite() {
+                        state = op.advance(
+                            state,
+                            OperationEvent::Failed(BotError::MiningInterrupted {
+                                reason: format!(
+                                    "block {block_type} is unbreakable (infinite mine time)"
+                                ),
+                            }),
+                        );
+                        continue;
+                    }
                     sleep(Duration::from_secs_f64(mine_time)).await;
 
                     // Step 10: Verify block broken

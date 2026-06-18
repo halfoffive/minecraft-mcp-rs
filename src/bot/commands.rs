@@ -19,7 +19,8 @@ use azalea::prelude::*;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, trace, warn};
 
-use crate::channel::BotCommandReceiver;
+use crate::block_data::ItemStack;
+use crate::channel::{BotCommandReceiver, ReceiverLease};
 use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::{BlockPos, BotCommand, BotResult, Direction, GameMode};
@@ -72,6 +73,13 @@ pub(crate) trait BotActions {
 
     /// Open a container at the given position.
     fn open_container(&self, pos: &BlockPos);
+
+    /// Snapshot the player's inventory as a 36-slot vector.
+    ///
+    /// Index `0..=8` is the hotbar, `9..=35` is the main inventory. Empty
+    /// slots are `None`. Used by [`CommandExecutor`] to answer
+    /// [`BotCommand::QueryInventory`].
+    fn inventory_entries(&self) -> Vec<Option<ItemStack>>;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -199,6 +207,61 @@ impl BotActions for RealBotClient {
             let _handle = client.open_container_at(az_pos).await;
         });
     }
+
+    fn inventory_entries(&self) -> Vec<Option<ItemStack>> {
+        // The player inventory is the 36-slot `inventory` field of
+        // `Menu::Player`. When a container is open the menu is no longer
+        // `Player`, so fall back to an empty snapshot.
+        let menu = self.client.menu();
+        let player = match menu.try_as_player() {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+        // `player.inventory` is a `SlotList<36>` deref'ing to `[ItemStack; 36]`.
+        player
+            .inventory
+            .iter()
+            .map(|stack| {
+                if stack.is_empty() {
+                    None
+                } else {
+                    Some(ItemStack {
+                        item_id: item_kind_to_id(stack.kind()),
+                        count: stack.count().clamp(0, 255) as u8,
+                    })
+                }
+            })
+            .collect()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ItemKind → item_id string
+// ═══════════════════════════════════════════════════════════════
+
+/// Convert an azalea `ItemKind` (Debug variant name like `IronPickaxe`) into
+/// the snake_case item id used by the block/tool tables (`iron_pickaxe`).
+fn item_kind_to_id(kind: azalea::registry::builtin::ItemKind) -> String {
+    to_snake_case(&format!("{kind:?}"))
+}
+
+/// Naive CamelCase → snake_case conversion.
+///
+/// Inserts `_` before each uppercase letter (except at the start) and
+/// lowercases the result. Sufficient for azalea registry variant names.
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 4);
+    for (i, ch) in s.chars().enumerate() {
+        if ch.is_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.push(ch.to_ascii_lowercase());
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -224,33 +287,64 @@ fn direction_to_walk(dir: Direction) -> Option<WalkDirection> {
 
 /// Dispatches [`BotCommand`]s to an azalea client via [`BotActions`].
 ///
-/// Owns the bot client, shared state, and the command receiver channel.
-/// Call [`run`](Self::run) to start the serial command processing loop.
+/// Owns the bot client, shared state, and (optionally) the command receiver
+/// channel. Call [`run`](Self::run) to start the serial command processing
+/// loop using the owned receiver, or [`run_with_lease`](Self::run_with_lease)
+/// to drive the loop with a [`ReceiverLease`] that returns the receiver to
+/// its slot when the executor is aborted.
 pub(crate) struct CommandExecutor<B: BotActions> {
     bot: B,
     state: Arc<SharedState>,
-    receiver: BotCommandReceiver,
+    /// Owned receiver for the [`run`] path. `None` when the executor was
+    /// constructed via [`new_for_lease`](Self::new_for_lease).
+    receiver: Option<BotCommandReceiver>,
 }
 
 impl<B: BotActions> CommandExecutor<B> {
-    /// Create a new executor.
+    /// Create a new executor that owns its receiver (used by tests).
     pub fn new(bot: B, state: Arc<SharedState>, receiver: BotCommandReceiver) -> Self {
         Self {
             bot,
             state,
-            receiver,
+            receiver: Some(receiver),
         }
     }
 
-    /// Run the command processing loop.
+    /// Create a new executor without an owned receiver; meant to be driven by
+    /// [`run_with_lease`](Self::run_with_lease) so the receiver is returned to
+    /// its shared slot when the task is aborted.
+    pub(crate) fn new_for_lease(bot: B, state: Arc<SharedState>) -> Self {
+        Self {
+            bot,
+            state,
+            receiver: None,
+        }
+    }
+
+    /// Run the command processing loop using the owned receiver.
     ///
     /// Receives commands one at a time from the channel, dispatches them,
     /// and sends a [`BotResult`] (or [`BotError`]) back via the oneshot
     /// responder.  Returns when all senders are dropped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the executor was constructed without an owned receiver
+    /// (i.e. via [`new_for_lease`](Self::new_for_lease)).
     pub async fn run(&mut self) {
         trace!("command executor loop started");
 
-        while let Some(wrapped) = self.receiver.recv().await {
+        // The receiver borrow is kept as a temporary inside the `while let`
+        // condition so it does not extend into the loop body (where
+        // `self.dispatch` needs `&self`). Binding it to a named local would
+        // keep `self` mutably borrowed for the whole loop.
+        while let Some(wrapped) = self
+            .receiver
+            .as_mut()
+            .expect("CommandExecutor::run requires an owned receiver")
+            .recv()
+            .await
+        {
             debug!(command = ?wrapped.command, "dispatching command");
             let result = self.dispatch(wrapped.command.clone()).await;
             if wrapped.respond_to.send(result).is_err() {
@@ -261,8 +355,34 @@ impl<B: BotActions> CommandExecutor<B> {
         trace!("command executor loop ended (all senders dropped)");
     }
 
+    /// Run the command processing loop using a [`ReceiverLease`].
+    ///
+    /// Unlike [`run`](Self::run), the receiver is not owned by the executor:
+    /// it is borrowed from the shared slot via the lease. When the task is
+    /// aborted (e.g. on disconnect), the lease drops and returns the receiver
+    /// to the slot, allowing a future `Spawn` to re-acquire it.
+    pub(crate) async fn run_with_lease(&mut self, mut lease: ReceiverLease) {
+        trace!("command executor loop started (leased receiver)");
+
+        loop {
+            let wrapped = lease.receiver_mut().recv().await;
+            match wrapped {
+                Some(wrapped) => {
+                    debug!(command = ?wrapped.command, "dispatching command");
+                    let result = self.dispatch(wrapped.command.clone()).await;
+                    if wrapped.respond_to.send(result).is_err() {
+                        warn!("command responder dropped — result lost");
+                    }
+                }
+                None => break,
+            }
+        }
+
+        trace!("command executor loop ended (channel closed)");
+    }
+
     /// Dispatch a single command and return the result.
-    async fn dispatch(&self, cmd: BotCommand) -> Result<BotResult, BotError> {
+    pub(crate) async fn dispatch(&self, cmd: BotCommand) -> Result<BotResult, BotError> {
         // Check online status for commands that require a connection.
         if !self.state.is_online() {
             return Err(BotError::Offline("bot is not connected".into()));
@@ -384,6 +504,19 @@ impl<B: BotActions> CommandExecutor<B> {
 
     fn handle_place_block(&self, pos: BlockPos, block_type: String) -> Result<BotResult, BotError> {
         trace!(?pos, %block_type, "PlaceBlock");
+        // The MCP layer encodes the hotbar slot as "slot:N" in the block_type
+        // field (see tools_block::handle_place_block). Select that slot before
+        // right-clicking so the correct block is placed.
+        if let Some(slot_str) = block_type.strip_prefix("slot:")
+            && let Ok(slot) = slot_str.parse::<u8>()
+        {
+            if slot <= 8 {
+                self.bot.switch_hotbar_slot(slot);
+            } else {
+                // Out-of-range slot — log but still attempt the interact.
+                warn!(slot, "place_block slot out of hotbar range (0-8)");
+            }
+        }
         self.bot.block_interact(&pos);
         Ok(BotResult {
             success: true,
@@ -529,10 +662,14 @@ impl<B: BotActions> CommandExecutor<B> {
 
     fn handle_execute_command(&self, cmd: String) -> Result<BotResult, BotError> {
         trace!(%cmd, "ExecuteCommand");
-        self.bot.chat(&format!("/{}", cmd));
+        // The MCP layer (tools_chat::handle_execute_command) already
+        // normalises the leading `/`, so `cmd` is passed straight to chat.
+        // Re-prepending here would produce `//command`, which Minecraft
+        // treats as a normal chat message rather than a command.
+        self.bot.chat(&cmd);
         Ok(BotResult {
             success: true,
-            message: format!("Executed command: /{}", cmd),
+            message: format!("Executed command: {}", cmd),
             data: None,
         })
     }
@@ -613,12 +750,25 @@ impl<B: BotActions> CommandExecutor<B> {
 
     fn handle_query_inventory(&self) -> Result<BotResult, BotError> {
         trace!("QueryInventory");
-        // Inventory data is managed by the event handler via snapshot updates.
-        // Return a placeholder; full inventory querying requires azalea ECS access.
+        // Read the live inventory from the azalea client. The result is a
+        // 36-element JSON array (index = slot, null = empty slot), matching
+        // the format parsed by `compound_ops::query_inventory`.
+        let entries = self.bot.inventory_entries();
+        let arr: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|opt| match opt {
+                None => serde_json::Value::Null,
+                Some(stack) => serde_json::json!({
+                    "item_id": stack.item_id,
+                    "count": stack.count,
+                }),
+            })
+            .collect();
+        let occupied = entries.iter().filter(|s| s.is_some()).count();
         Ok(BotResult {
             success: true,
-            message: "Inventory query acknowledged".into(),
-            data: Some(serde_json::json!([])),
+            message: format!("Inventory has {occupied} occupied slot(s)"),
+            data: Some(serde_json::Value::Array(arr)),
         })
     }
 
@@ -668,6 +818,8 @@ mod tests {
         mine_calls: Mutex<Vec<BlockPos>>,
         interact_calls: Mutex<Vec<BlockPos>>,
         container_open_calls: Mutex<Vec<BlockPos>>,
+        inventory_calls: AtomicUsize,
+        inventory: Mutex<Vec<Option<ItemStack>>>,
         position: Mutex<BlockPos>,
     }
 
@@ -689,6 +841,8 @@ mod tests {
                 mine_calls: Mutex::new(Vec::new()),
                 interact_calls: Mutex::new(Vec::new()),
                 container_open_calls: Mutex::new(Vec::new()),
+                inventory_calls: AtomicUsize::new(0),
+                inventory: Mutex::new(Vec::new()),
                 position: Mutex::new(BlockPos::new(0, 64, 0)),
             }
         }
@@ -784,6 +938,11 @@ mod tests {
 
         fn open_container(&self, pos: &BlockPos) {
             self.log.container_open_calls.lock().unwrap().push(*pos);
+        }
+
+        fn inventory_entries(&self) -> Vec<Option<ItemStack>> {
+            self.log.inventory_calls.fetch_add(1, Ordering::SeqCst);
+            self.log.inventory.lock().unwrap().clone()
         }
     }
 
@@ -1128,11 +1287,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_command() {
+        // The MCP layer normalises the leading `/` before constructing
+        // BotCommand::ExecuteCommand, so the executor passes the string
+        // straight to chat without re-prepending.
         let (executor, sender, _state, log) = make_executor();
         let handle = spawn_executor(executor);
 
         let result =
-            send_and_await(&sender, BotCommand::ExecuteCommand("time set day".into())).await;
+            send_and_await(&sender, BotCommand::ExecuteCommand("/time set day".into())).await;
         assert!(result.is_ok());
 
         drop(sender);
@@ -1245,6 +1407,31 @@ mod tests {
 
         drop(sender);
         handle.await.expect("executor should finish");
+
+        let interacts = log.interact_calls.lock().unwrap();
+        assert_eq!(interacts.len(), 1);
+        assert_eq!(interacts[0], pos);
+        // No slot: prefix → no hotbar switch.
+        assert!(log.hotbar_switch_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_place_block_selects_slot_from_prefix() {
+        // The MCP layer encodes the hotbar slot as "slot:N" in the block_type
+        // field; the executor must select that slot before interacting.
+        let (executor, sender, _state, log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let pos = BlockPos::new(10, 64, 20);
+        let result = send_and_await(&sender, BotCommand::PlaceBlock(pos, "slot:3".into())).await;
+        assert!(result.is_ok());
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        let slots = log.hotbar_switch_calls.lock().unwrap();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0], 3);
 
         let interacts = log.interact_calls.lock().unwrap();
         assert_eq!(interacts.len(), 1);

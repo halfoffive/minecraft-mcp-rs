@@ -30,9 +30,10 @@ pub struct MinecraftApp {
     state: Arc<SharedState>,
     /// Channel sender for dispatching bot commands.
     sender: BotCommandSender,
-    /// Shared command receiver, passed to the bot connection task so it can
-    /// process commands from the MCP server while connected.
-    command_receiver: Arc<tokio::sync::Mutex<BotCommandReceiver>>,
+    /// Shared command receiver slot, passed to the bot connection task so it
+    /// can process commands from the MCP server while connected. The receiver
+    /// is leased out to the command executor on `Event::Spawn`.
+    command_receiver: Arc<std::sync::Mutex<Option<BotCommandReceiver>>>,
     /// Local edit buffers for the settings panel.  Initialised from
     /// [`SharedState`] config on first frame.
     edit_config: Option<EditConfig>,
@@ -102,7 +103,7 @@ impl MinecraftApp {
     pub fn new(
         state: Arc<SharedState>,
         sender: BotCommandSender,
-        command_receiver: Arc<tokio::sync::Mutex<BotCommandReceiver>>,
+        command_receiver: Arc<std::sync::Mutex<Option<BotCommandReceiver>>>,
     ) -> Self {
         Self {
             state,

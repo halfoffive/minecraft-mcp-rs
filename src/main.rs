@@ -36,9 +36,12 @@ fn main() {
     let config = AppConfig::default();
     let state = Arc::new(SharedState::new(config));
     let (sender, receiver) = channel::create_command_channel(64);
-    // Wrap the receiver so it can be shared between the MCP event handler
-    // and the bot connection loop.
-    let receiver = Arc::new(tokio::sync::Mutex::new(receiver));
+    // Wrap the receiver in a shared slot (Arc<Mutex<Option<_>>>) so the
+    // azalea event handler can lease it on `Event::Spawn` and return it to
+    // the slot when the executor is aborted on disconnect. This keeps the
+    // receiver alive across reconnection attempts.
+    let receiver: Arc<std::sync::Mutex<Option<channel::BotCommandReceiver>>> =
+        Arc::new(std::sync::Mutex::new(Some(receiver)));
 
     // ══════════════════════════════════════════════════════════════════
     // Clone for the background MCP thread.

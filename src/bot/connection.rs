@@ -15,7 +15,7 @@ use azalea::account::Account;
 use tracing::{info, warn};
 
 use crate::bot::events;
-use crate::channel::BotCommandReceiver;
+use crate::channel::ReceiverSlot;
 use crate::config::AppConfig;
 use crate::state::SharedState;
 
@@ -65,12 +65,14 @@ impl ConnectionManager {
     /// Spawn this as a background task via [`tokio::spawn`].
     ///
     /// # Parameters
-    /// - `command_receiver`: wrapped in `Arc<Mutex<>>` so it can be shared
-    ///   with the azalea event handler across reconnection attempts.
+    /// - `command_receiver`: shared slot holding the command receiver, wrapped
+    ///   in `Arc<Mutex<Option<_>>>` so the azalea event handler can lease it
+    ///   on `Event::Spawn` (and return it on disconnect). Shared across
+    ///   reconnection attempts.
     /// - `egui_ctx`: optional egui context for triggering UI repaints.
     pub async fn connect(
         &self,
-        command_receiver: Arc<tokio::sync::Mutex<BotCommandReceiver>>,
+        command_receiver: ReceiverSlot,
         egui_ctx: Option<egui::Context>,
     ) -> eyre::Result<()> {
         // Inject dependencies so BotState::default() picks them up when

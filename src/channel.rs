@@ -5,6 +5,8 @@
 //! sent through an async mpsc channel, and the response is returned via a
 //! oneshot channel.
 
+use std::sync::{Arc, Mutex};
+
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 use tracing::{debug, error, trace, warn};
@@ -125,6 +127,64 @@ impl BotCommandReceiver {
 pub fn create_command_channel(buffer: usize) -> (BotCommandSender, BotCommandReceiver) {
     let (tx, rx) = mpsc::channel(buffer);
     (BotCommandSender { tx }, BotCommandReceiver { rx })
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ReceiverLease — borrow the receiver, return it on drop
+// ═══════════════════════════════════════════════════════════════
+
+/// The shared slot that holds the optional command receiver.
+///
+/// `BotState` stores the receiver here so the azalea event handler can
+/// [`ReceiverLease::take`] it on `Event::Spawn` and the command executor can
+/// run with it. When the executor is aborted (e.g. on disconnect), the
+/// [`ReceiverLease`] guard drops and puts the receiver back into the slot,
+/// allowing the next `Spawn` to re-acquire it.
+pub(crate) type ReceiverSlot = Arc<Mutex<Option<BotCommandReceiver>>>;
+
+/// A guard that owns the command receiver for the duration of a command
+/// executor task and returns it to its [`ReceiverSlot`] when dropped.
+///
+/// Construct via [`ReceiverLease::take`]. If the slot was empty (receiver
+/// already leased or never injected), `take` returns `None`.
+pub(crate) struct ReceiverLease {
+    slot: ReceiverSlot,
+    receiver: Option<BotCommandReceiver>,
+}
+
+impl ReceiverLease {
+    /// Take the receiver out of the shared slot, returning a guard that will
+    /// put it back on drop.
+    ///
+    /// Returns `None` if the slot is empty (no receiver to lease).
+    pub(crate) fn take(slot: &ReceiverSlot) -> Option<Self> {
+        let mut guard = slot.lock().expect("command receiver slot mutex poisoned");
+        guard.take().map(|rx| Self {
+            slot: Arc::clone(slot),
+            receiver: Some(rx),
+        })
+    }
+
+    /// Borrow the underlying receiver for receiving commands.
+    ///
+    /// The receiver is always present while the lease is held (the lease is
+    /// only constructed when `take` succeeds).
+    pub(crate) fn receiver_mut(&mut self) -> &mut BotCommandReceiver {
+        self.receiver
+            .as_mut()
+            .expect("ReceiverLease missing receiver — invariant violated")
+    }
+}
+
+impl Drop for ReceiverLease {
+    fn drop(&mut self) {
+        if let Some(rx) = self.receiver.take() {
+            *self
+                .slot
+                .lock()
+                .expect("command receiver slot mutex poisoned") = Some(rx);
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
