@@ -124,7 +124,7 @@ pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::R
             handle_death(&state);
         }
         Event::AddPlayer(info) => {
-            handle_add_player(&state, &info);
+            handle_add_player(&bot, &state, &info);
         }
         Event::RemovePlayer(info) => {
             handle_remove_player(&state, &info);
@@ -164,8 +164,8 @@ fn handle_spawn(bot: Client, state: &BotState) {
     // Lease the command receiver and start a new executor driving it.
     match ReceiverLease::take(&state.command_receiver) {
         Some(lease) => {
-            let client = RealBotClient::new(bot);
             let shared_state = Arc::clone(&state.shared_state);
+            let client = RealBotClient::new(bot, Arc::clone(&shared_state));
             let handle = tokio::task::spawn_local(async move {
                 let mut executor = CommandExecutor::new_for_lease(client, shared_state);
                 executor.run_with_lease(lease).await;
@@ -252,16 +252,46 @@ fn handle_death(state: &BotState) {
     trace!("bot died, set health=0");
 }
 
-fn handle_add_player(state: &BotState, info: &azalea::player::PlayerInfo) {
+fn handle_add_player(bot: &Client, state: &BotState, info: &azalea::player::PlayerInfo) {
+    // The tab-list event fires when a player joins the server, which may be
+    // before their entity has spawned in the client world. Try to read the
+    // live position and minecraft entity id; fall back to defaults if the
+    // entity isn't available yet (a later Tick snapshot will refresh them).
+    let (id, position) = bot
+        .entity_id_by_uuid(info.uuid)
+        .map(|entity| {
+            let position = bot
+                .get_entity_component::<azalea::entity::Position>(entity)
+                .map(|p| BlockPos::new(p.x as i32, p.y as i32, p.z as i32))
+                .unwrap_or(BlockPos::new(0, 0, 0));
+            let id = bot
+                .get_entity_component::<azalea::core::entity_id::MinecraftEntityId>(entity)
+                .map(|m| m.0 as u32)
+                .unwrap_or(0);
+            (id, position)
+        })
+        .unwrap_or((0, BlockPos::new(0, 0, 0)));
+
+    add_player_to_snapshot(state, info, id, position);
+}
+
+/// Pure snapshot update for an added player — split out so it can be tested
+/// without an azalea [`Client`].
+fn add_player_to_snapshot(
+    state: &BotState,
+    info: &azalea::player::PlayerInfo,
+    id: u32,
+    position: BlockPos,
+) {
     let mut snapshot = (*state.shared_state.read_snapshot()).clone();
     snapshot
         .entities
         .retain(|e| e.uuid != info.uuid.to_string());
     snapshot.entities.push(EntityEntry {
-        id: 0,
+        id,
         uuid: info.uuid.to_string(),
         entity_type: "player".to_string(),
-        position: BlockPos::new(0, 0, 0),
+        position,
         display_name: info.display_name.as_ref().map(|dt| dt.to_string()),
         health: None,
     });
@@ -322,7 +352,7 @@ async fn build_and_update_snapshot(bot: &Client, state: &BotState) -> eyre::Resu
         health: health.0,
         hunger: hunger.food as i32,
         gamemode: azalea_gamemode_to_ours(local_gamemode.current),
-        held_item_slot: 0,
+        held_item_slot: bot.selected_hotbar_slot(),
     };
 
     let old_snapshot = state.shared_state.read_snapshot();
@@ -515,10 +545,13 @@ mod tests {
             latency: 20,
             display_name: Some(Box::new(azalea::FormattedText::from("SteveAdmin"))),
         };
-        handle_add_player(&state, &info);
+        // Use the pure helper so the test doesn't need a live azalea Client.
+        add_player_to_snapshot(&state, &info, 7, BlockPos::new(10, 64, -5));
         let snapshot = state.shared_state.read_snapshot();
         assert_eq!(snapshot.entities.len(), 1);
         assert_eq!(snapshot.entities[0].uuid, info.uuid.to_string());
+        assert_eq!(snapshot.entities[0].id, 7);
+        assert_eq!(snapshot.entities[0].position, BlockPos::new(10, 64, -5));
     }
 
     #[test]
@@ -537,7 +570,7 @@ mod tests {
             latency: 20,
             display_name: None,
         };
-        handle_add_player(&state, &info);
+        add_player_to_snapshot(&state, &info, 0, BlockPos::new(0, 0, 0));
         handle_remove_player(&state, &info);
         let snapshot = state.shared_state.read_snapshot();
         assert!(snapshot.entities.is_empty());
@@ -560,7 +593,7 @@ mod tests {
             latency: 20,
             display_name: None,
         };
-        handle_add_player(&state, &info_add);
+        add_player_to_snapshot(&state, &info_add, 0, BlockPos::new(0, 0, 0));
 
         let info_update = azalea::player::PlayerInfo {
             profile: azalea::auth::game_profile::GameProfile {

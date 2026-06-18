@@ -23,7 +23,10 @@ use crate::block_data::ItemStack;
 use crate::channel::{BotCommandReceiver, ReceiverLease};
 use crate::error::BotError;
 use crate::state::SharedState;
+use crate::tool_select::find_tool_in_inventory;
 use crate::types::{BlockPos, BotCommand, BotResult, Direction, GameMode};
+
+use super::ops::to_error_tool_type;
 
 // ═══════════════════════════════════════════════════════════════
 // BotActions trait — abstracts azalea Client for testability
@@ -50,8 +53,8 @@ pub(crate) trait BotActions {
     /// Switch to a hotbar slot (0–8).
     fn switch_hotbar_slot(&self, slot: u8);
 
-    /// Drop items from a hotbar slot.
-    fn drop_item(&self, slot: u8, _count: u8);
+    /// Drop items from an inventory slot (0-35).
+    fn drop_item(&self, slot: u8, count: u8);
 
     /// Start using the currently held item.
     fn start_use_item(&self);
@@ -72,7 +75,11 @@ pub(crate) trait BotActions {
     fn block_interact(&self, pos: &BlockPos);
 
     /// Open a container at the given position.
-    fn open_container(&self, pos: &BlockPos);
+    ///
+    /// On success the [`ContainerHandle`] is stored in [`SharedState`] so
+    /// subsequent `take_from_container` / `put_into_container` / `close`
+    /// commands can borrow it.
+    async fn open_container(&self, pos: &BlockPos) -> Result<(), BotError>;
 
     /// Snapshot the player's inventory as a 36-slot vector.
     ///
@@ -89,11 +96,12 @@ pub(crate) trait BotActions {
 /// Wraps an [`azalea::Client`] to implement [`BotActions`].
 pub(crate) struct RealBotClient {
     client: Client,
+    state: Arc<SharedState>,
 }
 
 impl RealBotClient {
-    pub fn new(client: Client) -> Self {
-        Self { client }
+    pub fn new(client: Client, state: Arc<SharedState>) -> Self {
+        Self { client, state }
     }
 }
 
@@ -159,13 +167,30 @@ impl BotActions for RealBotClient {
         self.client.set_selected_hotbar_slot(slot);
     }
 
-    fn drop_item(&self, slot: u8, _count: u8) {
-        // azalea 0.16 doesn't have a direct "throw item" API.
-        // For now, switch to the slot and right-click to throw one item.
-        self.client.set_selected_hotbar_slot(slot);
-        // Dropping via inventory click is not directly exposed.
-        // As a best-effort, we can use the raw inventory interaction.
-        let _ = slot; // acknowledged — full impl in v2
+    fn drop_item(&self, slot: u8, count: u8) {
+        // Best-effort: issue a `Throw` click on the player's inventory menu
+        // (id=0, no container UI required). The Player menu places the hotbar
+        // at slots 36..=44 and the main inventory at 9..=35, so the logical
+        // inventory slot (0-35) is mapped to its menu slot. `ThrowClick::Single`
+        // drops one item per click (like pressing Q); we issue `count` clicks.
+        use azalea_inventory::operations::ThrowClick;
+
+        // `set_selected_hotbar_slot` panics on slot > 8, and dropping from a
+        // main-inventory slot (9-35) doesn't need selection, so only select
+        // for hotbar slots.
+        if slot <= 8 {
+            self.client.set_selected_hotbar_slot(slot);
+        }
+
+        let menu_slot: u16 = if slot <= 8 {
+            36 + slot as u16
+        } else {
+            slot as u16
+        };
+        let inventory = self.client.get_inventory();
+        for _ in 0..count.max(1) {
+            inventory.click(ThrowClick::Single { slot: menu_slot });
+        }
     }
 
     fn start_use_item(&self) {
@@ -199,13 +224,18 @@ impl BotActions for RealBotClient {
         self.client.block_interact(az_pos);
     }
 
-    fn open_container(&self, pos: &BlockPos) {
+    async fn open_container(&self, pos: &BlockPos) -> Result<(), BotError> {
         let az_pos = azalea::BlockPos::new(pos.x, pos.y, pos.z);
-        // open_container_at is async; spawn it as a background task.
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            let _handle = client.open_container_at(az_pos).await;
-        });
+        // open_container_at awaits the server confirming the container is open
+        // (up to a 5s timeout) and returns a handle that auto-closes on drop.
+        // Store it in SharedState so later container commands can borrow it.
+        match self.client.open_container_at(az_pos).await {
+            Some(handle) => {
+                self.state.set_container_handle(Some(handle));
+                Ok(())
+            }
+            None => Err(BotError::ContainerTimeout),
+        }
     }
 
     fn inventory_entries(&self) -> Vec<Option<ItemStack>> {
@@ -407,7 +437,7 @@ impl<B: BotActions> CommandExecutor<B> {
             BotCommand::EquipTool(tool) => self.handle_equip_tool(tool),
 
             // ── Container ─────────────────────────────────────────
-            BotCommand::OpenContainer(pos) => self.handle_open_container(pos),
+            BotCommand::OpenContainer(pos) => self.handle_open_container(pos).await,
             BotCommand::TakeFromContainer(slot, count) => {
                 self.handle_take_from_container(slot, count)
             }
@@ -575,43 +605,113 @@ impl<B: BotActions> CommandExecutor<B> {
 
     fn handle_equip_tool(&self, tool: crate::types::ToolType) -> Result<BotResult, BotError> {
         trace!(?tool, "EquipTool");
-        // Tool selection is handled by the compound operation layer.
-        // The CommandExecutor just acknowledges the equip request.
-        Ok(BotResult {
-            success: true,
-            message: format!("Equip tool request for {:?}", tool),
-            data: None,
-        })
+        // `Hand` means "no specific tool needed" — nothing to equip.
+        if tool == crate::types::ToolType::Hand {
+            return Ok(BotResult {
+                success: true,
+                message: "No tool needed (Hand)".into(),
+                data: None,
+            });
+        }
+
+        // Search the inventory for a matching tool.
+        let entries = self.bot.inventory_entries();
+        match find_tool_in_inventory(&tool, &entries) {
+            Some((_material, slot)) if slot <= 8 => {
+                // Tool is in the hotbar — switch to it directly.
+                self.bot.switch_hotbar_slot(slot);
+                Ok(BotResult {
+                    success: true,
+                    message: format!("Equipped {tool:?} from hotbar slot {slot}"),
+                    data: None,
+                })
+            }
+            Some((_material, _slot)) => {
+                // Tool exists but is in the main inventory (slot 9-35).
+                // azalea's `set_selected_hotbar_slot` only accepts 0-8, so we
+                // can't hotbar-select it directly. Moving items between the
+                // main inventory and hotbar requires a container click flow
+                // (deferred to a future version).
+                Err(BotError::Internal(format!(
+                    "{tool:?} found in main inventory but not in hotbar; \
+                     move it to a hotbar slot first"
+                )))
+            }
+            None => Err(BotError::ToolNotFound {
+                tool_type: to_error_tool_type(tool),
+                material: None,
+            }),
+        }
     }
 
     // ── Container handlers ───────────────────────────────────────
 
-    fn handle_open_container(&self, pos: BlockPos) -> Result<BotResult, BotError> {
+    async fn handle_open_container(&self, pos: BlockPos) -> Result<BotResult, BotError> {
         trace!(?pos, "OpenContainer");
-        self.bot.open_container(&pos);
+        // Reject if a container is already open to avoid leaking the previous
+        // handle (azalea only supports one open container at a time).
+        if self.state.has_container_open() {
+            return Err(BotError::ContainerAlreadyOpen);
+        }
+        self.bot.open_container(&pos).await?;
         Ok(BotResult {
             success: true,
-            message: format!("Opening container at {}", pos),
+            message: format!("Opened container at {}", pos),
             data: None,
         })
     }
 
     fn handle_take_from_container(&self, slot: u8, count: u8) -> Result<BotResult, BotError> {
         trace!(slot, count, "TakeFromContainer");
-        Ok(BotResult {
-            success: true,
-            message: format!("Taken {} from container slot {}", count, slot),
-            data: None,
-        })
+        // Best-effort: shift-click the given menu slot. For a container slot
+        // this moves the whole stack into the player's inventory. `count` is
+        // treated as a hint; partial moves require a pickup+place flow which
+        // is deferred to a future version.
+        let acted = self.state.with_container_handle(|handle| match handle {
+            Some(handle) => {
+                handle.shift_click(slot as usize);
+                true
+            }
+            None => false,
+        });
+        if acted {
+            Ok(BotResult {
+                success: true,
+                message: format!(
+                    "Shift-clicked container slot {slot} (moved whole stack; count={count} is a hint)"
+                ),
+                data: None,
+            })
+        } else {
+            Err(BotError::Internal("no container is currently open".into()))
+        }
     }
 
     fn handle_put_into_container(&self, slot: u8, count: u8) -> Result<BotResult, BotError> {
         trace!(slot, count, "PutIntoContainer");
-        Ok(BotResult {
-            success: true,
-            message: format!("Put {} into container slot {}", count, slot),
-            data: None,
-        })
+        // Best-effort: shift-click the given menu slot. When `slot` refers to
+        // a player-inventory slot in the open menu, this moves the stack from
+        // the player's inventory into the container. `count` is a hint; partial
+        // moves require a pickup+place flow which is deferred to a future
+        // version.
+        let acted = self.state.with_container_handle(|handle| match handle {
+            Some(handle) => {
+                handle.shift_click(slot as usize);
+                true
+            }
+            None => false,
+        });
+        if acted {
+            Ok(BotResult {
+                success: true,
+                message: format!(
+                    "Shift-clicked slot {slot} to move stack into the container (count={count} is a hint)"
+                ),
+                data: None,
+            })
+        } else {
+            Err(BotError::Internal("no container is currently open".into()))
+        }
     }
 
     fn handle_close_container(&self) -> Result<BotResult, BotError> {
@@ -936,8 +1036,9 @@ mod tests {
             self.log.interact_calls.lock().unwrap().push(*pos);
         }
 
-        fn open_container(&self, pos: &BlockPos) {
+        async fn open_container(&self, pos: &BlockPos) -> Result<(), BotError> {
             self.log.container_open_calls.lock().unwrap().push(*pos);
+            Ok(())
         }
 
         fn inventory_entries(&self) -> Vec<Option<ItemStack>> {
@@ -1489,24 +1590,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_take_from_container() {
+    async fn test_take_from_container_no_container_open() {
+        // Without a container handle in SharedState, the handler returns an
+        // error instead of the old silent-success stub.
         let (executor, sender, _st, _log) = make_executor();
         let handle = spawn_executor(executor);
 
         let result = send_and_await(&sender, BotCommand::TakeFromContainer(3, 10)).await;
-        assert!(result.is_ok());
+        assert!(result.is_err());
+        assert!(matches!(result, Err(BotError::Internal(_))));
 
         drop(sender);
         handle.await.expect("executor should finish");
     }
 
     #[tokio::test]
-    async fn test_put_into_container() {
+    async fn test_put_into_container_no_container_open() {
         let (executor, sender, _state, _log) = make_executor();
         let handle = spawn_executor(executor);
 
         let result = send_and_await(&sender, BotCommand::PutIntoContainer(5, 8)).await;
-        assert!(result.is_ok());
+        assert!(result.is_err());
+        assert!(matches!(result, Err(BotError::Internal(_))));
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -1517,12 +1622,57 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════
 
     #[tokio::test]
-    async fn test_equip_tool() {
+    async fn test_equip_tool_not_found_with_empty_inventory() {
+        // With an empty inventory, EquipTool returns ToolNotFound instead of
+        // the old silent-success stub.
         let (executor, sender, _state, _log) = make_executor();
         let handle = spawn_executor(executor);
 
         let result = send_and_await(&sender, BotCommand::EquipTool(ToolType::Pickaxe)).await;
+        assert!(result.is_err());
+        assert!(matches!(result, Err(BotError::ToolNotFound { .. })));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_equip_tool_found_in_hotbar() {
+        // With a pickaxe in hotbar slot 2, EquipTool selects slot 2.
+        let (executor, sender, _state, log) = make_executor();
+        // Seed the mock inventory: slot 2 has an iron_pickaxe.
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            inv.resize(9, None);
+            inv[2] = Some(ItemStack {
+                item_id: "iron_pickaxe".into(),
+                count: 1,
+            });
+        }
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::EquipTool(ToolType::Pickaxe)).await;
         assert!(result.is_ok());
+        let br = result.unwrap();
+        assert!(br.message.contains("hotbar slot 2"));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        let slots = log.hotbar_switch_calls.lock().unwrap();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0], 2);
+    }
+
+    #[tokio::test]
+    async fn test_equip_tool_hand_is_noop() {
+        let (executor, sender, _state, _log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::EquipTool(ToolType::Hand)).await;
+        assert!(result.is_ok());
+        let br = result.unwrap();
+        assert!(br.message.contains("Hand"));
 
         drop(sender);
         handle.await.expect("executor should finish");

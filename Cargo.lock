@@ -3242,6 +3242,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "azalea",
+ "azalea-inventory",
  "bevy_ecs",
  "eframe",
  "egui",

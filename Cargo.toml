@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 azalea = "0.16"
+azalea-inventory = "0.16"
 rmcp = { version = "1.7.0", features = ["server", "transport-io", "macros"] }
 eframe = "0.31"
 egui = "0.31"

@@ -130,7 +130,7 @@ async fn build_snapshot_inner(
         health: health.0,
         hunger: hunger.food as i32,
         gamemode: azalea_gamemode_to_ours(local_gamemode.current),
-        held_item_slot: 0,
+        held_item_slot: bot.selected_hotbar_slot(),
     };
 
     // ── Read old snapshot ────────────────────────────────────

@@ -41,13 +41,14 @@ fn to_error_block_pos(pos: BlockPos) -> crate::error::BlockPos {
     }
 }
 
-fn to_error_tool_type(tool: ToolType) -> crate::error::ToolType {
+pub(crate) fn to_error_tool_type(tool: ToolType) -> crate::error::ToolType {
     match tool {
         ToolType::Pickaxe => crate::error::ToolType::Pickaxe,
         ToolType::Axe => crate::error::ToolType::Axe,
         ToolType::Shovel => crate::error::ToolType::Shovel,
         ToolType::Sword => crate::error::ToolType::Sword,
         // `error::ToolType` lacks `Shears` and `Hand` — map to a safe fallback.
+        // (Phase 4 unifies the two ToolType enums so this lossy mapping goes away.)
         ToolType::Shears | ToolType::Hand => crate::error::ToolType::Sword,
     }
 }

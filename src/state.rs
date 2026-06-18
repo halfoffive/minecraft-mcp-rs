@@ -166,6 +166,23 @@ impl SharedState {
         guard.take()
     }
 
+    /// Borrow the currently-open container handle without removing it.
+    ///
+    /// The closure receives `&ContainerHandle` and may call its click/shift
+    /// methods. Unlike [`get_container_handle`](Self::get_container_handle),
+    /// the handle stays in shared state afterwards, so the container remains
+    /// open for subsequent operations.
+    ///
+    /// Returns `None` (and calls the closure with `None`) if no container is
+    /// open.
+    pub fn with_container_handle<R>(&self, f: impl FnOnce(Option<&ContainerHandle>) -> R) -> R {
+        let guard = self
+            .container_handle
+            .lock()
+            .expect("container Mutex poisoned");
+        f(guard.as_ref())
+    }
+
     /// Store a chat message, keeping only the last 10.
     pub fn add_chat_message(&self, sender: String, message: String) {
         let mut guard = self
