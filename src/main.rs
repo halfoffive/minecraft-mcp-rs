@@ -34,8 +34,10 @@ fn main() {
     // only `send` operations (which are async) need the runtime.
     // ══════════════════════════════════════════════════════════════════
     let config = AppConfig::default();
-    let state = Arc::new(SharedState::new(config));
+    let state = Arc::new(SharedState::new(config.clone()));
     let (sender, receiver) = channel::create_command_channel(64);
+    // Honour the user-configurable command timeout (editable in the UI).
+    let sender = sender.with_timeout(std::time::Duration::from_secs(config.command_timeout_secs));
     // Wrap the receiver in a shared slot (Arc<Mutex<Option<_>>>) so the
     // azalea event handler can lease it on `Event::Spawn` and return it to
     // the slot when the executor is aborted on disconnect. This keeps the

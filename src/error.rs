@@ -141,6 +141,11 @@ pub enum BotError {
     /// The operation was denied due to insufficient permissions.
     PermissionDenied(String),
 
+    /// A caller-supplied parameter was invalid (out of range, empty, wrong
+    /// type). Maps to MCP `INVALID_PARAMS` so clients can distinguish user
+    /// input errors from internal failures.
+    InvalidParams(String),
+
     /// An internal / unexpected error occurred.
     Internal(String),
 }
@@ -189,6 +194,7 @@ impl Display for BotError {
             BotError::ContainerAlreadyOpen => write!(f, "A container is already open"),
             BotError::ContainerTimeout => write!(f, "Container open timed out"),
             BotError::PermissionDenied(msg) => write!(f, "Permission denied: {msg}"),
+            BotError::InvalidParams(msg) => write!(f, "Invalid parameter: {msg}"),
             BotError::Internal(msg) => write!(f, "Internal error: {msg}"),
         }
     }
@@ -256,6 +262,8 @@ impl From<BotError> for ErrorData {
             }
 
             BotError::PermissionDenied(_) => (ErrorCode::INVALID_REQUEST, None),
+
+            BotError::InvalidParams(_) => (ErrorCode::INVALID_PARAMS, None),
         };
 
         ErrorData::new(code, err.to_string(), data)
@@ -406,6 +414,15 @@ mod tests {
         assert_eq!(err.to_string(), "Internal error: something broke");
     }
 
+    #[test]
+    fn test_display_invalid_params() {
+        let err = BotError::InvalidParams("hotbar slot 9 out of range".into());
+        assert_eq!(
+            err.to_string(),
+            "Invalid parameter: hotbar slot 9 out of range"
+        );
+    }
+
     // -- Clone ----------------------------------------------------------------
 
     #[test]
@@ -491,6 +508,13 @@ mod tests {
         let err = BotError::Internal("unexpected".into());
         let mcp: ErrorData = err.into();
         assert_eq!(mcp.code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn test_into_mcp_error_invalid_params() {
+        let err = BotError::InvalidParams("slot out of range".into());
+        let mcp: ErrorData = err.into();
+        assert_eq!(mcp.code, ErrorCode::INVALID_PARAMS);
     }
 
     #[test]

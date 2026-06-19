@@ -782,10 +782,17 @@ impl<B: BotActions> CommandExecutor<B> {
             GameMode::Adventure => "adventure",
             GameMode::Spectator => "spectator",
         };
+        // Sending `/gamemode` requires operator permissions. The server
+        // rejects it silently (in chat) if the bot lacks OP, but azalea has
+        // no way to detect that from the command path, so report success
+        // honestly as "request sent" and flag the OP requirement.
         self.bot.chat(&format!("/gamemode {}", mode_str));
         Ok(BotResult {
             success: true,
-            message: format!("Set game mode to {:?}", mode),
+            message: format!(
+                "Requested game mode {:?} (requires OP; server may reject without operator permissions)",
+                mode
+            ),
             data: None,
         })
     }

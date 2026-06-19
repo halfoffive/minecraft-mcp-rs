@@ -2,7 +2,7 @@
 //!
 //! This module provides validation functions that check command parameters
 //! for correctness before they are passed to the bot engine. Validation is
-//! stateless — it only checks that the values themselves are within expected
+//! stateless �?it only checks that the values themselves are within expected
 //! ranges, without consulting any external state.
 
 use crate::error::BotError;
@@ -28,8 +28,9 @@ const MAX_Y: i32 = 320;
 ///
 /// # Errors
 ///
-/// Returns [`BotError::Internal`] when any parameter is out of bounds or
-/// otherwise invalid.
+/// Returns [`BotError::InvalidParams`] when any parameter is out of bounds
+/// or otherwise invalid. This maps to MCP `INVALID_PARAMS` so clients can
+/// distinguish user input errors from internal failures.
 pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
     match cmd {
         // Position-based commands: all validate position bounds
@@ -40,10 +41,10 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         | BotCommand::UseItemOnBlock(pos)
         | BotCommand::OpenContainer(pos) => validate_position(pos),
 
-        // Direction is verified by the type system — no runtime checks needed.
+        // Direction is verified by the type system �?no runtime checks needed.
         BotCommand::WalkDirection(_) => Ok(()),
 
-        // Parameterless commands — always valid.
+        // Parameterless commands �?always valid.
         BotCommand::Jump
         | BotCommand::UseItem
         | BotCommand::EquipTool(_)
@@ -58,7 +59,7 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         // Hotbar slot must be in range 0-8.
         BotCommand::SwitchHotbarSlot(slot) => {
             if *slot > 8 {
-                return Err(BotError::Internal(format!(
+                return Err(BotError::InvalidParams(format!(
                     "Hotbar slot must be 0-8, got {slot}"
                 )));
             }
@@ -70,7 +71,9 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         | BotCommand::TakeFromContainer(_, count)
         | BotCommand::PutIntoContainer(_, count) => {
             if *count == 0 {
-                return Err(BotError::Internal("Count must be greater than 0".into()));
+                return Err(BotError::InvalidParams(
+                    "Count must be greater than 0".into(),
+                ));
             }
             Ok(())
         }
@@ -78,7 +81,7 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         // Messages must be non-empty (whitespace-only also rejected).
         BotCommand::SendChat(msg) | BotCommand::ExecuteCommand(msg) => {
             if msg.trim().is_empty() {
-                return Err(BotError::Internal("Message cannot be empty".into()));
+                return Err(BotError::InvalidParams("Message cannot be empty".into()));
             }
             Ok(())
         }
@@ -86,7 +89,7 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         // Block queries use a capped radius; entity queries only require > 0.
         BotCommand::QueryNearbyBlocks(radius) => {
             if *radius < 1 || *radius > 64 {
-                return Err(BotError::Internal(format!(
+                return Err(BotError::InvalidParams(format!(
                     "Radius must be between 1 and 64, got {radius}"
                 )));
             }
@@ -94,9 +97,12 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         }
 
         BotCommand::QueryNearbyEntities(radius) => {
-            if *radius == 0 {
-                return Err(BotError::Internal(format!(
-                    "Radius must be greater than 0, got {radius}"
+            // Upper bound prevents the `radius as i32` cast in the handler
+            // from wrapping (u32 values > i32::MAX would become negative and
+            // the Chebyshev filter would silently return nothing).
+            if *radius == 0 || *radius > 1024 {
+                return Err(BotError::InvalidParams(format!(
+                    "Radius must be between 1 and 1024, got {radius}"
                 )));
             }
             Ok(())
@@ -150,19 +156,19 @@ pub fn validate_block_pos(pos: &BlockPos) -> Result<(), String> {
 /// - Y: -64 to +320 (build height limits)
 fn validate_position(pos: &BlockPos) -> Result<(), BotError> {
     if pos.x < -WORLD_BORDER || pos.x > WORLD_BORDER {
-        return Err(BotError::Internal(format!(
+        return Err(BotError::InvalidParams(format!(
             "X coordinate {} out of bounds (must be between {} and {})",
             pos.x, -WORLD_BORDER, WORLD_BORDER
         )));
     }
     if pos.y < MIN_Y || pos.y > MAX_Y {
-        return Err(BotError::Internal(format!(
+        return Err(BotError::InvalidParams(format!(
             "Y coordinate {} out of bounds (must be between {MIN_Y} and {MAX_Y})",
             pos.y,
         )));
     }
     if pos.z < -WORLD_BORDER || pos.z > WORLD_BORDER {
-        return Err(BotError::Internal(format!(
+        return Err(BotError::InvalidParams(format!(
             "Z coordinate {} out of bounds (must be between {} and {})",
             pos.z, -WORLD_BORDER, WORLD_BORDER
         )));
@@ -464,9 +470,19 @@ mod tests {
 
     #[test]
     fn test_query_nearby_entities_large() {
-        // Entity queries have no upper bound per spec — only must be > 0.
+        // Entity queries allow up to 1024 (prevents `as i32` overflow).
         let cmd = BotCommand::QueryNearbyEntities(999);
         assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_query_nearby_entities_too_large() {
+        // Values > 1024 are rejected to keep the `as i32` cast safe.
+        let cmd = BotCommand::QueryNearbyEntities(1025);
+        assert!(validate_command(&cmd).is_err());
+        // i32::MAX + 1 must not slip through (would wrap to a negative i32).
+        let cmd = BotCommand::QueryNearbyEntities(u32::MAX);
+        assert!(validate_command(&cmd).is_err());
     }
 
     // ── Pass-through commands (always valid) ───────────────────────
@@ -620,7 +636,7 @@ mod tests {
     // These tests provide compile-time coverage: if a new BotCommand variant
     // is added, the compiler will flag these matches as non-exhaustive.
 
-    /// Count the number of variants — returns 1 for any valid command.
+    /// Count the number of variants �?returns 1 for any valid command.
     /// Exists purely as a compile-time check that all variants are handled.
     #[allow(unreachable_code)]
     fn count_variants(cmd: &BotCommand) -> u32 {
@@ -665,7 +681,7 @@ mod tests {
     fn test_all_variants_pass_or_fail_validation() {
         let cmds = all_commands();
         for cmd in &cmds {
-            // Every command must return either Ok or Err — no panics.
+            // Every command must return either Ok or Err �?no panics.
             let _ = validate_command(cmd);
         }
     }

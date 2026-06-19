@@ -107,7 +107,7 @@ impl SharedState {
     ///
     /// The closure receives `&mut AppConfig`.
     pub fn update_config(&self, f: impl FnOnce(&mut AppConfig)) {
-        let mut guard = self.config.write().expect("config RwLock poisoned");
+        let mut guard = self.config.write().unwrap_or_else(|e| e.into_inner());
         f(&mut guard);
     }
 
@@ -115,7 +115,7 @@ impl SharedState {
     ///
     /// Returns a [`RwLockReadGuard`] — keep the lock short.
     pub fn read_config(&self) -> RwLockReadGuard<'_, AppConfig> {
-        self.config.read().expect("config RwLock poisoned")
+        self.config.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Read run stats under a read lock.
@@ -124,7 +124,7 @@ impl SharedState {
     /// Atomic counters within [`RunStats`] can still be read without
     /// holding the lock, but [`RunStats::connected_since`] requires it.
     pub fn read_run_stats(&self) -> RwLockReadGuard<'_, RunStats> {
-        self.run_stats.read().expect("run_stats RwLock poisoned")
+        self.run_stats.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Store (or clear) the container handle.
@@ -135,7 +135,7 @@ impl SharedState {
         let mut guard = self
             .container_handle
             .lock()
-            .expect("container Mutex poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         *guard = handle;
     }
 
@@ -148,7 +148,7 @@ impl SharedState {
         let guard = self
             .container_handle
             .lock()
-            .expect("container Mutex poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         guard.is_some()
     }
 
@@ -162,7 +162,7 @@ impl SharedState {
         let mut guard = self
             .container_handle
             .lock()
-            .expect("container Mutex poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         guard.take()
     }
 
@@ -179,16 +179,13 @@ impl SharedState {
         let guard = self
             .container_handle
             .lock()
-            .expect("container Mutex poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         f(guard.as_ref())
     }
 
     /// Store a chat message, keeping only the last 10.
     pub fn add_chat_message(&self, sender: String, message: String) {
-        let mut guard = self
-            .chat_messages
-            .lock()
-            .expect("chat messages Mutex poisoned");
+        let mut guard = self.chat_messages.lock().unwrap_or_else(|e| e.into_inner());
         guard.push_back((sender, message));
         while guard.len() > 10 {
             guard.pop_front();
@@ -197,10 +194,7 @@ impl SharedState {
 
     /// Return a copy of the last 10 chat messages.
     pub fn get_chat_messages(&self) -> Vec<(String, String)> {
-        let guard = self
-            .chat_messages
-            .lock()
-            .expect("chat messages Mutex poisoned");
+        let guard = self.chat_messages.lock().unwrap_or_else(|e| e.into_inner());
         guard.iter().cloned().collect()
     }
 }

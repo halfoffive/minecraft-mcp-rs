@@ -177,6 +177,9 @@ impl rmcp::schemars::JsonSchema for UseItemInput {
 }
 
 /// Handle `use_item` MCP tool.
+///
+/// If `item_slot` is provided, switches to that hotbar slot before using
+/// the item (otherwise the currently held item is used).
 pub async fn handle_use_item(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
@@ -189,6 +192,21 @@ pub async fn handle_use_item(
     }
     if !state.is_online() {
         return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+    }
+
+    // Select the requested hotbar slot first so the held item matches.
+    if let Some(slot) = input.item_slot {
+        match sender
+            .send_command(BotCommand::SwitchHotbarSlot(slot))
+            .await
+        {
+            Ok(r) => {
+                if !r.success {
+                    return format!(r#"{{"success":false,"error":"{}"}}"#, r.message);
+                }
+            }
+            Err(e) => return format!(r#"{{"success":false,"error":"{e}"}}"#),
+        }
     }
 
     let cmd = BotCommand::UseItem;

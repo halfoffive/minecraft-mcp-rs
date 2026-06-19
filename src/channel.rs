@@ -39,15 +39,27 @@ pub struct BotCommandWithResponder {
 #[derive(Debug, Clone)]
 pub struct BotCommandSender {
     tx: mpsc::Sender<BotCommandWithResponder>,
+    /// Per-sender timeout for awaiting a command response. Defaults to 30s;
+    /// override with [`with_timeout`](Self::with_timeout).
+    timeout: Duration,
 }
 
 impl BotCommandSender {
+    /// Override the response timeout (e.g. from `AppConfig::command_timeout_secs`).
+    ///
+    /// Consumes and returns `self` for one-shot configuration at construction.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// Send a command to the bot and await the response.
     ///
     /// # Errors
     /// - `BotError::Offline` if the receiver has been dropped.
-    /// - `BotError::CommandTimeout` if no response arrives within 30 seconds
-    ///   or if the responder side drops the oneshot without sending.
+    /// - `BotError::CommandTimeout` if no response arrives within
+    ///   [`BotCommandSender::timeout`] or if the responder side drops the
+    ///   oneshot without sending.
     pub async fn send_command(&self, cmd: BotCommand) -> Result<BotResult, BotError> {
         let (respond_to, rx) = oneshot::channel();
         let cmd_str = format!("{:?}", cmd);
@@ -63,7 +75,8 @@ impl BotCommandSender {
             return Err(BotError::Offline("bot command channel closed".into()));
         }
 
-        match timeout(Duration::from_secs(30), rx).await {
+        let timeout_secs = self.timeout.as_secs();
+        match timeout(self.timeout, rx).await {
             Ok(Ok(result)) => {
                 debug!(command = %cmd_str, "bot command completed");
                 result
@@ -72,14 +85,14 @@ impl BotCommandSender {
                 warn!(command = %cmd_str, "bot command responder dropped without reply");
                 Err(BotError::CommandTimeout {
                     command: cmd_str,
-                    timeout_secs: 30,
+                    timeout_secs,
                 })
             }
             Err(_) => {
-                error!(command = %cmd_str, "bot command timed out after 30s");
+                error!(command = %cmd_str, timeout_secs, "bot command timed out");
                 Err(BotError::CommandTimeout {
                     command: cmd_str,
-                    timeout_secs: 30,
+                    timeout_secs,
                 })
             }
         }
@@ -122,11 +135,17 @@ impl BotCommandReceiver {
 
 /// Create a new bot command channel with the given buffer size.
 ///
-/// The buffer determines how many commands can be queued before
-/// `send_command` starts to await.
+/// The sender defaults to a 30s response timeout; use
+/// [`BotCommandSender::with_timeout`] to override it.
 pub fn create_command_channel(buffer: usize) -> (BotCommandSender, BotCommandReceiver) {
     let (tx, rx) = mpsc::channel(buffer);
-    (BotCommandSender { tx }, BotCommandReceiver { rx })
+    (
+        BotCommandSender {
+            tx,
+            timeout: Duration::from_secs(30),
+        },
+        BotCommandReceiver { rx },
+    )
 }
 
 // ═══════════════════════════════════════════════════════════════

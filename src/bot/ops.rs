@@ -341,13 +341,21 @@ impl CompoundOpExecutor {
             });
         }
 
-        // Step 2: Select in hotbar
+        // Step 2: Select in hotbar. Only hotbar slots (0-8) can be selected
+        // directly; an item in the main inventory (slot 9-35) can't be
+        // switched to without an inventory-move flow, so surface a clear
+        // error instead of letting the executor reject slot >= 9.
         let slot = inventory
             .iter()
             .position(|s| s.as_ref().is_some_and(|item| item.item_id == block_type))
             .map(|i| i as u8);
 
         if let Some(s) = slot {
+            if s > 8 {
+                return Err(BotError::Internal(format!(
+                    "{block_type} is in main inventory slot {s}; move it to a hotbar slot (0-8) before placing"
+                )));
+            }
             self.sender
                 .send_command(BotCommand::SwitchHotbarSlot(s))
                 .await?;

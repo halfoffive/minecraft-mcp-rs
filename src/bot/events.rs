@@ -217,18 +217,22 @@ fn handle_disconnect(bot: Client, state: &BotState) {
 }
 
 async fn handle_tick(bot: Client, state: BotState) {
+    // Check-and-set under a single lock to avoid the TOCTOU race where two
+    // concurrent Tick events both pass the interval check before either
+    // resets the timer (which would spawn two snapshot builders).
     let should_update = {
-        let last = state
+        let mut last = state
             .last_snapshot_time
             .lock()
-            .expect("last_snapshot_time poisoned");
-        last.elapsed() >= Duration::from_millis(state.snapshot_interval_ms)
+            .unwrap_or_else(|e| e.into_inner());
+        if last.elapsed() >= Duration::from_millis(state.snapshot_interval_ms) {
+            *last = Instant::now();
+            true
+        } else {
+            false
+        }
     };
     if should_update {
-        *state
-            .last_snapshot_time
-            .lock()
-            .expect("last_snapshot_time poisoned") = Instant::now();
         tokio::task::spawn_local(async move {
             if let Err(e) = build_and_update_snapshot(&bot, &state).await {
                 warn!("snapshot update failed: {e}");
@@ -357,9 +361,15 @@ async fn build_and_update_snapshot(bot: &Client, state: &BotState) -> eyre::Resu
 
     let old_snapshot = state.shared_state.read_snapshot();
 
-    // Take dirty sets and read world for changed blocks.
-    let mut tracker = state.dirty_tracker.lock().expect("dirty_tracker poisoned");
-    let (dirty_blocks, dirty_chunks) = tracker.take_dirty_sets();
+    // Take dirty sets and release the tracker immediately so concurrent
+    // `handle_receive_chunk` calls aren't blocked while we read the world.
+    let (dirty_blocks, dirty_chunks) = {
+        let mut tracker = state
+            .dirty_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        tracker.take_dirty_sets()
+    };
 
     let mut new_blocks = Vec::new();
     if !dirty_blocks.is_empty() || !dirty_chunks.is_empty() {
