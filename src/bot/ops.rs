@@ -10,7 +10,6 @@ use tokio::time::sleep;
 use tracing::{debug, trace, warn};
 
 use crate::block_data::ItemStack;
-#[allow(unused_imports)]
 use crate::block_data::best_tool_for_block;
 use crate::channel::BotCommandSender;
 use crate::compound_ops::{

@@ -23,9 +23,6 @@ thiserror = "2"
 bevy_ecs = "0.18"
 uuid = "1"
 
-[dev-dependencies]
-rmcp = { version = "1.7.0", features = ["server", "transport-io", "macros"] }
-
 [profile.dev]
 opt-level = 1
 

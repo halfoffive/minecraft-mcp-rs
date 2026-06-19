@@ -6,8 +6,6 @@
 //! > **Note:** Most items in this module are lookup tables designed for the
 //! > bot ops layer.  They are retained for the integration plan.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::sync::LazyLock;
 

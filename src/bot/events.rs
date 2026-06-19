@@ -5,13 +5,14 @@ use std::time::{Duration, Instant};
 
 use azalea::ecs::component::Component;
 use azalea::{Client, Event};
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace, warn};
 
 use super::commands::{CommandExecutor, RealBotClient};
+use super::snapshot_updater::SnapshotUpdater;
 use crate::channel::{ReceiverLease, ReceiverSlot};
-use crate::snapshot::{DirtyTracker, SnapshotBuilder};
+use crate::snapshot::DirtyTracker;
 use crate::state::SharedState;
-use crate::types::{BlockEntry, BlockPos, EntityEntry, GameMode, SelfPlayer};
+use crate::types::{BlockPos, EntityEntry};
 
 // ---------------------------------------------------------------------------
 // Dependency injection — set before ClientBuilder::start()
@@ -217,28 +218,23 @@ fn handle_disconnect(bot: Client, state: &BotState) {
 }
 
 async fn handle_tick(bot: Client, state: BotState) {
-    // Check-and-set under a single lock to avoid the TOCTOU race where two
-    // concurrent Tick events both pass the interval check before either
-    // resets the timer (which would spawn two snapshot builders).
-    let should_update = {
-        let mut last = state
-            .last_snapshot_time
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if last.elapsed() >= Duration::from_millis(state.snapshot_interval_ms) {
-            *last = Instant::now();
-            true
-        } else {
-            false
+    // Build a SnapshotUpdater from the BotState's shared fields and delegate
+    // the throttle check + snapshot build to it. This avoids duplicating the
+    // snapshot logic that already lives in snapshot_updater.rs.
+    let updater = SnapshotUpdater::new(
+        Arc::clone(&state.shared_state),
+        Arc::clone(&state.dirty_tracker),
+        Arc::clone(&state.last_snapshot_time),
+        state.snapshot_interval_ms,
+    );
+    let egui_ctx = state.egui_ctx.clone();
+    tokio::task::spawn_local(async move {
+        if updater.update_from_tick(&bot).await.is_some()
+            && let Some(ctx) = &egui_ctx
+        {
+            ctx.request_repaint();
         }
-    };
-    if should_update {
-        tokio::task::spawn_local(async move {
-            if let Err(e) = build_and_update_snapshot(&bot, &state).await {
-                warn!("snapshot update failed: {e}");
-            }
-        });
-    }
+    });
 }
 
 fn handle_chat(state: &BotState, chat_packet: azalea::chat::ChatPacket) {
@@ -326,7 +322,10 @@ fn handle_update_player(state: &BotState, info: &azalea::player::PlayerInfo) {
 }
 
 fn handle_receive_chunk(state: &BotState, chunk_pos: azalea::core::position::ChunkPos) {
-    let mut tracker = state.dirty_tracker.lock().expect("dirty_tracker poisoned");
+    let mut tracker = state
+        .dirty_tracker
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     tracker.mark_chunk_dirty((chunk_pos.x, chunk_pos.z));
     trace!("chunk dirty marked: ({}, {})", chunk_pos.x, chunk_pos.z);
 }
@@ -334,142 +333,6 @@ fn handle_receive_chunk(state: &BotState, chunk_pos: azalea::core::position::Chu
 fn request_repaint(state: &BotState) {
     if let Some(ctx) = &state.egui_ctx {
         ctx.request_repaint();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Snapshot builder
-// ---------------------------------------------------------------------------
-
-async fn build_and_update_snapshot(bot: &Client, state: &BotState) -> eyre::Result<()> {
-    let position = bot.component::<azalea::entity::Position>();
-    let health = bot.component::<azalea::entity::metadata::Health>();
-    let hunger = bot.hunger();
-    let _experience = bot.experience();
-    let local_gamemode = bot.component::<azalea::local_player::LocalGameMode>();
-    let profile = bot.profile();
-
-    let self_player = SelfPlayer {
-        uuid: profile.uuid.to_string(),
-        username: profile.name,
-        position: BlockPos::new(position.x as i32, position.y as i32, position.z as i32),
-        health: health.0,
-        hunger: hunger.food as i32,
-        gamemode: azalea_gamemode_to_ours(local_gamemode.current),
-        held_item_slot: bot.selected_hotbar_slot(),
-    };
-
-    let old_snapshot = state.shared_state.read_snapshot();
-
-    // Take dirty sets and release the tracker immediately so concurrent
-    // `handle_receive_chunk` calls aren't blocked while we read the world.
-    let (dirty_blocks, dirty_chunks) = {
-        let mut tracker = state
-            .dirty_tracker
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        tracker.take_dirty_sets()
-    };
-
-    let mut new_blocks = Vec::new();
-    if !dirty_blocks.is_empty() || !dirty_chunks.is_empty() {
-        let world = bot.world();
-        let world_guard = world.read();
-        for pos in &dirty_blocks {
-            let azalea_pos = azalea::core::position::BlockPos::new(pos.x, pos.y, pos.z);
-            if let Some(block_state) = world_guard.get_block_state(azalea_pos) {
-                let block_name = block_state_to_name(block_state);
-                new_blocks.push(BlockEntry {
-                    position: *pos,
-                    block_type: block_name,
-                    block_state: None,
-                });
-            }
-        }
-        // Dirty chunks are tracked in the chunk summary; scanning all their
-        // blocks is too expensive for a tick handler.
-        drop(world_guard);
-    }
-
-    // Re-populate a temporary tracker for SnapshotBuilder.
-    let mut builder_tracker = DirtyTracker::new();
-    for pos in &dirty_blocks {
-        builder_tracker.mark_block_dirty(*pos);
-    }
-    for chunk in &dirty_chunks {
-        builder_tracker.mark_chunk_dirty(*chunk);
-    }
-
-    let mut builder = SnapshotBuilder::new((*old_snapshot).clone())
-        .with_dirty_tracker(&mut builder_tracker)
-        .with_self_player(self_player);
-
-    if !new_blocks.is_empty() {
-        builder = builder.with_blocks(new_blocks);
-    }
-
-    // Chunk summary from the partial world.
-    let chunk_summary =
-        if let Some(world_holder) = bot.get_component::<azalea::local_player::WorldHolder>() {
-            let partial_world = world_holder.partial.read();
-            let storage = &partial_world.chunks;
-            storage
-                .chunks()
-                .enumerate()
-                .filter_map(|(i, chunk)| {
-                    chunk.as_ref().map(|_| {
-                        let pos = storage.chunk_pos_from_index(i);
-                        (pos.x, pos.z)
-                    })
-                })
-                .collect()
-        } else {
-            old_snapshot.chunk_summary.clone()
-        };
-
-    builder = builder.with_chunk_summary(chunk_summary);
-
-    let new_snapshot = builder.build();
-    state.shared_state.update_snapshot(new_snapshot);
-    request_repaint(state);
-    debug!("snapshot updated");
-
-    Ok(())
-}
-
-fn block_state_to_name(block_state: azalea::block::BlockState) -> String {
-    // BlockState is a numeric ID; Block (alias for BlockKind) maps that to
-    // the block type. We use the deprecated `Block` alias because `BlockKind`
-    // itself is private in `azalea_registry::builtin`.
-    #[allow(deprecated)]
-    let block_kind = azalea::registry::Block::from(block_state);
-    // Block derives Debug with the variant name (e.g. Stone).
-    // We convert to snake_case to match Minecraft IDs.
-    let debug_name = format!("{:?}", block_kind);
-    to_snake_case(&debug_name)
-}
-
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + 4);
-    for (i, ch) in s.chars().enumerate() {
-        if ch.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.push(ch.to_ascii_lowercase());
-        } else {
-            result.push(ch);
-        }
-    }
-    result
-}
-
-fn azalea_gamemode_to_ours(gm: azalea::core::game_type::GameMode) -> GameMode {
-    match gm {
-        azalea::core::game_type::GameMode::Survival => GameMode::Survival,
-        azalea::core::game_type::GameMode::Creative => GameMode::Creative,
-        azalea::core::game_type::GameMode::Adventure => GameMode::Adventure,
-        azalea::core::game_type::GameMode::Spectator => GameMode::Spectator,
     }
 }
 
@@ -661,31 +524,8 @@ mod tests {
     }
 
     // -- Utility -------------------------------------------------------------
-
-    #[test]
-    fn test_azalea_gamemode_conversion() {
-        assert_eq!(
-            azalea_gamemode_to_ours(azalea::core::game_type::GameMode::Survival),
-            GameMode::Survival
-        );
-        assert_eq!(
-            azalea_gamemode_to_ours(azalea::core::game_type::GameMode::Creative),
-            GameMode::Creative
-        );
-        assert_eq!(
-            azalea_gamemode_to_ours(azalea::core::game_type::GameMode::Adventure),
-            GameMode::Adventure
-        );
-        assert_eq!(
-            azalea_gamemode_to_ours(azalea::core::game_type::GameMode::Spectator),
-            GameMode::Spectator
-        );
-    }
-
-    #[test]
-    fn test_to_snake_case() {
-        assert_eq!(to_snake_case("GrassBlock"), "grass_block");
-        assert_eq!(to_snake_case("Stone"), "stone");
-        assert_eq!(to_snake_case("OakPlanks"), "oak_planks");
-    }
+    //
+    // azalea_gamemode_to_ours and to_snake_case tests were removed; both
+    // functions now live exclusively in snapshot_updater.rs where they are
+    // tested.
 }

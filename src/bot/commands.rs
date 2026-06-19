@@ -3,12 +3,6 @@
 //! [`CommandExecutor`] receives [`BotCommand`]s from the MCP server via a
 //! [`BotCommandReceiver`], dispatches them to the azalea [`Client`] API, and
 //! sends a [`BotResult`] back through the oneshot channel.
-//!
-//! > **Note:** Most types and functions in this module are scaffolding for
-//! > the planned command-executor architecture and are not yet wired into
-//! > the main event loop.  They are retained for the integration plan.
-
-#![allow(dead_code)]
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -323,13 +317,17 @@ fn direction_to_walk(dir: Direction) -> Option<WalkDirection> {
 pub(crate) struct CommandExecutor<B: BotActions> {
     bot: B,
     state: Arc<SharedState>,
-    /// Owned receiver for the [`run`] path. `None` when the executor was
-    /// constructed via [`new_for_lease`](Self::new_for_lease).
+    /// Owned receiver for the [`run`](Self::run) path. `None` when the
+    /// executor was constructed via [`new_for_lease`](Self::new_for_lease).
+    /// Only read by the test-only `run` method; `run_with_lease` uses the
+    /// leased receiver instead.
+    #[allow(dead_code)]
     receiver: Option<BotCommandReceiver>,
 }
 
 impl<B: BotActions> CommandExecutor<B> {
     /// Create a new executor that owns its receiver (used by tests).
+    #[allow(dead_code)]
     pub fn new(bot: B, state: Arc<SharedState>, receiver: BotCommandReceiver) -> Self {
         Self {
             bot,
@@ -359,6 +357,7 @@ impl<B: BotActions> CommandExecutor<B> {
     ///
     /// Panics if the executor was constructed without an owned receiver
     /// (i.e. via [`new_for_lease`](Self::new_for_lease)).
+    #[allow(dead_code)]
     pub async fn run(&mut self) {
         trace!("command executor loop started");
 

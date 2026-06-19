@@ -72,7 +72,7 @@ impl SnapshotUpdater {
     /// Returns `true` if enough time has passed since the last update.
     /// Resets the timer on success so the caller does not need to.
     fn check_and_update_timer(&self) -> bool {
-        let mut last = self.last_update.lock().expect("last_update mutex poisoned");
+        let mut last = self.last_update.lock().unwrap_or_else(|e| e.into_inner());
         if last.elapsed() >= Duration::from_millis(self.interval_ms) {
             *last = Instant::now();
             true
@@ -138,7 +138,7 @@ async fn build_snapshot_inner(
 
     // ── Drain dirty sets ─────────────────────────────────────
     let (dirty_blocks, dirty_chunks) = {
-        let mut tracker = dirty_tracker.lock().expect("dirty_tracker mutex poisoned");
+        let mut tracker = dirty_tracker.lock().unwrap_or_else(|e| e.into_inner());
         tracker.take_dirty_sets()
     };
 
