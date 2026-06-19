@@ -13,6 +13,7 @@
 //! [`ClientBuilder::start`] internally creates a `LocalSet` which is `!Send`.
 
 use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use eframe::App;
 use egui::Context;
@@ -28,12 +29,13 @@ pub struct MinecraftApp {
     /// Shared state accessed lock-free for the world snapshot,
     /// and with short-lived read locks for config and stats.
     state: Arc<SharedState>,
-    /// Channel sender for dispatching bot commands.
-    sender: BotCommandSender,
     /// Shared command receiver slot, passed to the bot connection task so it
     /// can process commands from the MCP server while connected. The receiver
     /// is leased out to the command executor on `Event::Spawn`.
     command_receiver: Arc<std::sync::Mutex<Option<BotCommandReceiver>>>,
+    /// Handle to the bot-connection OS thread (if running). Joined on Drop
+    /// so the process exits cleanly when the window closes.
+    bot_thread: Option<JoinHandle<()>>,
     /// Local edit buffers for the settings panel.  Initialised from
     /// [`SharedState`] config on first frame.
     edit_config: Option<EditConfig>,
@@ -102,13 +104,17 @@ impl MinecraftApp {
     /// Create a new [`MinecraftApp`].
     pub fn new(
         state: Arc<SharedState>,
-        sender: BotCommandSender,
+        _sender: BotCommandSender,
         command_receiver: Arc<std::sync::Mutex<Option<BotCommandReceiver>>>,
     ) -> Self {
+        // _sender is intentionally unused here — the MCP server thread holds
+        // its own clone and is the sole consumer of the command channel. The
+        // parameter is retained to keep the main.rs wiring simple and allow
+        // future UI-driven commands without a signature change.
         Self {
             state,
-            sender,
             command_receiver,
+            bot_thread: None,
             edit_config: None,
         }
     }
@@ -118,12 +124,21 @@ impl MinecraftApp {
     /// We spawn a new thread (rather than using `tokio::spawn`) because
     /// azalea's `ClientBuilder::start` internally creates a `LocalSet`
     /// which is `!Send`.
-    fn connect_bot(&self) {
+    ///
+    /// Uses [`SharedState::try_begin_connecting`] to guard against
+    /// double-spawn if the user clicks Connect while a previous attempt
+    /// is still in progress.
+    fn connect_bot(&mut self) {
+        if !self.state.try_begin_connecting() {
+            tracing::warn!("Connect clicked but a connection attempt is already in progress");
+            return;
+        }
+
         let config = self.state.read_config().clone();
         let state = Arc::clone(&self.state);
         let receiver = Arc::clone(&self.command_receiver);
 
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("bot-connection".into())
             .spawn(move || {
                 let rt = tokio::runtime::Runtime::new()
@@ -136,20 +151,44 @@ impl MinecraftApp {
                     }
                 });
 
+                // Clear the connecting flag in case the loop exited without
+                // doing it (e.g. due to an early error return).
+                state.clear_connecting();
                 tracing::info!("Bot connection thread exited");
             })
             .expect("Failed to spawn bot connection thread");
 
+        self.bot_thread = Some(handle);
         tracing::info!("Bot connection thread spawned");
+    }
+}
+
+impl Drop for MinecraftApp {
+    fn drop(&mut self) {
+        // Signal the bot to stop retrying and let the connection thread
+        // exit cleanly when the window is closed.
+        self.state.request_disconnect();
+        self.state.set_online(false);
+
+        // Give the bot thread a moment to notice the disconnect signal and
+        // exit. If it doesn't finish in time, the process will terminate
+        // anyway when main() returns, but joining avoids a potential panic
+        // from the runtime being dropped mid-task.
+        if let Some(handle) = self.bot_thread.take() {
+            // The bot thread runs its own tokio runtime; joining blocks
+            // until it finishes. With disconnect_requested set, the connect
+            // loop should break on the next iteration.
+            let _ = handle.join();
+        }
     }
 }
 
 impl App for MinecraftApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        // Request continuous repaint at ~10 FPS so that live status
-        // updates (connection state, chat, command counters) are visible
-        // without user interaction.
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64(0.1));
+        // Request a repaint once per second as a fallback so the uptime
+        // counter stays fresh. State-change-driven repaints (via
+        // `ctx.request_repaint()` from the event handler) cover the rest.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
         // Lazy-init the edit buffers from current config.
         if self.edit_config.is_none() {
@@ -162,10 +201,9 @@ impl App for MinecraftApp {
             ui.separator();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.collapsing("⚙ Settings", |ui| {
+                ui.collapsing("Settings", |ui| {
                     if let Some(ref mut edit) = self.edit_config {
-                        let connect_clicked =
-                            settings::settings_panel(ui, &self.state, &self.sender, edit);
+                        let connect_clicked = settings::settings_panel(ui, &self.state, edit);
 
                         if connect_clicked {
                             // Persist edits before connecting.
@@ -175,7 +213,7 @@ impl App for MinecraftApp {
                     }
                 });
 
-                ui.collapsing("📊 Status", |ui| {
+                ui.collapsing("Status", |ui| {
                     status::status_panel(ui, &self.state);
                 });
             });

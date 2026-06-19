@@ -33,11 +33,18 @@ pub struct SharedState {
     run_stats: RwLock<RunStats>,
     /// Whether the bot is currently connected to the server.
     bot_online: AtomicBool,
+    /// Whether a bot connection attempt is in progress (guards against
+    /// double-spawn when the user clicks Connect while the previous
+    /// connection is still being established).
+    bot_connecting: AtomicBool,
+    /// Set by the Disconnect button to tell the reconnect loop to stop
+    /// retrying. Cleared on the next Connect click.
+    disconnect_requested: AtomicBool,
     /// Handle to the currently open container (if any).
     ///
     /// Stored behind `Mutex<Option<_>>` because [`ContainerHandle`] auto-closes
     /// on [`Drop`], so we must ensure only one owner exists at a time.
-    container_handle: Arc<Mutex<Option<ContainerHandle>>>,
+    container_handle: Mutex<Option<ContainerHandle>>,
     /// Last 10 chat messages received from the server.
     ///
     /// Each entry is `(sender, message)`. Stored behind a `Mutex` because the
@@ -72,7 +79,9 @@ impl SharedState {
             config: RwLock::new(config),
             run_stats: RwLock::new(RunStats::default()),
             bot_online: AtomicBool::new(false),
-            container_handle: Arc::new(Mutex::new(None)),
+            bot_connecting: AtomicBool::new(false),
+            disconnect_requested: AtomicBool::new(false),
+            container_handle: Mutex::new(None),
             chat_messages: Mutex::new(VecDeque::new()),
         }
     }
@@ -101,6 +110,46 @@ impl SharedState {
     /// Read the bot online status atomically.
     pub fn is_online(&self) -> bool {
         self.bot_online.load(Ordering::SeqCst)
+    }
+
+    /// Try to enter the "connecting" state. Returns `true` if the caller is
+    /// the first to claim it (and should proceed to spawn the connection
+    /// thread), `false` if another connection attempt is already in progress.
+    ///
+    /// The caller must call [`clear_connecting`](Self::clear_connecting) when
+    /// the connection attempt finishes (success or failure) so future Connect
+    /// clicks are accepted.
+    pub fn try_begin_connecting(&self) -> bool {
+        self.bot_connecting
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// Clear the "connecting" flag so future Connect clicks are accepted.
+    pub fn clear_connecting(&self) {
+        self.bot_connecting.store(false, Ordering::SeqCst);
+    }
+
+    /// Whether a connection attempt is currently in progress.
+    pub fn is_connecting(&self) -> bool {
+        self.bot_connecting.load(Ordering::SeqCst)
+    }
+
+    /// Request that the bot disconnect and stop retrying. Set by the
+    /// Disconnect button; checked by [`ConnectionManager::connect`] between
+    /// reconnection attempts.
+    pub fn request_disconnect(&self) {
+        self.disconnect_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// Clear the disconnect request (called when starting a new connection).
+    pub fn clear_disconnect_request(&self) {
+        self.disconnect_requested.store(false, Ordering::SeqCst);
+    }
+
+    /// Whether a disconnect has been requested.
+    pub fn is_disconnect_requested(&self) -> bool {
+        self.disconnect_requested.load(Ordering::SeqCst)
     }
 
     /// Update config under a write lock.

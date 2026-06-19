@@ -82,9 +82,18 @@ impl ConnectionManager {
         let _ = events::INJECTED_EGUI_CTX.set(egui_ctx.clone());
         let _ = events::INJECTED_SNAPSHOT_INTERVAL_MS.set(self.config.snapshot_interval_ms);
 
+        // Clear any stale disconnect request from a previous session.
+        self.state.clear_disconnect_request();
+
         let mut attempt: u32 = 0;
 
         loop {
+            // If the user clicked Disconnect, stop retrying.
+            if self.state.is_disconnect_requested() {
+                info!("disconnect requested — stopping connection loop");
+                break;
+            }
+
             let account = Account::offline(&self.config.ai_username);
             let address = format!("{}:{}", self.config.mc_address, self.config.mc_port);
 
@@ -106,6 +115,12 @@ impl ConnectionManager {
             // Disconnected — ensure the online flag is cleared.
             self.state.set_online(false);
 
+            // If the user requested disconnect, don't retry.
+            if self.state.is_disconnect_requested() {
+                info!("disconnect requested — stopping reconnect loop");
+                break;
+            }
+
             let delay = self.reconnect_backoff(attempt);
             warn!(
                 "Disconnected. Reconnecting in {}s (attempt {})...",
@@ -115,6 +130,10 @@ impl ConnectionManager {
             tokio::time::sleep(delay).await;
             attempt = attempt.saturating_add(1);
         }
+
+        // Allow the next Connect click to proceed.
+        self.state.clear_connecting();
+        Ok(())
     }
 
     /// Calculate the reconnect delay for the given attempt number (0-indexed).

@@ -6,9 +6,7 @@
 //! **Disconnect** button sets the bot offline.
 
 use egui::{DragValue, TextEdit, Ui};
-use std::sync::Arc;
 
-use crate::channel::BotCommandSender;
 use crate::state::SharedState;
 use crate::ui::app::EditConfig;
 
@@ -16,12 +14,7 @@ use crate::ui::app::EditConfig;
 ///
 /// Returns `true` when the Connect button is clicked (caller should persist
 /// edits and spawn the connection task).
-pub fn settings_panel(
-    ui: &mut Ui,
-    state: &Arc<SharedState>,
-    sender: &BotCommandSender,
-    edit: &mut EditConfig,
-) -> bool {
+pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -> bool {
     let mut connect_clicked = false;
 
     // ── Minecraft Server ──────────────────────────────────────
@@ -95,26 +88,38 @@ pub fn settings_panel(
 
     // ── Connect / Disconnect ──────────────────────────────────
     let is_online = state.is_online();
+    let is_connecting = state.is_connecting();
 
     ui.horizontal(|ui| {
-        let connect_btn = ui.add_enabled(!is_online, egui::Button::new("🔌 Connect"));
-        let disconnect_btn = ui.add_enabled(is_online, egui::Button::new("⏻ Disconnect"));
+        // Disable Connect when already online OR a connection attempt is
+        // in progress (prevents double-spawn).
+        let connect_enabled = !is_online && !is_connecting;
+        let connect_btn = ui.add_enabled(connect_enabled, egui::Button::new("Connect"));
+        let disconnect_btn =
+            ui.add_enabled(is_online || is_connecting, egui::Button::new("Disconnect"));
 
         if connect_btn.clicked() {
             tracing::info!("Connect button pressed");
-            let _ = sender;
+            // Clear any stale disconnect request from a previous session.
+            state.clear_disconnect_request();
             connect_clicked = true;
         }
 
         if disconnect_btn.clicked() {
-            tracing::info!("Disconnect button pressed — setting bot offline");
+            tracing::info!("Disconnect button pressed");
+            // Signal the reconnect loop to stop retrying. The actual TCP
+            // teardown happens when the bot's next event fires
+            // Event::Disconnect (which calls bot.exit()), or when the
+            // server drops the connection.
+            state.request_disconnect();
             state.set_online(false);
-            let _ = sender;
         }
     });
 
     if is_online {
         ui.colored_label(egui::Color32::GREEN, "● Connected");
+    } else if is_connecting {
+        ui.colored_label(egui::Color32::YELLOW, "● Connecting...");
     } else {
         ui.colored_label(egui::Color32::RED, "● Disconnected");
     }

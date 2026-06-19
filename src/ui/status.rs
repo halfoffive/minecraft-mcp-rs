@@ -20,7 +20,9 @@ use crate::state::SharedState;
 pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
     let is_online = state.is_online();
     let snapshot = state.read_snapshot();
-    let stats = state.read_run_stats();
+    // Read connected_since under the lock, then drop the guard immediately.
+    // The atomic counters (commands_processed etc.) don't need the lock.
+    let connected_since = state.read_run_stats().connected_since;
     let chat = state.get_chat_messages();
 
     // ── Connection ────────────────────────────────────────────────────
@@ -34,7 +36,7 @@ pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
         }
     });
 
-    if let Some(since) = stats.connected_since {
+    if let Some(since) = connected_since {
         let elapsed = since.elapsed();
         ui.label(format!("Uptime: {}s", elapsed.as_secs()));
     }
@@ -79,6 +81,10 @@ pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
     // ── Command Stats ─────────────────────────────────────────────────
 
     ui.collapsing("Command Stats", |ui| {
+        // Re-acquire the stats guard only for this section. The atomic
+        // counters are read through the guard; the lock is released when
+        // the section ends.
+        let stats = state.read_run_stats();
         let processed = stats.commands_processed.load(Ordering::Relaxed);
         let succeeded = stats.commands_succeeded.load(Ordering::Relaxed);
         let failed = stats.commands_failed.load(Ordering::Relaxed);
