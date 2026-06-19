@@ -238,8 +238,8 @@ impl rmcp::schemars::JsonSchema for EquipToolInput {
             "properties": {
                 "tool_type": {
                     "type": "string",
-                    "description": "Tool type. One of: pickaxe, axe, shovel, sword, shears, hand",
-                    "enum": ["pickaxe", "axe", "shovel", "sword", "shears", "hand"]
+                    "description": "Tool type. One of: pickaxe, axe, shovel, hoe, sword, shears, hand",
+                    "enum": ["pickaxe", "axe", "shovel", "hoe", "sword", "shears", "hand"]
                 },
                 "material_preference": {
                     "type": "string",
@@ -258,6 +258,7 @@ pub fn parse_tool_type(s: &str) -> Option<ToolType> {
         "pickaxe" => Some(ToolType::Pickaxe),
         "axe" => Some(ToolType::Axe),
         "shovel" => Some(ToolType::Shovel),
+        "hoe" => Some(ToolType::Hoe),
         "sword" => Some(ToolType::Sword),
         "shears" => Some(ToolType::Shears),
         "hand" => Some(ToolType::Hand),
@@ -275,7 +276,7 @@ pub async fn handle_equip_tool(
         Some(t) => t,
         None => {
             return format!(
-                r#"{{"success":false,"error":"Unknown tool type: '{}'. Valid types: pickaxe, axe, shovel, sword, shears, hand"}}"#,
+                r#"{{"success":false,"error":"Unknown tool type: '{}'. Valid types: pickaxe, axe, shovel, hoe, sword, shears, hand"}}"#,
                 input.tool_type
             );
         }
@@ -458,7 +459,7 @@ mod tests {
         let (state, sender) = setup();
         make_online(&state);
         let input = EquipToolInput {
-            tool_type: "hoe".into(),
+            tool_type: "invalid_tool".into(),
             material_preference: None,
         };
         let result = handle_equip_tool(&state, &sender, input).await;
@@ -496,6 +497,7 @@ mod tests {
         assert_eq!(parse_tool_type("pickaxe"), Some(ToolType::Pickaxe));
         assert_eq!(parse_tool_type("axe"), Some(ToolType::Axe));
         assert_eq!(parse_tool_type("shovel"), Some(ToolType::Shovel));
+        assert_eq!(parse_tool_type("hoe"), Some(ToolType::Hoe));
         assert_eq!(parse_tool_type("sword"), Some(ToolType::Sword));
         assert_eq!(parse_tool_type("shears"), Some(ToolType::Shears));
         assert_eq!(parse_tool_type("hand"), Some(ToolType::Hand));
@@ -505,11 +507,12 @@ mod tests {
     fn test_parse_tool_type_case_insensitive() {
         assert_eq!(parse_tool_type("PICKAXE"), Some(ToolType::Pickaxe));
         assert_eq!(parse_tool_type("SWORD"), Some(ToolType::Sword));
+        assert_eq!(parse_tool_type("HoE"), Some(ToolType::Hoe));
     }
 
     #[test]
     fn test_parse_tool_type_unknown() {
-        assert_eq!(parse_tool_type("hoe"), None);
+        assert_eq!(parse_tool_type("invalid"), None);
         assert_eq!(parse_tool_type(""), None);
     }
 }

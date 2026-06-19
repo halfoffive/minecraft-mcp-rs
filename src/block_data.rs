@@ -359,13 +359,18 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
 /// Material tier priority order — from best (index 0) to worst (index N).
 ///
 /// Used by [`find_best_tool_in_inventory`] to select the highest-tier tool.
+/// This is the reverse of the `Ord` derive on [`MaterialTier`] (whose variant
+/// order is `Wood < Gold < Stone < Iron < Diamond < Netherite`), so the
+/// highest-`Ord` tier is preferred. Gold ranks above Wood (it has the same
+/// mining level but higher speed), and below Stone (lower durability and
+/// mining level).
 pub static MATERIAL_PRIORITY: &[MaterialTier] = &[
     MaterialTier::Netherite,
     MaterialTier::Diamond,
     MaterialTier::Iron,
     MaterialTier::Stone,
-    MaterialTier::Wood,
     MaterialTier::Gold,
+    MaterialTier::Wood,
 ];
 
 // ---------------------------------------------------------------------------
@@ -417,36 +422,6 @@ pub fn material_from_item_name(name: &str) -> Option<(ToolType, MaterialTier)> {
         }
         _ => None,
     }
-}
-
-/// Calculates the time (in seconds) to mine a block with the given tool and
-/// material.
-///
-/// If the tool is the wrong type for the block, a 5× penalty is applied.
-/// Unbreakable blocks (hardness < 0) return [`f64::INFINITY`].
-/// Unknown blocks default to 0.5 hardness.
-pub fn calculate_mine_time(block_type: &str, tool_type: &ToolType, material: &MaterialTier) -> f64 {
-    let hardness = BLOCK_HARDNESS.get(block_type).copied().unwrap_or(0.5);
-
-    // Unbreakable blocks (bedrock, etc.)
-    if hardness < 0.0 {
-        return f64::INFINITY;
-    }
-
-    let speed = if *tool_type == ToolType::Hand {
-        1.0
-    } else {
-        MATERIAL_TIER_SPEED.get(material).copied().unwrap_or(1.0)
-    };
-
-    let expected_tool = best_tool_for_block(block_type);
-    let penalty = if *tool_type != ToolType::Hand && *tool_type != expected_tool {
-        5.0
-    } else {
-        1.0
-    };
-
-    hardness / speed * penalty
 }
 
 /// Finds the best available tool of the given type in an inventory.
@@ -622,46 +597,11 @@ mod tests {
 
     // --- calculate_mine_time ---
 
-    #[test]
-    fn test_mine_time_stone_with_iron_pickaxe() {
-        // stone hardness = 1.5, iron speed = 6.0, correct tool
-        let time = calculate_mine_time("stone", &ToolType::Pickaxe, &MaterialTier::Iron);
-        assert!((time - 0.25).abs() < f64::EPSILON); // 1.5 / 6.0 = 0.25
-    }
-
-    #[test]
-    fn test_mine_time_stone_with_iron_axe_wrong_tool() {
-        // stone hardness = 1.5, iron speed = 6.0, wrong tool = 5×
-        let time = calculate_mine_time("stone", &ToolType::Axe, &MaterialTier::Iron);
-        assert!((time - 1.25).abs() < f64::EPSILON); // 1.5 / 6.0 × 5 = 1.25
-    }
-
-    #[test]
-    fn test_mine_time_obsidian_with_diamond() {
-        // obsidian = 50.0, diamond speed = 8.0
-        let time = calculate_mine_time("obsidian", &ToolType::Pickaxe, &MaterialTier::Diamond);
-        assert!((time - 6.25).abs() < f64::EPSILON); // 50.0 / 8.0 = 6.25
-    }
-
-    #[test]
-    fn test_mine_time_unknown_block_hand() {
-        // default 0.5 / 1.0 = 0.5 (hand has no penalty applied)
-        let time = calculate_mine_time("unknown_block", &ToolType::Hand, &MaterialTier::Wood);
-        assert!((time - 0.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_mine_time_unbreakable() {
-        let time = calculate_mine_time("bedrock", &ToolType::Pickaxe, &MaterialTier::Netherite);
-        assert_eq!(time, f64::INFINITY);
-    }
-
-    #[test]
-    fn test_mine_time_gold_max_speed() {
-        // dirt = 0.5, gold speed = 12.0
-        let time = calculate_mine_time("dirt", &ToolType::Shovel, &MaterialTier::Gold);
-        assert!((time - 0.5 / 12.0).abs() < f64::EPSILON);
-    }
+    // --- calculate_mine_time tests ---
+    //
+    // The dead `block_data::calculate_mine_time` was deleted in Phase 4; the
+    // canonical implementation lives in `mining_calc` (with the 1.5× factor)
+    // and its tests are in `mining_calc.rs`.
 
     // --- find_best_tool_in_inventory ---
 
@@ -785,13 +725,13 @@ mod tests {
         assert_eq!(
             MATERIAL_PRIORITY
                 .iter()
-                .position(|m| matches!(m, MaterialTier::Wood)),
+                .position(|m| matches!(m, MaterialTier::Gold)),
             Some(4)
         );
         assert_eq!(
             MATERIAL_PRIORITY
                 .iter()
-                .position(|m| matches!(m, MaterialTier::Gold)),
+                .position(|m| matches!(m, MaterialTier::Wood)),
             Some(5)
         );
     }

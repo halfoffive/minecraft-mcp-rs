@@ -51,9 +51,24 @@ pub enum ToolType {
     Pickaxe,
     Axe,
     Shovel,
+    Hoe,
     Sword,
     Shears,
     Hand,
+}
+
+impl fmt::Display for ToolType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ToolType::Pickaxe => write!(f, "pickaxe"),
+            ToolType::Axe => write!(f, "axe"),
+            ToolType::Shovel => write!(f, "shovel"),
+            ToolType::Hoe => write!(f, "hoe"),
+            ToolType::Sword => write!(f, "sword"),
+            ToolType::Shears => write!(f, "shears"),
+            ToolType::Hand => write!(f, "hand"),
+        }
+    }
 }
 
 /// Material tiers for tools/armor, ordered by quality/durability.
@@ -69,6 +84,19 @@ pub enum MaterialTier {
     Iron,
     Diamond,
     Netherite,
+}
+
+impl fmt::Display for MaterialTier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MaterialTier::Wood => write!(f, "wood"),
+            MaterialTier::Gold => write!(f, "gold"),
+            MaterialTier::Stone => write!(f, "stone"),
+            MaterialTier::Iron => write!(f, "iron"),
+            MaterialTier::Diamond => write!(f, "diamond"),
+            MaterialTier::Netherite => write!(f, "netherite"),
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -306,16 +334,17 @@ mod tests {
     // ── ToolType tests ──────────────────────────────────────
 
     #[test]
-    fn test_tool_type_has_6_variants() {
+    fn test_tool_type_has_7_variants() {
         let tools = [
             ToolType::Pickaxe,
             ToolType::Axe,
             ToolType::Shovel,
+            ToolType::Hoe,
             ToolType::Sword,
             ToolType::Shears,
             ToolType::Hand,
         ];
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
     }
 
     // ── MaterialTier tests ──────────────────────────────────

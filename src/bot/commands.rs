@@ -26,8 +26,6 @@ use crate::state::SharedState;
 use crate::tool_select::find_tool_in_inventory;
 use crate::types::{BlockPos, BotCommand, BotResult, Direction, GameMode};
 
-use super::ops::to_error_tool_type;
-
 // ═══════════════════════════════════════════════════════════════
 // BotActions trait — abstracts azalea Client for testability
 // ═══════════════════════════════════════════════════════════════
@@ -128,7 +126,7 @@ impl BotActions for RealBotClient {
             Err(_) => {
                 self.client.stop_pathfinding();
                 Err(BotError::PathfindingFailed {
-                    target: crate::error::BlockPos {
+                    target: BlockPos {
                         x: pos.x,
                         y: pos.y,
                         z: pos.z,
@@ -638,7 +636,7 @@ impl<B: BotActions> CommandExecutor<B> {
                 )))
             }
             None => Err(BotError::ToolNotFound {
-                tool_type: to_error_tool_type(tool),
+                tool_type: tool,
                 material: None,
             }),
         }
@@ -979,7 +977,7 @@ mod tests {
                 Ok(())
             } else {
                 Err(BotError::PathfindingFailed {
-                    target: crate::error::BlockPos {
+                    target: BlockPos {
                         x: pos.x,
                         y: pos.y,
                         z: pos.z,

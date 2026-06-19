@@ -4,10 +4,11 @@
 //! randomly-generated inputs.
 
 use minecraft_mcp_rs::block_data::{
-    ItemStack, MATERIAL_PRIORITY, MATERIAL_TIER_SPEED, best_tool_for_block, calculate_mine_time,
+    ItemStack, MATERIAL_PRIORITY, MATERIAL_TIER_SPEED, best_tool_for_block,
     find_best_tool_in_inventory, material_from_item_name,
 };
 use minecraft_mcp_rs::command_validate::validate_coordinates;
+use minecraft_mcp_rs::mining_calc::calculate_mine_time;
 use minecraft_mcp_rs::types::{MaterialTier, ToolType};
 use proptest::prelude::*;
 
@@ -21,6 +22,7 @@ fn tool_type_strategy() -> impl Strategy<Value = ToolType> {
         Just(ToolType::Pickaxe),
         Just(ToolType::Axe),
         Just(ToolType::Shovel),
+        Just(ToolType::Hoe),
         Just(ToolType::Sword),
         Just(ToolType::Shears),
         Just(ToolType::Hand),
@@ -220,7 +222,7 @@ proptest! {
         tool_type in tool_type_strategy(),
         material in material_tier_strategy(),
     ) {
-        let time = calculate_mine_time(&block_type, &tool_type, &material);
+        let time = calculate_mine_time(&block_type, tool_type, material);
 
         prop_assert!(
             time > 0.0 || time.is_infinite(),
@@ -243,7 +245,7 @@ proptest! {
         // and unbreakable blocks (time is INFINITY regardless).
         prop_assume!(expected_tool != ToolType::Hand);
 
-        let correct_time = calculate_mine_time(&block_type, &expected_tool, &material);
+        let correct_time = calculate_mine_time(&block_type, expected_tool, material);
 
         // If unbreakable, both should be INFINITY
         prop_assume!(!correct_time.is_infinite());
@@ -263,7 +265,7 @@ proptest! {
         prop_assume!(!wrong_tools.is_empty());
 
         for wrong_tool in &wrong_tools {
-            let wrong_time = calculate_mine_time(&block_type, wrong_tool, &material);
+            let wrong_time = calculate_mine_time(&block_type, *wrong_tool, material);
 
             // Wrong tool gets a 5x penalty (unless it's Hand, which has no penalty)
             if *wrong_tool != ToolType::Hand {
@@ -297,7 +299,7 @@ proptest! {
 
         let mut times = Vec::new();
         for tier in &tiers {
-            let time = calculate_mine_time(&block_type, &expected_tool, tier);
+            let time = calculate_mine_time(&block_type, expected_tool, *tier);
             times.push((*tier, time));
         }
 

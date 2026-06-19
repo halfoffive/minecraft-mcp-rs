@@ -696,7 +696,7 @@ mod tests {
 
         let result = server
             .equip_tool(Parameters(EquipToolInput {
-                tool_type: "hoe".into(),
+                tool_type: "invalid_tool".into(),
                 material_preference: None,
             }))
             .await;

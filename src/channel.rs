@@ -258,7 +258,7 @@ mod tests {
 
         let responder = tokio::spawn(async move {
             let wrapped = receiver.recv().await.expect("should receive command");
-            let err = BotError::BlockNotFound(crate::error::BlockPos { x: 1, y: 2, z: 3 });
+            let err = BotError::BlockNotFound(crate::types::BlockPos::new(1, 2, 3));
             wrapped
                 .respond_to
                 .send(Err(err))

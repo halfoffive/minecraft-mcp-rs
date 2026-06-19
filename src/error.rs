@@ -6,65 +6,12 @@
 use rmcp::model::{ErrorCode, ErrorData};
 use std::fmt::{self, Display, Formatter};
 
-/// A position in the Minecraft world.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BlockPos {
-    pub x: i32,
-    pub y: i32,
-    pub z: i32,
-}
-
-impl fmt::Display for BlockPos {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "({}, {}, {})", self.x, self.y, self.z)
-    }
-}
-
-/// The type of a tool.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ToolType {
-    Pickaxe,
-    Axe,
-    Shovel,
-    Hoe,
-    Sword,
-}
-
-impl fmt::Display for ToolType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ToolType::Pickaxe => write!(f, "pickaxe"),
-            ToolType::Axe => write!(f, "axe"),
-            ToolType::Shovel => write!(f, "shovel"),
-            ToolType::Hoe => write!(f, "hoe"),
-            ToolType::Sword => write!(f, "sword"),
-        }
-    }
-}
-
-/// The material tier of a tool or block.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum MaterialTier {
-    Wood,
-    Stone,
-    Iron,
-    Gold,
-    Diamond,
-    Netherite,
-}
-
-impl fmt::Display for MaterialTier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MaterialTier::Wood => write!(f, "wood"),
-            MaterialTier::Stone => write!(f, "stone"),
-            MaterialTier::Iron => write!(f, "iron"),
-            MaterialTier::Gold => write!(f, "gold"),
-            MaterialTier::Diamond => write!(f, "diamond"),
-            MaterialTier::Netherite => write!(f, "netherite"),
-        }
-    }
-}
+// Re-export the shared position/tool/material types so `BotError` variants and
+// the public API share a single definition with `crate::types`. Previously this
+// module duplicated these types with incompatible variants (e.g. `error::ToolType`
+// had `Hoe` but lacked `Shears`/`Hand`, forcing lossy conversions). Unifying them
+// eliminates the `to_error_*` bridge helpers.
+pub use crate::types::{BlockPos, MaterialTier, ToolType};
 
 // ---------------------------------------------------------------------------
 // BotError

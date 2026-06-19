@@ -27,43 +27,10 @@ use crate::types::{BlockPos, BotCommand, BotResult, MaterialTier, ToolType};
 // Type-conversion helpers
 // ---------------------------------------------------------------------------
 //
-// The crate currently has two `BlockPos` definitions (`types::BlockPos` and
-// `error::BlockPos`) and two `ToolType` definitions (`types::ToolType` and
-// `error::ToolType`).  These helpers bridge the gap so the executor can
-// construct `BotError` variants while using the public `types` types in its
-// API.
-
-fn to_error_block_pos(pos: BlockPos) -> crate::error::BlockPos {
-    crate::error::BlockPos {
-        x: pos.x,
-        y: pos.y,
-        z: pos.z,
-    }
-}
-
-pub(crate) fn to_error_tool_type(tool: ToolType) -> crate::error::ToolType {
-    match tool {
-        ToolType::Pickaxe => crate::error::ToolType::Pickaxe,
-        ToolType::Axe => crate::error::ToolType::Axe,
-        ToolType::Shovel => crate::error::ToolType::Shovel,
-        ToolType::Sword => crate::error::ToolType::Sword,
-        // `error::ToolType` lacks `Shears` and `Hand` — map to a safe fallback.
-        // (Phase 4 unifies the two ToolType enums so this lossy mapping goes away.)
-        ToolType::Shears | ToolType::Hand => crate::error::ToolType::Sword,
-    }
-}
-
-#[allow(dead_code)]
-fn to_error_material_tier(mat: MaterialTier) -> crate::error::MaterialTier {
-    match mat {
-        MaterialTier::Wood => crate::error::MaterialTier::Wood,
-        MaterialTier::Stone => crate::error::MaterialTier::Stone,
-        MaterialTier::Iron => crate::error::MaterialTier::Iron,
-        MaterialTier::Gold => crate::error::MaterialTier::Gold,
-        MaterialTier::Diamond => crate::error::MaterialTier::Diamond,
-        MaterialTier::Netherite => crate::error::MaterialTier::Netherite,
-    }
-}
+// The crate previously had duplicate `BlockPos`/`ToolType`/`MaterialTier`
+// definitions in `error.rs` and `types.rs`. Phase 4 unified them: `error.rs`
+// now re-exports from `types.rs`, so no conversion is needed anymore. The
+// `BotError` variants accept `types::BlockPos` / `types::ToolType` directly.
 
 // ---------------------------------------------------------------------------
 // CompoundOpExecutor
@@ -154,7 +121,7 @@ impl CompoundOpExecutor {
             .map(|b| b.block_type.clone())
             .ok_or_else(|| {
                 warn!(?pos, "block not found in snapshot");
-                BotError::BlockNotFound(to_error_block_pos(pos))
+                BotError::BlockNotFound(pos)
             })?;
 
         trace!(?pos, %block_type, "found block in snapshot");
@@ -171,7 +138,7 @@ impl CompoundOpExecutor {
             // Step 4: Tool needed but not in inventory
             if selection.tool_type == ToolType::Hand {
                 return Err(BotError::ToolNotFound {
-                    tool_type: to_error_tool_type(required_tool),
+                    tool_type: required_tool,
                     material: None,
                 });
             }
@@ -204,7 +171,7 @@ impl CompoundOpExecutor {
                         state = op.advance(
                             state,
                             OperationEvent::Failed(BotError::PathfindingFailed {
-                                target: to_error_block_pos(target),
+                                target,
                                 reason: result.message,
                             }),
                         );
@@ -219,7 +186,7 @@ impl CompoundOpExecutor {
                         state = op.advance(
                             state,
                             OperationEvent::Failed(BotError::ToolNotFound {
-                                tool_type: to_error_tool_type(t),
+                                tool_type: t,
                                 material: None,
                             }),
                         );
@@ -336,7 +303,7 @@ impl CompoundOpExecutor {
 
         if !has_item {
             return Err(BotError::ToolNotFound {
-                tool_type: crate::error::ToolType::Sword, // generic fallback
+                tool_type: ToolType::Hand, // generic fallback (no block item)
                 material: None,
             });
         }
@@ -378,7 +345,7 @@ impl CompoundOpExecutor {
                         state = op.advance(
                             state,
                             OperationEvent::Failed(BotError::PathfindingFailed {
-                                target: to_error_block_pos(target),
+                                target,
                                 reason: result.message,
                             }),
                         );
@@ -464,7 +431,7 @@ impl CompoundOpExecutor {
                         state = op.advance(
                             state,
                             OperationEvent::Failed(BotError::PathfindingFailed {
-                                target: to_error_block_pos(target),
+                                target,
                                 reason: result.message,
                             }),
                         );
@@ -529,7 +496,7 @@ impl CompoundOpExecutor {
 
         if found.is_none() && tool_type != ToolType::Hand {
             return Err(BotError::ToolNotFound {
-                tool_type: to_error_tool_type(tool_type),
+                tool_type,
                 material: None,
             });
         }
@@ -555,7 +522,7 @@ impl CompoundOpExecutor {
                         state = op.advance(
                             state,
                             OperationEvent::Failed(BotError::ToolNotFound {
-                                tool_type: to_error_tool_type(t),
+                                tool_type: t,
                                 material: None,
                             }),
                         );
