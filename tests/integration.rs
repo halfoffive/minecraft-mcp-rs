@@ -61,6 +61,7 @@ fn make_test_snapshot() -> WorldSnapshot {
             hunger: 15,
             gamemode: GameMode::Survival,
             held_item_slot: 3,
+            inventory: Vec::new(),
         },
         timestamp: 42,
         chunk_summary: vec![(0, 0), (-1, 1)],
@@ -240,8 +241,9 @@ async fn test_channel_walk_direction_sends_correct_direction() {
     let verifier = tokio::spawn(async move {
         let wrapped = receiver.recv().await.expect("should receive command");
         match &wrapped.command {
-            BotCommand::WalkDirection(dir) => {
+            BotCommand::WalkDirection(dir, distance) => {
                 assert_eq!(*dir, Direction::North);
+                assert_eq!(*distance, 5);
             }
             other => panic!("expected WalkDirection, got: {:?}", other),
         }
@@ -251,7 +253,7 @@ async fn test_channel_walk_direction_sends_correct_direction() {
             .expect("should respond");
     });
 
-    let cmd = BotCommand::WalkDirection(Direction::North);
+    let cmd = BotCommand::WalkDirection(Direction::North, 5);
     let result = sender.send_command(cmd).await.expect("should succeed");
     assert!(result.success);
 
@@ -632,6 +634,7 @@ async fn test_auto_reconnect_sequence_simulation() {
             hunger: 20,
             gamemode: GameMode::Survival,
             held_item_slot: 0,
+            inventory: Vec::new(),
         },
         timestamp: 99,
         chunk_summary: vec![(1, 1)],
@@ -739,12 +742,12 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
 
     let commands = vec![
         BotCommand::MoveTo(BlockPos::new(0, 64, 0)),
-        BotCommand::WalkDirection(Direction::North),
+        BotCommand::WalkDirection(Direction::North, 1),
         BotCommand::Jump,
         BotCommand::Teleport(BlockPos::new(0, 64, 0)),
         BotCommand::BreakBlock(BlockPos::new(0, 64, 0)),
         BotCommand::PlaceBlock(BlockPos::new(0, 64, 0), "slot:0".into()),
-        BotCommand::UseItemOnBlock(BlockPos::new(0, 64, 0)),
+        BotCommand::UseItemOnBlock(BlockPos::new(0, 64, 0), None),
         BotCommand::SwitchHotbarSlot(0),
         BotCommand::DropItem(0, 1),
         BotCommand::UseItem,
@@ -754,7 +757,7 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
         BotCommand::PutIntoContainer(0, 1),
         BotCommand::CloseContainer,
         BotCommand::AttackEntity(42),
-        BotCommand::ShieldBlock,
+        BotCommand::ShieldBlock(true),
         BotCommand::SendChat("test".into()),
         BotCommand::ExecuteCommand("/help".into()),
         BotCommand::SetGameMode(GameMode::Survival),
@@ -845,7 +848,7 @@ async fn test_sender_clone_works_independently() {
 
     let h2 = tokio::spawn(async move {
         sender2
-            .send_command(BotCommand::ShieldBlock)
+            .send_command(BotCommand::ShieldBlock(true))
             .await
             .expect("sender2 should succeed")
     });

@@ -10,9 +10,10 @@ use std::time::{Duration, Instant};
 use azalea::Client;
 use tracing::{debug, warn};
 
+use crate::bot::commands::item_kind_to_id;
 use crate::snapshot::{DirtyTracker, SnapshotBuilder};
 use crate::state::SharedState;
-use crate::types::{BlockEntry, BlockPos, GameMode, SelfPlayer, WorldSnapshot};
+use crate::types::{BlockEntry, BlockPos, GameMode, InventorySlot, SelfPlayer, WorldSnapshot};
 
 // ═══════════════════════════════════════════════════════════════
 // SnapshotUpdater
@@ -123,6 +124,8 @@ async fn build_snapshot_inner(
     let local_gamemode = bot.component::<azalea::local_player::LocalGameMode>();
     let profile = bot.profile();
 
+    let inventory = read_inventory(bot);
+
     let self_player = SelfPlayer {
         uuid: profile.uuid.to_string(),
         username: profile.name,
@@ -131,6 +134,7 @@ async fn build_snapshot_inner(
         hunger: hunger.food as i32,
         gamemode: azalea_gamemode_to_ours(local_gamemode.current),
         held_item_slot: bot.selected_hotbar_slot(),
+        inventory,
     };
 
     // ── Read old snapshot ────────────────────────────────────
@@ -207,6 +211,35 @@ async fn build_snapshot_inner(
 // ═══════════════════════════════════════════════════════════════
 // Utility helpers
 // ═══════════════════════════════════════════════════════════════
+
+/// Read the player's 36-slot inventory from the azalea client.
+///
+/// Mirrors the logic in [`crate::bot::commands::RealBotClient::inventory_entries`]:
+/// when a container is open the menu is not `Player`, so we return an empty
+/// list rather than stale container slots. Only non-empty slots are returned.
+fn read_inventory(bot: &Client) -> Vec<InventorySlot> {
+    let menu = bot.menu();
+    let player = match menu.try_as_player() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    player
+        .inventory
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, stack)| {
+            if stack.is_empty() {
+                None
+            } else {
+                Some(InventorySlot {
+                    slot_index: slot as u8,
+                    item_id: item_kind_to_id(stack.kind()),
+                    count: stack.count().clamp(0, 255) as u8,
+                })
+            }
+        })
+        .collect()
+}
 
 fn block_state_to_name(block_state: azalea::block::BlockState) -> String {
     #[allow(deprecated)]

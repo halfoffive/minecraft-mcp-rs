@@ -38,19 +38,19 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         | BotCommand::Teleport(pos)
         | BotCommand::BreakBlock(pos)
         | BotCommand::PlaceBlock(pos, _)
-        | BotCommand::UseItemOnBlock(pos)
+        | BotCommand::UseItemOnBlock(pos, _)
         | BotCommand::OpenContainer(pos) => validate_position(pos),
 
-        // Direction is verified by the type system �?no runtime checks needed.
-        BotCommand::WalkDirection(_) => Ok(()),
+        // Direction is verified by the type system — no runtime checks needed.
+        BotCommand::WalkDirection(_, _) => Ok(()),
 
-        // Parameterless commands �?always valid.
+        // Parameterless commands — always valid.
         BotCommand::Jump
         | BotCommand::UseItem
         | BotCommand::EquipTool(_)
         | BotCommand::CloseContainer
         | BotCommand::AttackEntity(_)
-        | BotCommand::ShieldBlock
+        | BotCommand::ShieldBlock(_)
         | BotCommand::SetGameMode(_)
         | BotCommand::QuerySelfInfo
         | BotCommand::QueryInventory
@@ -352,13 +352,13 @@ mod tests {
 
     #[test]
     fn test_use_item_on_block_valid() {
-        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0));
+        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None);
         assert!(validate_command(&cmd).is_ok());
     }
 
     #[test]
     fn test_use_item_on_block_invalid_x() {
-        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(30_000_001, 0, 0));
+        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(30_000_001, 0, 0), None);
         assert!(validate_command(&cmd).is_err());
     }
 
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn test_walk_direction_valid() {
-        let cmd = BotCommand::WalkDirection(Direction::North);
+        let cmd = BotCommand::WalkDirection(Direction::North, 1);
         assert!(validate_command(&cmd).is_ok());
     }
 
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_shield_block_valid() {
-        assert!(validate_command(&BotCommand::ShieldBlock).is_ok());
+        assert!(validate_command(&BotCommand::ShieldBlock(true)).is_ok());
     }
 
     #[test]
@@ -642,12 +642,12 @@ mod tests {
     fn count_variants(cmd: &BotCommand) -> u32 {
         match cmd {
             BotCommand::MoveTo(_) => 1,
-            BotCommand::WalkDirection(_) => 1,
+            BotCommand::WalkDirection(_, _) => 1,
             BotCommand::Jump => 1,
             BotCommand::Teleport(_) => 1,
             BotCommand::BreakBlock(_) => 1,
             BotCommand::PlaceBlock(_, _) => 1,
-            BotCommand::UseItemOnBlock(_) => 1,
+            BotCommand::UseItemOnBlock(_, _) => 1,
             BotCommand::SwitchHotbarSlot(_) => 1,
             BotCommand::DropItem(_, _) => 1,
             BotCommand::UseItem => 1,
@@ -657,7 +657,7 @@ mod tests {
             BotCommand::PutIntoContainer(_, _) => 1,
             BotCommand::CloseContainer => 1,
             BotCommand::AttackEntity(_) => 1,
-            BotCommand::ShieldBlock => 1,
+            BotCommand::ShieldBlock(_) => 1,
             BotCommand::SendChat(_) => 1,
             BotCommand::ExecuteCommand(_) => 1,
             BotCommand::SetGameMode(_) => 1,
@@ -689,12 +689,12 @@ mod tests {
     fn all_commands() -> Vec<BotCommand> {
         vec![
             BotCommand::MoveTo(BlockPos::new(0, 0, 0)),
-            BotCommand::WalkDirection(Direction::North),
+            BotCommand::WalkDirection(Direction::North, 1),
             BotCommand::Jump,
             BotCommand::Teleport(BlockPos::new(0, 0, 0)),
             BotCommand::BreakBlock(BlockPos::new(0, 0, 0)),
             BotCommand::PlaceBlock(BlockPos::new(0, 0, 0), "stone".into()),
-            BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0)),
+            BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None),
             BotCommand::SwitchHotbarSlot(0),
             BotCommand::DropItem(0, 1),
             BotCommand::UseItem,
@@ -704,7 +704,7 @@ mod tests {
             BotCommand::PutIntoContainer(0, 1),
             BotCommand::CloseContainer,
             BotCommand::AttackEntity(0),
-            BotCommand::ShieldBlock,
+            BotCommand::ShieldBlock(true),
             BotCommand::SendChat("msg".into()),
             BotCommand::ExecuteCommand("/help".into()),
             BotCommand::SetGameMode(GameMode::Survival),

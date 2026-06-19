@@ -500,6 +500,15 @@ impl CompoundOpExecutor {
             });
         }
 
+        // 装备空手：无需切换槽位，直接返回成功
+        if found.is_none() && tool_type == ToolType::Hand {
+            return Ok(BotResult {
+                success: true,
+                message: "Equipped Hand (no slot switch needed)".to_string(),
+                data: None,
+            });
+        }
+
         let (_material, slot) = found.unwrap_or((MaterialTier::Wood, 0));
 
         // Step 2: Switch to the slot
@@ -577,6 +586,7 @@ mod tests {
                 hunger: 20,
                 gamemode: GameMode::Survival,
                 held_item_slot: 0,
+                inventory: Vec::new(),
             },
             timestamp: 1,
             chunk_summary: vec![],
@@ -595,6 +605,7 @@ mod tests {
                 hunger: 20,
                 gamemode: GameMode::Survival,
                 held_item_slot: 0,
+                inventory: Vec::new(),
             },
             timestamp: 1,
             chunk_summary: vec![],
@@ -1036,6 +1047,27 @@ mod tests {
         // iron_pickaxe is at slot 1, so held_item_slot should be 1
         let final_snapshot = state.read_snapshot();
         assert_eq!(final_snapshot.self_player.held_item_slot, 1);
+    }
+
+    // ── execute_equip_tool: Hand with no tool does not switch slot ───────
+
+    #[tokio::test]
+    async fn test_equip_tool_hand_no_switch() {
+        // Use a non-zero held_item_slot to detect any SwitchHotbarSlot(0).
+        let mut snapshot = make_empty_snapshot();
+        snapshot.self_player.held_item_slot = 3;
+        let (executor, _handle, state) = setup(vec![], snapshot);
+
+        let result = executor.execute_equip_tool(ToolType::Hand).await;
+
+        assert!(result.is_ok(), "expected success, got: {:?}", result);
+        let bot_result = result.unwrap();
+        assert!(bot_result.success);
+        assert!(bot_result.message.contains("Equipped Hand"));
+
+        // Verify held slot was NOT changed (no SwitchHotbarSlot sent)
+        let final_snapshot = state.read_snapshot();
+        assert_eq!(final_snapshot.self_player.held_item_slot, 3);
     }
 
     // ── Failure recovery: pathfinding fails during mine ─────────────────

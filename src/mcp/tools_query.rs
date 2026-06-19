@@ -32,20 +32,19 @@ pub fn get_self_info(state: &Arc<SharedState>) -> String {
         .unwrap_or_else(|e| json!({"error": format!("Serialization error: {e}")}).to_string())
 }
 
-/// Get the bot's currently held item slot.
+/// Get the bot's full player inventory.
 ///
-/// Full inventory tracking is not yet implemented (the azalea ECS inventory
-/// is rich but not yet wired into the snapshot).  This stub returns the
-/// `held_item_slot` from [`crate::types::SelfPlayer`] plus a note so the
-/// caller knows what to expect.
+/// Returns the 36 main slots as an array of occupied slots (empty slots are
+/// omitted), plus the currently selected hotbar slot. Data is read from the
+/// latest [`WorldSnapshot`] written by the snapshot updater.
 pub fn get_inventory(state: &Arc<SharedState>) -> String {
     if !state.is_online() {
         return OFFLINE_ERROR.to_string();
     }
     let snapshot = state.read_snapshot();
     json!({
+        "inventory": snapshot.self_player.inventory,
         "held_item_slot": snapshot.self_player.held_item_slot,
-        "note": "Full inventory tracking not yet implemented — only held_item_slot is available"
     })
     .to_string()
 }
@@ -135,7 +134,9 @@ pub fn is_connected(state: &Arc<SharedState>) -> String {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
-    use crate::types::{BlockEntry, BlockPos, EntityEntry, GameMode, SelfPlayer, WorldSnapshot};
+    use crate::types::{
+        BlockEntry, BlockPos, EntityEntry, GameMode, InventorySlot, SelfPlayer, WorldSnapshot,
+    };
 
     // -- Helpers ---------------------------------------------------------------
 
@@ -188,6 +189,18 @@ mod tests {
                 hunger: 15,
                 gamemode: GameMode::Survival,
                 held_item_slot: 3,
+                inventory: vec![
+                    InventorySlot {
+                        slot_index: 0,
+                        item_id: "iron_pickaxe".into(),
+                        count: 1,
+                    },
+                    InventorySlot {
+                        slot_index: 1,
+                        item_id: "oak_planks".into(),
+                        count: 64,
+                    },
+                ],
             },
             timestamp: 42,
             chunk_summary: vec![(0, 0), (-1, 0)],
@@ -228,7 +241,16 @@ mod tests {
         let result = get_inventory(&state);
         assert!(result.contains("held_item_slot"));
         assert!(result.contains('3'));
-        assert!(result.contains("Full inventory tracking not yet implemented"));
+        assert!(result.contains("inventory"));
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let inventory = parsed["inventory"].as_array().unwrap();
+        assert_eq!(inventory.len(), 2);
+        assert_eq!(inventory[0]["slot_index"], 0);
+        assert_eq!(inventory[0]["item_id"], "iron_pickaxe");
+        assert_eq!(inventory[0]["count"], 1);
+        assert_eq!(inventory[1]["slot_index"], 1);
+        assert_eq!(inventory[1]["item_id"], "oak_planks");
+        assert_eq!(inventory[1]["count"], 64);
     }
 
     #[test]

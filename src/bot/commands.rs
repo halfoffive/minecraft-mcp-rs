@@ -7,7 +7,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use azalea::WalkDirection;
 use azalea::pathfinder::goals::BlockPosGoal;
 use azalea::prelude::*;
 use tokio::time::{sleep, timeout};
@@ -32,9 +31,6 @@ use crate::types::{BlockPos, BotCommand, BotResult, Direction, GameMode};
 pub(crate) trait BotActions {
     /// Start pathfinding to a block position and await completion (or timeout).
     async fn goto(&self, pos: &BlockPos) -> Result<(), BotError>;
-
-    /// Start walking in a direction.
-    fn walk(&self, direction: WalkDirection);
 
     /// Perform a single jump.
     async fn jump(&self);
@@ -129,10 +125,6 @@ impl BotActions for RealBotClient {
                 })
             }
         }
-    }
-
-    fn walk(&self, direction: WalkDirection) {
-        self.client.walk(direction);
     }
 
     async fn jump(&self) {
@@ -263,7 +255,7 @@ impl BotActions for RealBotClient {
 
 /// Convert an azalea `ItemKind` (Debug variant name like `IronPickaxe`) into
 /// the snake_case item id used by the block/tool tables (`iron_pickaxe`).
-fn item_kind_to_id(kind: azalea::registry::builtin::ItemKind) -> String {
+pub(crate) fn item_kind_to_id(kind: azalea::registry::builtin::ItemKind) -> String {
     to_snake_case(&format!("{kind:?}"))
 }
 
@@ -287,19 +279,26 @@ fn to_snake_case(s: &str) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Direction → WalkDirection mapping
+// Direction → unit vector mapping
 // ═══════════════════════════════════════════════════════════════
 
-/// Map a cardinal [`Direction`] to an azalea [`WalkDirection`].
+/// Map a [`Direction`] to a horizontal integer unit vector `(dx, dy, dz)`.
 ///
-/// Returns `None` for unsupported directions (Up, Down, diagonals).
-fn direction_to_walk(dir: Direction) -> Option<WalkDirection> {
+/// Returns `Some` for cardinal and diagonal directions (the y component is
+/// always 0). Returns `None` for `Up`/`Down` because azalea's pathfinder
+/// does not accept a purely vertical goal — callers should surface a clear
+/// error for those.
+fn direction_to_vector(dir: Direction) -> Option<(i32, i32, i32)> {
     match dir {
-        Direction::North => Some(WalkDirection::Forward),
-        Direction::South => Some(WalkDirection::Backward),
-        Direction::East => Some(WalkDirection::Right),
-        Direction::West => Some(WalkDirection::Left),
-        _ => None,
+        Direction::North => Some((0, 0, -1)),
+        Direction::South => Some((0, 0, 1)),
+        Direction::East => Some((1, 0, 0)),
+        Direction::West => Some((-1, 0, 0)),
+        Direction::NorthEast => Some((1, 0, -1)),
+        Direction::NorthWest => Some((-1, 0, -1)),
+        Direction::SouthEast => Some((1, 0, 1)),
+        Direction::SouthWest => Some((-1, 0, 1)),
+        Direction::Up | Direction::Down => None,
     }
 }
 
@@ -418,14 +417,18 @@ impl<B: BotActions> CommandExecutor<B> {
         match cmd {
             // ── Movement ──────────────────────────────────────────
             BotCommand::MoveTo(pos) => self.handle_move_to(pos).await,
-            BotCommand::WalkDirection(dir) => self.handle_walk_direction(dir),
+            BotCommand::WalkDirection(dir, distance) => {
+                self.handle_walk_direction(dir, distance).await
+            }
             BotCommand::Jump => self.handle_jump().await,
             BotCommand::Teleport(pos) => self.handle_teleport(pos),
 
             // ── Block interaction ─────────────────────────────────
             BotCommand::BreakBlock(pos) => self.handle_break_block(pos),
             BotCommand::PlaceBlock(pos, block_type) => self.handle_place_block(pos, block_type),
-            BotCommand::UseItemOnBlock(pos) => self.handle_use_item_on_block(pos),
+            BotCommand::UseItemOnBlock(pos, item_slot) => {
+                self.handle_use_item_on_block(pos, item_slot)
+            }
 
             // ── Item / inventory ──────────────────────────────────
             BotCommand::SwitchHotbarSlot(slot) => self.handle_switch_hotbar_slot(slot),
@@ -445,7 +448,7 @@ impl<B: BotActions> CommandExecutor<B> {
 
             // ── Combat ────────────────────────────────────────────
             BotCommand::AttackEntity(id) => self.handle_attack_entity(id),
-            BotCommand::ShieldBlock => self.handle_shield_block(),
+            BotCommand::ShieldBlock(blocking) => self.handle_shield_block(blocking),
 
             // ── Chat / command ────────────────────────────────────
             BotCommand::SendChat(msg) => self.handle_send_chat(msg),
@@ -479,21 +482,44 @@ impl<B: BotActions> CommandExecutor<B> {
         })
     }
 
-    fn handle_walk_direction(&self, dir: Direction) -> Result<BotResult, BotError> {
-        trace!(?dir, "WalkDirection");
-        match direction_to_walk(dir) {
-            Some(walk_dir) => {
-                self.bot.walk(walk_dir);
+    async fn handle_walk_direction(
+        &self,
+        dir: Direction,
+        distance: u32,
+    ) -> Result<BotResult, BotError> {
+        trace!(?dir, distance, "WalkDirection");
+        // For horizontal directions (cardinal + diagonal) translate the
+        // request into a `MoveTo` at `current + unit_vector * distance` so the
+        // pathfinder covers the exact block count. Vertical directions (Up/Down)
+        // are not supported by azalea's pathfinder and surface a clear error.
+        match direction_to_vector(dir) {
+            Some((dx, dy, dz)) => {
+                let current = self.state.read_snapshot().self_player.position;
+                let d = distance as i32;
+                let target =
+                    BlockPos::new(current.x + dx * d, current.y + dy * d, current.z + dz * d);
+                self.bot.goto(&target).await?;
+
+                if !self.state.is_online() {
+                    return Err(BotError::Offline("disconnected during movement".into()));
+                }
+
                 Ok(BotResult {
                     success: true,
-                    message: format!("Walking {:?}", dir),
+                    message: format!("Walking {:?} for {} blocks", dir, distance),
                     data: None,
                 })
             }
-            None => Err(BotError::Internal(format!(
-                "direction {:?} is not supported for walk; use MoveTo instead",
-                dir
-            ))),
+            None => {
+                // Up/Down: azalea's pathfinder has no vertical-only goal.
+                // `direction_to_vector` returns `None` for these, so surface a
+                // clear error explaining the limitation.
+                Err(BotError::Internal(format!(
+                    "direction {dir:?} is not supported for distance move \
+                     (vertical direction not supported for distance move); \
+                     use MoveTo instead"
+                )))
+            }
         }
     }
 
@@ -552,12 +578,29 @@ impl<B: BotActions> CommandExecutor<B> {
         })
     }
 
-    fn handle_use_item_on_block(&self, pos: BlockPos) -> Result<BotResult, BotError> {
-        trace!(?pos, "UseItemOnBlock");
+    fn handle_use_item_on_block(
+        &self,
+        pos: BlockPos,
+        item_slot: Option<u8>,
+    ) -> Result<BotResult, BotError> {
+        trace!(?pos, ?item_slot, "UseItemOnBlock");
+        // If a hotbar slot was specified, select it before interacting so the
+        // correct item is used. Mirrors `handle_switch_hotbar_slot`'s range
+        // check (the MCP layer also validates, but defend in depth).
+        if let Some(slot) = item_slot
+            && slot > 8
+        {
+            return Err(BotError::Internal(format!(
+                "item_slot {slot} out of hotbar range (0-8)"
+            )));
+        }
+        if let Some(slot) = item_slot {
+            self.bot.switch_hotbar_slot(slot);
+        }
         self.bot.block_interact(&pos);
         Ok(BotResult {
             success: true,
-            message: format!("Used item on block at {}", pos),
+            message: format!("Used item on block at {} (slot: {:?})", pos, item_slot),
             data: None,
         })
     }
@@ -734,13 +777,18 @@ impl<B: BotActions> CommandExecutor<B> {
         })
     }
 
-    fn handle_shield_block(&self) -> Result<BotResult, BotError> {
-        trace!("ShieldBlock");
+    fn handle_shield_block(&self, blocking: bool) -> Result<BotResult, BotError> {
+        trace!(blocking, "ShieldBlock");
         // Crouching is used as a proxy for shield blocking in Minecraft.
-        self.bot.set_crouching(true);
+        // `blocking = true` raises the shield (crouch); `false` lowers it.
+        self.bot.set_crouching(blocking);
         Ok(BotResult {
             success: true,
-            message: "Shield raised (crouching)".into(),
+            message: if blocking {
+                "Shield raised (crouching)".into()
+            } else {
+                "Shield lowered (standing)".into()
+            },
             data: None,
         })
     }
@@ -909,7 +957,6 @@ mod tests {
     struct MockCallLog {
         goto_calls: Mutex<Vec<BlockPos>>,
         goto_succeeds: AtomicBool,
-        walk_calls: Mutex<Vec<WalkDirection>>,
         jump_calls: AtomicUsize,
         teleport_calls: Mutex<Vec<BlockPos>>,
         hotbar_switch_calls: Mutex<Vec<u8>>,
@@ -932,7 +979,6 @@ mod tests {
             Self {
                 goto_calls: Mutex::new(Vec::new()),
                 goto_succeeds: AtomicBool::new(true),
-                walk_calls: Mutex::new(Vec::new()),
                 jump_calls: AtomicUsize::new(0),
                 teleport_calls: Mutex::new(Vec::new()),
                 hotbar_switch_calls: Mutex::new(Vec::new()),
@@ -984,10 +1030,6 @@ mod tests {
                     reason: "mock pathfinding failure".into(),
                 })
             }
-        }
-
-        fn walk(&self, direction: WalkDirection) {
-            self.log.walk_calls.lock().unwrap().push(direction);
         }
 
         async fn jump(&self) {
@@ -1109,6 +1151,7 @@ mod tests {
                 hunger: 20,
                 gamemode: GameMode::Survival,
                 held_item_slot: 0,
+                inventory: Vec::new(),
             },
             timestamp: 1,
             chunk_summary: vec![(0, 0), (1, 0)],
@@ -1190,69 +1233,101 @@ mod tests {
 
     #[tokio::test]
     async fn test_walk_north() {
-        let (executor, sender, _state, log) = make_executor();
+        // WalkDirection now routes horizontal moves through `goto` with a
+        // target offset from the current position by the direction vector.
+        let (executor, sender, state, log) = make_executor();
+        make_populated_snapshot(&state);
         let handle = spawn_executor(executor);
 
-        let result = send_and_await(&sender, BotCommand::WalkDirection(Direction::North)).await;
+        let result = send_and_await(&sender, BotCommand::WalkDirection(Direction::North, 1)).await;
         assert!(result.is_ok());
         assert!(result.unwrap().message.contains("Walking"));
 
         drop(sender);
         handle.await.expect("executor should finish");
 
-        let walks = log.walk_calls.lock().unwrap();
-        assert_eq!(walks.len(), 1);
-        assert_eq!(walks[0], WalkDirection::Forward);
+        let goto_calls = log.goto_calls.lock().unwrap();
+        assert_eq!(goto_calls.len(), 1);
+        // Mock default position is (0, 64, 0); North is (0, 0, -1).
+        assert_eq!(goto_calls[0], BlockPos::new(0, 64, -1));
     }
 
     #[tokio::test]
     async fn test_walk_south() {
-        let (executor, sender, _state, log) = make_executor();
+        let (executor, sender, state, log) = make_executor();
+        make_populated_snapshot(&state);
         let handle = spawn_executor(executor);
 
-        let _ = send_and_await(&sender, BotCommand::WalkDirection(Direction::South)).await;
+        let _ = send_and_await(&sender, BotCommand::WalkDirection(Direction::South, 1)).await;
 
         drop(sender);
         handle.await.expect("executor should finish");
 
-        let walks = log.walk_calls.lock().unwrap();
-        assert_eq!(walks[0], WalkDirection::Backward);
+        let goto_calls = log.goto_calls.lock().unwrap();
+        assert_eq!(goto_calls.len(), 1);
+        // South is (0, 0, +1).
+        assert_eq!(goto_calls[0], BlockPos::new(0, 64, 1));
     }
 
     #[tokio::test]
     async fn test_walk_east() {
-        let (executor, sender, _state, log) = make_executor();
+        let (executor, sender, state, log) = make_executor();
+        make_populated_snapshot(&state);
         let handle = spawn_executor(executor);
 
-        let _ = send_and_await(&sender, BotCommand::WalkDirection(Direction::East)).await;
+        let _ = send_and_await(&sender, BotCommand::WalkDirection(Direction::East, 1)).await;
 
         drop(sender);
         handle.await.expect("executor should finish");
 
-        let walks = log.walk_calls.lock().unwrap();
-        assert_eq!(walks[0], WalkDirection::Right);
+        let goto_calls = log.goto_calls.lock().unwrap();
+        assert_eq!(goto_calls.len(), 1);
+        // East is (+1, 0, 0).
+        assert_eq!(goto_calls[0], BlockPos::new(1, 64, 0));
     }
 
     #[tokio::test]
     async fn test_walk_west() {
-        let (executor, sender, _state, log) = make_executor();
+        let (executor, sender, state, log) = make_executor();
+        make_populated_snapshot(&state);
         let handle = spawn_executor(executor);
 
-        let _ = send_and_await(&sender, BotCommand::WalkDirection(Direction::West)).await;
+        let _ = send_and_await(&sender, BotCommand::WalkDirection(Direction::West, 1)).await;
 
         drop(sender);
         handle.await.expect("executor should finish");
 
-        let walks = log.walk_calls.lock().unwrap();
-        assert_eq!(walks[0], WalkDirection::Left);
+        let goto_calls = log.goto_calls.lock().unwrap();
+        assert_eq!(goto_calls.len(), 1);
+        // West is (-1, 0, 0).
+        assert_eq!(goto_calls[0], BlockPos::new(-1, 64, 0));
+    }
+
+    #[tokio::test]
+    async fn test_walk_diagonal_northeast() {
+        // Diagonals are now supported via goto (unit vector combines x and z).
+        let (executor, sender, state, log) = make_executor();
+        make_populated_snapshot(&state);
+        let handle = spawn_executor(executor);
+
+        let _ = send_and_await(&sender, BotCommand::WalkDirection(Direction::NorthEast, 2)).await;
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        let goto_calls = log.goto_calls.lock().unwrap();
+        assert_eq!(goto_calls.len(), 1);
+        // NorthEast is (+1, 0, -1); distance 2 → (2, 0, -2) offset.
+        assert_eq!(goto_calls[0], BlockPos::new(2, 64, -2));
     }
 
     #[tokio::test]
     async fn test_walk_unsupported_direction() {
+        // Up/Down cannot be translated to a horizontal goto target.
         let (executor, sender, _state, _log) = make_executor();
         let handle = spawn_executor(executor);
 
-        let result = send_and_await(&sender, BotCommand::WalkDirection(Direction::Up)).await;
+        let result = send_and_await(&sender, BotCommand::WalkDirection(Direction::Up, 1)).await;
         assert!(result.is_err());
         assert!(matches!(result, Err(BotError::Internal(_))));
 
@@ -1468,7 +1543,7 @@ mod tests {
         let (executor, sender, _state, log) = make_executor();
         let handle = spawn_executor(executor);
 
-        let result = send_and_await(&sender, BotCommand::ShieldBlock).await;
+        let result = send_and_await(&sender, BotCommand::ShieldBlock(true)).await;
         assert!(result.is_ok());
         assert!(result.unwrap().message.contains("Shield"));
 
@@ -1478,6 +1553,25 @@ mod tests {
         let crouches = log.crouch_calls.lock().unwrap();
         assert_eq!(crouches.len(), 1);
         assert!(crouches[0]); // crouching = true
+    }
+
+    #[tokio::test]
+    async fn test_shield_block_lower() {
+        // blocking=false should call set_crouching(false) and report lowering.
+        let (executor, sender, _state, log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::ShieldBlock(false)).await;
+        assert!(result.is_ok());
+        let br = result.unwrap();
+        assert!(br.message.contains("lowered"));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        let crouches = log.crouch_calls.lock().unwrap();
+        assert_eq!(crouches.len(), 1);
+        assert!(!crouches[0]); // crouching = false
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1545,15 +1639,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_use_item_on_block() {
+        // Without an item_slot the bot interacts with the currently held item.
         let (executor, sender, _state, log) = make_executor();
         let handle = spawn_executor(executor);
 
         let pos = BlockPos::new(5, 65, 5);
-        let result = send_and_await(&sender, BotCommand::UseItemOnBlock(pos)).await;
+        let result = send_and_await(&sender, BotCommand::UseItemOnBlock(pos, None)).await;
         assert!(result.is_ok());
 
         drop(sender);
         handle.await.expect("executor should finish");
+
+        let interacts = log.interact_calls.lock().unwrap();
+        assert_eq!(interacts.len(), 1);
+        assert_eq!(interacts[0], pos);
+        // No slot switching when item_slot is None.
+        assert!(log.hotbar_switch_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_use_item_on_block_with_slot() {
+        // When item_slot is Some(n), the bot switches to slot n before
+        // interacting.
+        let (executor, sender, _state, log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let pos = BlockPos::new(5, 65, 5);
+        let result = send_and_await(&sender, BotCommand::UseItemOnBlock(pos, Some(3))).await;
+        assert!(result.is_ok());
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        let slots = log.hotbar_switch_calls.lock().unwrap();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0], 3);
 
         let interacts = log.interact_calls.lock().unwrap();
         assert_eq!(interacts.len(), 1);
@@ -1801,7 +1921,7 @@ mod tests {
 
         let cmds = vec![
             BotCommand::MoveTo(BlockPos::new(0, 0, 0)),
-            BotCommand::WalkDirection(Direction::North),
+            BotCommand::WalkDirection(Direction::North, 1),
             BotCommand::Jump,
             BotCommand::Teleport(BlockPos::new(0, 0, 0)),
         ];
@@ -1817,60 +1937,6 @@ mod tests {
 
         drop(sender);
         handle.await.expect("executor should finish");
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // Direction mapping tests
-    // ═══════════════════════════════════════════════════════════════
-
-    #[test]
-    fn test_direction_to_walk_cardinals() {
-        assert_eq!(
-            direction_to_walk(Direction::North),
-            Some(WalkDirection::Forward)
-        );
-        assert_eq!(
-            direction_to_walk(Direction::South),
-            Some(WalkDirection::Backward)
-        );
-        assert_eq!(
-            direction_to_walk(Direction::East),
-            Some(WalkDirection::Right)
-        );
-        assert_eq!(
-            direction_to_walk(Direction::West),
-            Some(WalkDirection::Left)
-        );
-    }
-
-    #[test]
-    fn test_direction_to_walk_unsupported() {
-        assert_eq!(direction_to_walk(Direction::Up), None);
-        assert_eq!(direction_to_walk(Direction::Down), None);
-        assert_eq!(direction_to_walk(Direction::NorthEast), None);
-        assert_eq!(direction_to_walk(Direction::NorthWest), None);
-        assert_eq!(direction_to_walk(Direction::SouthEast), None);
-        assert_eq!(direction_to_walk(Direction::SouthWest), None);
-    }
-
-    #[test]
-    fn test_direction_to_walk_exhaustive() {
-        // All 10 Direction variants are handled.
-        let all = [
-            Direction::North,
-            Direction::South,
-            Direction::East,
-            Direction::West,
-            Direction::Up,
-            Direction::Down,
-            Direction::NorthEast,
-            Direction::NorthWest,
-            Direction::SouthEast,
-            Direction::SouthWest,
-        ];
-        for dir in all {
-            let _ = direction_to_walk(dir); // no panic
-        }
     }
 
     // ═══════════════════════════════════════════════════════════════

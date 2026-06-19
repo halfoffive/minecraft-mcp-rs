@@ -22,13 +22,27 @@ pub fn is_correct_tool(tool_type: ToolType, block_type: &str) -> bool {
     tool_type == expected
 }
 
+/// Checks whether the given block requires a specific (non-Hand) tool to mine
+/// efficiently.
+///
+/// Returns `false` for blocks not present in [`BLOCK_TO_TOOL_TYPE`] (unknown
+/// blocks are treated as not requiring a tool, preserving the semantics of
+/// [`is_correct_tool`] which considers Hand correct for unknown blocks).
+pub fn block_requires_tool(block_type: &str) -> bool {
+    BLOCK_TO_TOOL_TYPE
+        .get(block_type)
+        .map(|t| *t != ToolType::Hand)
+        .unwrap_or(false)
+}
+
 /// Calculates the time (in seconds) required to mine a block.
 ///
 /// Formula: `hardness * 1.5 / tool_speed * penalty`
 ///
 /// - Unbreakable blocks (hardness < 0) return [`f64::INFINITY`].
-/// - Wrong tool penalty: 5× multiplier.
-/// - Hand speed is always `1.0` and incurs no penalty.
+/// - Hand speed is always `1.0`.
+/// - Wrong tool penalty: 5× multiplier when the block requires a tool but the
+///   wrong tool (including Hand) is used.
 pub fn calculate_mine_time(block_type: &str, tool_type: ToolType, material: MaterialTier) -> f64 {
     let hardness = get_block_hardness(block_type);
 
@@ -43,7 +57,10 @@ pub fn calculate_mine_time(block_type: &str, tool_type: ToolType, material: Mate
         *MATERIAL_TIER_SPEED.get(&material).unwrap_or(&1.0)
     };
 
-    let penalty = if tool_type != ToolType::Hand && !is_correct_tool(tool_type, block_type) {
+    // 5× penalty when the block requires a tool but the wrong tool (including
+    // Hand) is used. Blocks that don't require a tool (e.g. unknown blocks)
+    // incur no penalty even when mined with a non-matching tool.
+    let penalty = if !is_correct_tool(tool_type, block_type) && block_requires_tool(block_type) {
         5.0
     } else {
         1.0
@@ -161,9 +178,17 @@ mod tests {
 
     #[test]
     fn test_mine_time_hand_no_penalty() {
-        // stone with hand: no penalty, speed = 1.0
+        // ice is not in BLOCK_TO_TOOL_TYPE, so it doesn't require a tool.
+        // Hand on ice: no penalty, speed = 1.0.
+        let time = calculate_mine_time("ice", ToolType::Hand, MaterialTier::Wood);
+        assert!((time - 0.75).abs() < f64::EPSILON); // 0.5 * 1.5 / 1.0 = 0.75
+    }
+
+    #[test]
+    fn test_mine_time_hand_on_tool_required() {
+        // stone requires a Pickaxe; mining it with Hand incurs the 5× penalty.
         let time = calculate_mine_time("stone", ToolType::Hand, MaterialTier::Wood);
-        assert!((time - 2.25).abs() < f64::EPSILON); // 1.5 * 1.5 / 1.0 = 2.25
+        assert!((time - 11.25).abs() < f64::EPSILON); // 1.5 * 1.5 / 1.0 * 5.0 = 11.25
     }
 
     #[test]
@@ -176,9 +201,10 @@ mod tests {
 
     #[test]
     fn test_mine_time_unknown_block_wrong_tool() {
-        // unknown block defaults to Hand, so any non-Hand tool is "wrong"
+        // unknown block defaults to Hand and doesn't require a tool, so even a
+        // non-matching tool incurs no penalty.
         let time = calculate_mine_time("unknown_block", ToolType::Pickaxe, MaterialTier::Iron);
-        // hardness 1.0 * 1.5 / 6.0 * 5.0 = 1.25
-        assert!((time - 1.25).abs() < f64::EPSILON);
+        // hardness 1.0 * 1.5 / 6.0 * 1.0 = 0.25
+        assert!((time - 0.25).abs() < f64::EPSILON);
     }
 }

@@ -120,8 +120,10 @@ impl rmcp::schemars::JsonSchema for ShieldBlockInput {
 
 /// Handle `shield_block` MCP tool.
 ///
-/// Checks online status, then sends [`BotCommand::ShieldBlock`].
-/// The `blocking` parameter is included in the response metadata.
+/// Checks online status, then sends [`BotCommand::ShieldBlock`] with the
+/// requested state. `blocking = true` raises the shield (crouch);
+/// `blocking = false` lowers the shield (stop crouching). The `blocking`
+/// parameter is also included in the response metadata.
 pub async fn handle_shield_block(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
@@ -131,7 +133,7 @@ pub async fn handle_shield_block(
         return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
-    let cmd = BotCommand::ShieldBlock;
+    let cmd = BotCommand::ShieldBlock(input.blocking);
     match sender.send_command(cmd).await {
         Ok(result) => {
             let mut json = serde_json::to_value(&result).unwrap_or_default();
@@ -204,6 +206,7 @@ mod tests {
                 hunger: 20,
                 gamemode: crate::types::GameMode::Survival,
                 held_item_slot: 0,
+                inventory: Vec::new(),
             },
             timestamp: 1,
             chunk_summary: vec![],
@@ -264,11 +267,39 @@ mod tests {
 
     #[tokio::test]
     async fn test_shield_block_stop() {
-        let (state, sender) = make_echo_channel();
+        // Verify blocking=false is propagated as BotCommand::ShieldBlock(false).
+        let state = Arc::new(SharedState::new(AppConfig::default()));
         make_online(&state);
+        let (sender, mut receiver) = create_command_channel(4);
+
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            assert!(
+                matches!(wrapped.command, BotCommand::ShieldBlock(false)),
+                "expected ShieldBlock(false), got: {:?}",
+                wrapped.command
+            );
+            wrapped
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .expect("should respond");
+        });
+
         let input = ShieldBlockInput { blocking: false };
         let result = handle_shield_block(&state, &sender, input).await;
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
+        assert!(
+            json.get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "expected success, got: {result}"
+        );
         assert_eq!(json.get("blocking"), Some(&Value::Bool(false)));
+
+        responder.await.expect("responder should finish");
     }
 }

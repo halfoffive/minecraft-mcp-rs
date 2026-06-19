@@ -155,7 +155,7 @@ fn handle_spawn(bot: Client, state: &BotState) {
         let mut handle_guard = state
             .executor_handle
             .lock()
-            .expect("executor_handle mutex poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(handle) = handle_guard.take() {
             handle.abort();
             info!("aborted previous command executor before starting a new one");
@@ -174,7 +174,7 @@ fn handle_spawn(bot: Client, state: &BotState) {
             *state
                 .executor_handle
                 .lock()
-                .expect("executor_handle mutex poisoned") = Some(handle);
+                .unwrap_or_else(|e| e.into_inner()) = Some(handle);
             info!("command executor started");
         }
         None => {
@@ -201,7 +201,7 @@ fn handle_disconnect(bot: Client, state: &BotState) {
         let mut handle_guard = state
             .executor_handle
             .lock()
-            .expect("executor_handle mutex poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         handle_guard.take().is_some()
     };
     if aborted {

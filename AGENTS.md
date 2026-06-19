@@ -84,5 +84,5 @@ tests/
 - **Connect/Disconnect:** `SharedState` has `bot_connecting` (AtomicBool) and `disconnect_requested` (AtomicBool) flags. `try_begin_connecting` guards against double-spawn. `request_disconnect` tells the reconnect loop to stop; the Disconnect button sets it. `clear_connecting` is called when the connect loop exits.
 - **Type unification:** `error.rs` re-exports `BlockPos`, `ToolType`, `MaterialTier` from `types.rs` — no duplicate definitions. `ToolType` has 7 variants (Pickaxe, Axe, Shovel, Hoe, Sword, Shears, Hand). No `to_error_*` bridge helpers needed.
 - **Snapshot building:** `handle_tick` delegates to `SnapshotUpdater::update_from_tick` — the inline `build_and_update_snapshot` and helper functions were deleted from `events.rs` to avoid duplication with `snapshot_updater.rs`.
-- **Mutex poisoning:** All `SharedState` locks use `.unwrap_or_else(|e| e.into_inner())` instead of `.expect("poisoned")` so a single thread panic doesn't cascade-crash the app.
+- **Mutex poisoning recovery**: Extended from `SharedState` to all shared mutexes (including `channel.rs` command receiver slot and `bot/events.rs` executor handle). All use `.unwrap_or_else(|e| e.into_inner())` to prevent cascade crashes.
 - **Command timeout:** `BotCommandSender::with_timeout` honours `AppConfig::command_timeout_secs`; `main.rs` wires the configured value at startup.

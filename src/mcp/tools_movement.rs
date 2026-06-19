@@ -170,7 +170,7 @@ pub async fn handle_walk_direction(
         return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
-    let cmd = BotCommand::WalkDirection(direction);
+    let cmd = BotCommand::WalkDirection(direction, input.distance);
     match sender.send_command(cmd).await {
         Ok(result) => {
             let mut json = serde_json::to_value(&result).unwrap_or_default();
@@ -314,25 +314,6 @@ mod tests {
         (state, sender)
     }
 
-    /// Create a channel where the receiver echoes back a successful BotResult.
-    fn make_echo_channel() -> (Arc<SharedState>, BotCommandSender) {
-        let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, mut receiver) = create_command_channel(4);
-
-        tokio::spawn(async move {
-            while let Some(wrapped) = receiver.recv().await {
-                let msg = format!("executed: {:?}", wrapped.command);
-                let _ = wrapped.respond_to.send(Ok(crate::types::BotResult {
-                    success: true,
-                    message: msg,
-                    data: None,
-                }));
-            }
-        });
-
-        (state, sender)
-    }
-
     fn make_online(state: &SharedState) {
         state.set_online(true);
     }
@@ -349,6 +330,7 @@ mod tests {
                 hunger: 20,
                 gamemode: GameMode::Creative,
                 held_item_slot: 0,
+                inventory: Vec::new(),
             },
             timestamp: 1,
             chunk_summary: vec![],
@@ -463,8 +445,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_walk_direction_valid() {
-        let (state, sender) = make_echo_channel();
+        // Verify the parsed direction and distance are propagated as
+        // BotCommand::WalkDirection(Direction::North, 3).
+        let state = Arc::new(SharedState::new(AppConfig::default()));
         make_online(&state);
+        let (sender, mut receiver) = create_command_channel(4);
+
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            assert!(
+                matches!(
+                    wrapped.command,
+                    BotCommand::WalkDirection(Direction::North, 3)
+                ),
+                "expected WalkDirection(North, 3), got: {:?}",
+                wrapped.command
+            );
+            wrapped
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .expect("should respond");
+        });
+
         let input = WalkDirectionInput {
             direction: "north".into(),
             distance: 3,
@@ -474,8 +480,13 @@ mod tests {
         assert!(
             json.get("success")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(false)
+                .unwrap_or(false),
+            "expected success, got: {result}"
         );
+        // The response metadata should also carry the distance.
+        assert_eq!(json.get("distance"), Some(&Value::Number(3.into())));
+
+        responder.await.expect("responder should finish");
     }
 
     // ── jump ────────────────────────────────────────────────────

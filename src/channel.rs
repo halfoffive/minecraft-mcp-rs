@@ -177,7 +177,7 @@ impl ReceiverLease {
     ///
     /// Returns `None` if the slot is empty (no receiver to lease).
     pub(crate) fn take(slot: &ReceiverSlot) -> Option<Self> {
-        let mut guard = slot.lock().expect("command receiver slot mutex poisoned");
+        let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
         guard.take().map(|rx| Self {
             slot: Arc::clone(slot),
             receiver: Some(rx),
@@ -198,10 +198,7 @@ impl ReceiverLease {
 impl Drop for ReceiverLease {
     fn drop(&mut self) {
         if let Some(rx) = self.receiver.take() {
-            *self
-                .slot
-                .lock()
-                .expect("command receiver slot mutex poisoned") = Some(rx);
+            *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(rx);
         }
     }
 }

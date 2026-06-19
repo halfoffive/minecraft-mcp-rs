@@ -126,8 +126,14 @@ pub enum GameMode {
 pub enum BotCommand {
     /// Move to a specific position.
     MoveTo(BlockPos),
-    /// Walk in a direction.
-    WalkDirection(Direction),
+    /// Walk in a direction for a given number of blocks.
+    ///
+    /// The second argument is the distance to travel (in blocks). Horizontal
+    /// directions are translated into a target `BlockPos` and routed through
+    /// the same pathfinder as `MoveTo`; vertical directions (`Up`/`Down`)
+    /// fall back to the legacy indefinite `walk` because azalea's pathfinder
+    /// does not accept a purely vertical goal.
+    WalkDirection(Direction, u32),
     /// Jump.
     Jump,
     /// Teleport to a position (requires operator permissions).
@@ -137,7 +143,10 @@ pub enum BotCommand {
     /// Place a block at the given position.
     PlaceBlock(BlockPos, String),
     /// Use an item on a block (right-click).
-    UseItemOnBlock(BlockPos),
+    ///
+    /// The second argument is an optional hotbar slot (0-8) to select before
+    /// interacting. `None` keeps the currently held item.
+    UseItemOnBlock(BlockPos, Option<u8>),
     /// Switch to a hotbar slot (0-8).
     SwitchHotbarSlot(u8),
     /// Drop items from a slot.
@@ -156,8 +165,8 @@ pub enum BotCommand {
     CloseContainer,
     /// Attack an entity by ID.
     AttackEntity(u32),
-    /// Hold up a shield to block.
-    ShieldBlock,
+    /// Raise (`true`) or lower (`false`) the shield by toggling crouch.
+    ShieldBlock(bool),
     /// Send a chat message.
     SendChat(String),
     /// Execute a Minecraft command.
@@ -235,6 +244,14 @@ pub struct WorldSnapshot {
     pub chunk_summary: Vec<(i32, i32)>,
 }
 
+/// A single inventory slot entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct InventorySlot {
+    pub slot_index: u8,
+    pub item_id: String,
+    pub count: u8,
+}
+
 /// Information about the local player.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SelfPlayer {
@@ -245,6 +262,8 @@ pub struct SelfPlayer {
     pub hunger: i32,
     pub gamemode: GameMode,
     pub held_item_slot: u8,
+    /// Full player inventory (36 main slots). Empty when not online.
+    pub inventory: Vec<InventorySlot>,
 }
 
 /// A block entry in the world.
@@ -388,12 +407,12 @@ mod tests {
     fn require_exactly_25_variants(cmd: &BotCommand) -> u32 {
         match cmd {
             BotCommand::MoveTo(_) => 1,
-            BotCommand::WalkDirection(_) => 1,
+            BotCommand::WalkDirection(_, _) => 1,
             BotCommand::Jump => 1,
             BotCommand::Teleport(_) => 1,
             BotCommand::BreakBlock(_) => 1,
             BotCommand::PlaceBlock(_, _) => 1,
-            BotCommand::UseItemOnBlock(_) => 1,
+            BotCommand::UseItemOnBlock(_, _) => 1,
             BotCommand::SwitchHotbarSlot(_) => 1,
             BotCommand::DropItem(_, _) => 1,
             BotCommand::UseItem => 1,
@@ -403,7 +422,7 @@ mod tests {
             BotCommand::PutIntoContainer(_, _) => 1,
             BotCommand::CloseContainer => 1,
             BotCommand::AttackEntity(_) => 1,
-            BotCommand::ShieldBlock => 1,
+            BotCommand::ShieldBlock(_) => 1,
             BotCommand::SendChat(_) => 1,
             BotCommand::ExecuteCommand(_) => 1,
             BotCommand::SetGameMode(_) => 1,
@@ -451,9 +470,12 @@ mod tests {
 
     #[test]
     fn test_bot_command_walk_direction() {
-        let cmd = BotCommand::WalkDirection(Direction::North);
+        let cmd = BotCommand::WalkDirection(Direction::North, 5);
         match cmd {
-            BotCommand::WalkDirection(d) => assert_eq!(d, Direction::North),
+            BotCommand::WalkDirection(d, distance) => {
+                assert_eq!(d, Direction::North);
+                assert_eq!(distance, 5);
+            }
             _ => panic!("Expected WalkDirection variant"),
         }
     }
@@ -588,6 +610,7 @@ mod tests {
             hunger: 20,
             gamemode: GameMode::Survival,
             held_item_slot: 0,
+            inventory: Vec::new(),
         };
         assert_eq!(player.uuid, "abc-123");
         assert_eq!(player.username, "Steve");
@@ -595,6 +618,7 @@ mod tests {
         assert_eq!(player.hunger, 20);
         assert_eq!(player.gamemode, GameMode::Survival);
         assert_eq!(player.held_item_slot, 0);
+        assert!(player.inventory.is_empty());
     }
 
     #[test]
@@ -621,6 +645,7 @@ mod tests {
                 hunger: 20,
                 gamemode: GameMode::Survival,
                 held_item_slot: 1,
+                inventory: Vec::new(),
             },
             timestamp: 1234567890,
             chunk_summary: vec![(0, 0), (1, 0)],
@@ -747,12 +772,12 @@ mod tests {
     fn all_bot_commands() -> Vec<BotCommand> {
         vec![
             BotCommand::MoveTo(BlockPos::new(0, 0, 0)),
-            BotCommand::WalkDirection(Direction::North),
+            BotCommand::WalkDirection(Direction::North, 1),
             BotCommand::Jump,
             BotCommand::Teleport(BlockPos::new(0, 0, 0)),
             BotCommand::BreakBlock(BlockPos::new(0, 0, 0)),
             BotCommand::PlaceBlock(BlockPos::new(0, 0, 0), "stone".into()),
-            BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0)),
+            BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None),
             BotCommand::SwitchHotbarSlot(0),
             BotCommand::DropItem(0, 1),
             BotCommand::UseItem,
@@ -762,7 +787,7 @@ mod tests {
             BotCommand::PutIntoContainer(0, 1),
             BotCommand::CloseContainer,
             BotCommand::AttackEntity(0),
-            BotCommand::ShieldBlock,
+            BotCommand::ShieldBlock(true),
             BotCommand::SendChat(String::new()),
             BotCommand::ExecuteCommand(String::new()),
             BotCommand::SetGameMode(GameMode::Survival),

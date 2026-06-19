@@ -265,7 +265,7 @@ pub async fn handle_use_item_on_block(
         return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
-    let cmd = BotCommand::UseItemOnBlock(BlockPos::new(input.x, input.y, input.z));
+    let cmd = BotCommand::UseItemOnBlock(BlockPos::new(input.x, input.y, input.z), input.item_slot);
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
             format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
@@ -528,15 +528,48 @@ mod tests {
 
     #[tokio::test]
     async fn test_use_item_on_block_valid_with_slot() {
-        let (state, sender) = setup();
+        // Verify the item_slot is propagated as BotCommand::UseItemOnBlock(pos, Some(3)).
+        let state = Arc::new(SharedState::new(AppConfig::default()));
         make_online(&state);
+        let (sender, mut receiver) = create_command_channel(4);
+
+        let expected_pos = BlockPos::new(1, 64, 1);
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            assert!(
+                matches!(
+                    wrapped.command,
+                    BotCommand::UseItemOnBlock(pos, Some(3)) if pos == expected_pos
+                ),
+                "expected UseItemOnBlock({:?}, Some(3)), got: {:?}",
+                expected_pos,
+                wrapped.command
+            );
+            wrapped
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .expect("should respond");
+        });
+
         let input = UseItemOnBlockInput {
             x: 1,
             y: 64,
             z: 1,
-            item_slot: Some(4),
+            item_slot: Some(3),
         };
         let result = handle_use_item_on_block(&state, &sender, input).await;
-        let _: Value = serde_json::from_str(&result).expect("valid JSON");
+        let json: Value = serde_json::from_str(&result).expect("valid JSON");
+        assert!(
+            json.get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "expected success, got: {result}"
+        );
+
+        responder.await.expect("responder should finish");
     }
 }
