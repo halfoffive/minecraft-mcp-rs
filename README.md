@@ -26,13 +26,19 @@ inventory management, combat, and chatting — as MCP tools over stdio transport
   thread-safe `SharedState` readable by all tools
 - **Desktop UI** (egui/eframe) — status panel with live stats, settings panel
   to configure connection and bot parameters
-- **Auto-reconnect** — exponential backoff on disconnect
+- **Auto-reconnect** — exponential backoff on disconnect; the command executor
+  is cleanly aborted and re-started on each reconnect via a `ReceiverLease`
 - **Compound operations** — higher-level state machines (mine-and-collect)
   built on primitive commands
 - **Thread-safe by design** — lock-free snapshots via `ArcSwap`, atomic flags,
   `RwLock` for config, `Mutex` for container handles
 - **Dirty-region snapshot updates** — only changed blocks/chunks are
   recomputed between polling intervals
+- **Configurable command timeout** — `command_timeout_secs` is honoured by
+  the command channel (not just a UI field)
+- **Honest error reporting** — `BotError::InvalidParams` maps to MCP
+  `INVALID_PARAMS`; unbreakable blocks return `MiningInterrupted` instead of
+  panicking; `set_game_mode` flags the OP requirement
 
 ## Tool Categories
 
