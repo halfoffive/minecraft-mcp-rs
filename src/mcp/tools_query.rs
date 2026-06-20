@@ -36,7 +36,8 @@ pub fn get_self_info(state: &Arc<SharedState>) -> String {
 ///
 /// Returns the 36 main slots as an array of occupied slots (empty slots are
 /// omitted), plus the currently selected hotbar slot. Data is read from the
-/// latest [`WorldSnapshot`] written by the snapshot updater.
+/// latest [`WorldSnapshot`](crate::types::WorldSnapshot) written by the
+/// snapshot updater.
 pub fn get_inventory(state: &Arc<SharedState>) -> String {
     if !state.is_online() {
         return OFFLINE_ERROR.to_string();

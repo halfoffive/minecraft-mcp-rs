@@ -95,7 +95,7 @@ impl CompoundOpExecutor {
     /// 6. Walk to the block vicinity.
     /// 7. Verify arrival.
     /// 8. Start mining.
-    /// 9. Wait for mining completion (sleep calculated from [`mining_calc`]).
+    /// 9. Wait for mining completion (sleep calculated from [`mining_calc`](crate::mining_calc)).
     /// 10. Verify the block is broken.
     /// 11. Return success or failure.
     pub async fn execute_mine_block(

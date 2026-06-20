@@ -1,7 +1,7 @@
 //! MCP tools for item / inventory management.
 //!
 //! Each tool validates inputs, checks online status, and dispatches a
-//! [`BotCommand`](crate::types::BotCommand) through the bot command channel.
+//! [`BotCommand`] through the bot command channel.
 //!
 //! # Parameter structs
 //!

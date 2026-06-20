@@ -12,6 +12,7 @@ use crate::state::SharedState;
 /// Render the status panel.
 ///
 /// Displays:
+/// - Last error message (red banner, only when present)
 /// - Connection status (online/offline with uptime)
 /// - Player information (position, health, hunger, gamemode)
 /// - World stats (blocks, entities, chunks loaded)
@@ -24,6 +25,14 @@ pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
     // The atomic counters (commands_processed etc.) don't need the lock.
     let connected_since = state.read_run_stats().connected_since;
     let chat = state.get_chat_messages();
+
+    // ── Last Error ────────────────────────────────────────────────────
+    // Display a prominent red banner if the bot/MCP layer has reported an
+    // error.  When there is no error, nothing is rendered (no empty row).
+    if let Some(msg) = state.last_error() {
+        ui.colored_label(egui::Color32::RED, format!("⚠ Error: {msg}"));
+        ui.separator();
+    }
 
     // ── Connection ────────────────────────────────────────────────────
 

@@ -12,3 +12,6 @@
 # Deepseek Reasonix
 .reasonix/
 .codegraph/
+
+# Rustc internal compiler error logs
+rustc-ice-*.txt

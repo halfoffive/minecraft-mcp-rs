@@ -1,8 +1,8 @@
 //! MCP tools for block operations (break, place, use item on block).
 //!
 //! Each tool validates coordinates through [`validate_block_pos`], checks
-//! online status, and dispatches a [`BotCommand`](crate::types::BotCommand)
-//! through the bot command channel.
+//! online status, and dispatches a [`BotCommand`] through the bot command
+//! channel.
 //!
 //! # Parameter structs
 //!

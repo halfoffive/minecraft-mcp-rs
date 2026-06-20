@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use azalea::ecs::component::Component;
+use azalea::prelude::AppExit;
 use azalea::{Client, Event};
 use tracing::{info, trace, warn};
 
@@ -54,12 +55,12 @@ pub struct BotState {
     /// Shared application state — updated by the handler, read by MCP and UI.
     pub shared_state: Arc<SharedState>,
     /// Slot holding the command receiver, leased out to the command executor
-    /// on `Event::Spawn`. See [`ReceiverLease`].
+    /// on `Event::Spawn`. See `ReceiverLease`.
     pub command_receiver: ReceiverSlot,
     /// Handle to the running command executor task (if any). Aborted on
     /// disconnect so the stale azalea `Client` is never used after the
     /// connection drops; the leased receiver is returned to
-    /// [`BotState::command_receiver`] by the [`ReceiverLease`] drop guard.
+    /// [`BotState::command_receiver`] by the `ReceiverLease` drop guard.
     pub executor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Optional egui context for requesting UI repaints.
     pub egui_ctx: Option<egui::Context>,
@@ -210,8 +211,10 @@ fn handle_disconnect(bot: Client, state: &BotState) {
 
     // Tell azalea to end the client so ClientBuilder::start returns and the
     // connection loop can retry. Without this the bot thread may hang waiting
-    // for an ECS that's already shutting down.
-    bot.exit();
+    // for an ECS that's already shutting down. In azalea 0.15.1 there is no
+    // `bot.exit()` method, so we send an `AppExit` message through the ECS
+    // World to trigger a clean shutdown.
+    bot.ecs.lock().write_message(AppExit::Success);
 
     request_repaint(state);
     trace!("bot disconnected, set online=false");
@@ -258,14 +261,14 @@ fn handle_add_player(bot: &Client, state: &BotState, info: &azalea::player::Play
     // live position and minecraft entity id; fall back to defaults if the
     // entity isn't available yet (a later Tick snapshot will refresh them).
     let (id, position) = bot
-        .entity_id_by_uuid(info.uuid)
+        .entity_by_uuid(info.uuid)
         .map(|entity| {
             let position = bot
                 .get_entity_component::<azalea::entity::Position>(entity)
                 .map(|p| BlockPos::new(p.x as i32, p.y as i32, p.z as i32))
                 .unwrap_or(BlockPos::new(0, 0, 0));
             let id = bot
-                .get_entity_component::<azalea::core::entity_id::MinecraftEntityId>(entity)
+                .get_entity_component::<azalea::world::MinecraftEntityId>(entity)
                 .map(|m| m.0 as u32)
                 .unwrap_or(0);
             (id, position)

@@ -1,8 +1,7 @@
 //! MCP tools for container interaction (chests, furnaces, etc.).
 //!
 //! Each tool validates parameters, checks online status and container state,
-//! and dispatches a [`BotCommand`](crate::types::BotCommand) through the bot
-//! command channel.
+//! and dispatches a [`BotCommand`] through the bot command channel.
 //!
 //! # Parameter structs
 //!

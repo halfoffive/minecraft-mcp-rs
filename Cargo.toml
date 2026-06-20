@@ -4,24 +4,25 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-azalea = "0.16"
-azalea-inventory = "0.16"
+azalea = "0.15.1"
+azalea-inventory = "0.15.1"
 rmcp = { version = "1.7.0", features = ["server", "transport-io", "macros"] }
-eframe = "0.31"
-egui = "0.31"
-tokio = { version = "1", features = ["full"] }
-arc-swap = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-schemars = "0.8"
-proptest = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-anyhow = "1"
-eyre = "0.6"
-thiserror = "2"
+eframe = "0.34.3"
+egui = "0.34.3"
+tokio = { version = "1.50", features = ["full"] }
+arc-swap = "1.7"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+schemars = "1.0.3"
+proptest = "1.6"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["fmt", "env-filter"] }
+anyhow = "1.0.100"
+eyre = "0.6.12"
+thiserror = "2.0.12"
 bevy_ecs = "0.18"
-uuid = "1"
+uuid = "1.20"
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [profile.dev]
 opt-level = 1
@@ -31,3 +32,11 @@ opt-level = 3
 
 [lints.rust]
 linker_messages = "allow"
+
+# Patch rsa 0.10.0-rc.13 to fix a compile error with pkcs8 0.11.0 (stable),
+# where `pkcs8::Error::KeyMalformed` changed from a unit variant to a tuple
+# variant `KeyMalformed(KeyError)`. The upstream fix exists in newer rc tags
+# but they require rand_core 0.10 (stable), which conflicts with
+# azalea-crypto's pinned `rand_core = "=0.10.0-rc-5"`.
+[patch.crates-io]
+rsa = { path = "patches/rsa" }

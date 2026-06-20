@@ -58,7 +58,7 @@ impl BotCommandSender {
     /// # Errors
     /// - `BotError::Offline` if the receiver has been dropped.
     /// - `BotError::CommandTimeout` if no response arrives within
-    ///   [`BotCommandSender::timeout`] or if the responder side drops the
+    ///   [`BotCommandSender::with_timeout`] or if the responder side drops the
     ///   oneshot without sending.
     pub async fn send_command(&self, cmd: BotCommand) -> Result<BotResult, BotError> {
         let (respond_to, rx) = oneshot::channel();

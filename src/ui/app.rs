@@ -10,7 +10,8 @@
 //! The egui render loop runs on the **main thread**.  The MCP server runs on
 //! a background OS thread with its own tokio runtime.  The optional bot
 //! connection is also spawned on a dedicated OS thread because azalea's
-//! [`ClientBuilder::start`] internally creates a `LocalSet` which is `!Send`.
+//! [`ClientBuilder::start`](azalea::ClientBuilder::start) internally creates a
+//! `LocalSet` which is `!Send`.
 
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -22,7 +23,7 @@ use crate::bot::connection::ConnectionManager;
 use crate::channel::{BotCommandReceiver, BotCommandSender};
 use crate::config::AppConfig;
 use crate::state::SharedState;
-use crate::ui::{settings, status};
+use crate::ui::{mcp_config, settings, status};
 
 /// Main egui application shell.
 pub struct MinecraftApp {
@@ -170,21 +171,30 @@ impl Drop for MinecraftApp {
         self.state.request_disconnect();
         self.state.set_online(false);
 
-        // Give the bot thread a moment to notice the disconnect signal and
-        // exit. If it doesn't finish in time, the process will terminate
-        // anyway when main() returns, but joining avoids a potential panic
-        // from the runtime being dropped mid-task.
         if let Some(handle) = self.bot_thread.take() {
-            // The bot thread runs its own tokio runtime; joining blocks
-            // until it finishes. With disconnect_requested set, the connect
-            // loop should break on the next iteration.
-            let _ = handle.join();
+            // Try to join with a 3-second timeout to avoid hanging the UI
+            // thread. The bot thread runs its own tokio runtime; with
+            // `disconnect_requested` set and the cancel token tripped, the
+            // connect loop should break promptly. If it doesn't finish in
+            // time (e.g. stuck inside azalea internals), we abandon the
+            // join — the OS will clean up when the process exits.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = handle.join();
+                let _ = tx.send(());
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+                Ok(()) => tracing::info!("bot thread joined cleanly"),
+                Err(_) => tracing::warn!("bot thread did not exit within 3s — abandoning join"),
+            }
         }
     }
 }
 
 impl App for MinecraftApp {
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+    /// Called before each `ui` frame; used for non-painting logic such as
+    /// requesting repaints and lazy-initialising edit buffers.
+    fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         // Request a repaint once per second as a fallback so the uptime
         // counter stays fresh. State-change-driven repaints (via
         // `ctx.request_repaint()` from the event handler) cover the rest.
@@ -195,8 +205,15 @@ impl App for MinecraftApp {
             let cfg = self.state.read_config();
             self.edit_config = Some(EditConfig::from(&*cfg));
         }
+    }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+    /// Main UI rendering entry point (egui 0.34 renamed `update` to `ui`).
+    ///
+    /// The `ui` parameter already provides a root area; we wrap the content
+    /// in a `CentralPanel` via `show_inside` to get the standard background
+    /// and margins.
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.heading("Minecraft MCP Server");
             ui.separator();
 
@@ -215,6 +232,10 @@ impl App for MinecraftApp {
 
                 ui.collapsing("Status", |ui| {
                     status::status_panel(ui, &self.state);
+                });
+
+                ui.collapsing("MCP Config", |ui| {
+                    mcp_config::mcp_config_panel(ui);
                 });
             });
         });

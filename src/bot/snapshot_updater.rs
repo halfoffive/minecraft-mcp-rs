@@ -35,8 +35,8 @@ pub struct SnapshotUpdater {
 impl SnapshotUpdater {
     /// Create a new updater.
     ///
-    /// All four parameters are typically extracted from [`BotState`]
-    /// (see [`crate::bot::events::BotState`]) so that the updater shares
+    /// All four parameters are typically extracted from
+    /// [`BotState`](crate::bot::events::BotState) so that the updater shares
     /// the same state, tracker, and timer as the event loop.
     pub fn new(
         shared_state: Arc<SharedState>,
@@ -185,9 +185,11 @@ async fn build_snapshot_inner(
     }
 
     // ── Chunk summary from partial world ─────────────────────
+    // azalea 0.15.1: WorldHolder was renamed to InstanceHolder, and its
+    // field `partial` was renamed to `partial_instance`.
     let chunk_summary =
-        if let Some(world_holder) = bot.get_component::<azalea::local_player::WorldHolder>() {
-            let partial_world = world_holder.partial.read();
+        if let Some(world_holder) = bot.get_component::<azalea::local_player::InstanceHolder>() {
+            let partial_world = world_holder.partial_instance.read();
             let storage = &partial_world.chunks;
             storage
                 .chunks()

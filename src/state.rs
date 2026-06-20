@@ -14,6 +14,7 @@ use azalea::container::ContainerHandle;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use tokio_util::sync::CancellationToken;
 
 use crate::config::{AppConfig, RunStats};
 use crate::types::WorldSnapshot;
@@ -50,6 +51,16 @@ pub struct SharedState {
     /// Each entry is `(sender, message)`. Stored behind a `Mutex` because the
     /// bot event handler writes to it from azalea's ECS thread.
     chat_messages: Mutex<VecDeque<(String, String)>>,
+    /// Last error message reported by the bot/MCP layer, if any.
+    ///
+    /// Stored behind a `Mutex` because writers (bot event handlers, MCP
+    /// tools) run on different threads than the reader (UI).
+    last_error: Mutex<Option<String>>,
+    /// Cancellation token used to interrupt the reconnect backoff sleep
+    /// when the user requests a disconnect. Stored behind a `Mutex` so it
+    /// can be replaced with a fresh token on each new connection attempt
+    /// (see [`reset_cancel_token`](Self::reset_cancel_token)).
+    cancel_token: Mutex<CancellationToken>,
 }
 
 impl SharedState {
@@ -84,6 +95,8 @@ impl SharedState {
             disconnect_requested: AtomicBool::new(false),
             container_handle: Mutex::new(None),
             chat_messages: Mutex::new(VecDeque::new()),
+            last_error: Mutex::new(None),
+            cancel_token: Mutex::new(CancellationToken::new()),
         }
     }
 
@@ -137,10 +150,18 @@ impl SharedState {
     }
 
     /// Request that the bot disconnect and stop retrying. Set by the
-    /// Disconnect button; checked by [`ConnectionManager::connect`] between
-    /// reconnection attempts.
+    /// Disconnect button; checked by
+    /// [`ConnectionManager::connect`](crate::bot::connection::ConnectionManager::connect)
+    /// between reconnection attempts.
+    ///
+    /// Also cancels the [`CancellationToken`] so any pending reconnect
+    /// backoff sleep returns immediately.
     pub fn request_disconnect(&self) {
         self.disconnect_requested.store(true, Ordering::SeqCst);
+        self.cancel_token
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cancel();
     }
 
     /// Clear the disconnect request (called when starting a new connection).
@@ -151,6 +172,28 @@ impl SharedState {
     /// Whether a disconnect has been requested.
     pub fn is_disconnect_requested(&self) -> bool {
         self.disconnect_requested.load(Ordering::SeqCst)
+    }
+
+    /// Return a clone of the current [`CancellationToken`].
+    ///
+    /// The returned token can be awaited (via `cancelled()`) to detect
+    /// disconnect requests. Cloning a [`CancellationToken`] is cheap — it
+    /// shares the same underlying cancellation state.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel_token
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Replace the cancellation token with a fresh one.
+    ///
+    /// Called at the start of each `connect()` attempt so that a previous
+    /// session's cancel (from a prior disconnect) doesn't immediately trip
+    /// the new session's backoff sleep.
+    pub fn reset_cancel_token(&self) {
+        let mut guard = self.cancel_token.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = CancellationToken::new();
     }
 
     /// Update config under a write lock.
@@ -246,6 +289,33 @@ impl SharedState {
     pub fn get_chat_messages(&self) -> Vec<(String, String)> {
         let guard = self.chat_messages.lock().unwrap_or_else(|e| e.into_inner());
         guard.iter().cloned().collect()
+    }
+
+    /// Store the last error message reported by the bot/MCP layer.
+    ///
+    /// Overwrites any previously stored error. The UI reads this to display
+    /// a status banner; the MCP layer may include it in tool responses.
+    pub fn set_last_error(&self, msg: impl Into<String>) {
+        let mut guard = self.last_error.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(msg.into());
+    }
+
+    /// Clear the last error message (set to `None`).
+    ///
+    /// Typically called by the UI after the user acknowledges the error,
+    /// or by the bot layer when a new connection attempt starts.
+    pub fn clear_last_error(&self) {
+        let mut guard = self.last_error.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = None;
+    }
+
+    /// Return a clone of the last error message, if any.
+    ///
+    /// Returns `None` if no error has been stored or if it was cleared via
+    /// [`clear_last_error`](Self::clear_last_error).
+    pub fn last_error(&self) -> Option<String> {
+        let guard = self.last_error.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clone()
     }
 }
 
@@ -559,5 +629,74 @@ mod tests {
     fn test_chat_messages_empty_by_default() {
         let state = SharedState::new(AppConfig::default());
         assert!(state.get_chat_messages().is_empty());
+    }
+
+    // -- last_error -----------------------------------------------------------
+
+    #[test]
+    fn test_last_error_initial_none() {
+        let state = SharedState::new(AppConfig::default());
+        assert!(state.last_error().is_none());
+    }
+
+    #[test]
+    fn test_set_and_get_last_error() {
+        let state = SharedState::new(AppConfig::default());
+        state.set_last_error("boom");
+        assert_eq!(state.last_error().as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn test_clear_last_error() {
+        let state = SharedState::new(AppConfig::default());
+        state.set_last_error("boom");
+        assert!(state.last_error().is_some());
+        state.clear_last_error();
+        assert!(state.last_error().is_none());
+    }
+
+    // -- cancel_token ---------------------------------------------------------
+
+    #[test]
+    fn test_cancel_token_initially_not_cancelled() {
+        let state = SharedState::new(AppConfig::default());
+        let token = state.cancel_token();
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn test_request_disconnect_cancels_token() {
+        let state = SharedState::new(AppConfig::default());
+        let token = state.cancel_token();
+        assert!(!token.is_cancelled());
+        state.request_disconnect();
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn test_reset_cancel_token_replaces_with_fresh_one() {
+        let state = SharedState::new(AppConfig::default());
+        state.request_disconnect();
+        let old_token = state.cancel_token();
+        assert!(old_token.is_cancelled());
+
+        state.reset_cancel_token();
+        let new_token = state.cancel_token();
+        assert!(!new_token.is_cancelled());
+        // Old token remains cancelled (it's a separate logical token).
+        assert!(old_token.is_cancelled());
+    }
+
+    #[test]
+    fn test_reset_cancel_token_allows_new_session_sleep() {
+        // Simulate the connect() flow: reset, take token, request_disconnect
+        // cancels the new token (not a stale one).
+        let state = SharedState::new(AppConfig::default());
+        state.request_disconnect(); // first session cancelled
+        state.reset_cancel_token(); // new session
+        let token = state.cancel_token();
+        assert!(!token.is_cancelled());
+        state.request_disconnect();
+        assert!(token.is_cancelled());
     }
 }

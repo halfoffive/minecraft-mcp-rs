@@ -4,14 +4,14 @@
 //! accounts via azalea, attaches the event handler from [`super::events`],
 //! and handles disconnection with exponential-backoff reconnects.
 //!
-//! During reconnect windows, [`SharedState::bot_online`] is `false` so all
-//! MCP tools return an [`BotError::Offline`] immediately instead of hanging.
+//! During reconnect windows, [`SharedState::is_online`] returns `false` so all
+//! MCP tools return a [`BotError::Offline`](crate::error::BotError::Offline)
+//! immediately instead of hanging.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use azalea::ClientBuilder;
-use azalea::account::Account;
+use azalea::{Account, ClientBuilder, prelude::AppExit};
 use tracing::{info, warn};
 
 use crate::bot::events;
@@ -52,15 +52,27 @@ impl ConnectionManager {
     ///
     /// Sets the online flag to `false` so MCP tools can return offline errors.
     /// The actual TCP teardown is handled by azalea when the handler function
-    /// returns from [`Event::Disconnect`].
+    /// returns from [`Event::Disconnect`](azalea::Event::Disconnect).
     pub fn disconnect(&self) {
         self.state.set_online(false);
     }
 
     /// Run the connection loop.
     ///
-    /// This is an **infinite async loop**: it connects, runs until the bot
-    /// is disconnected, then sleeps with exponential backoff before retrying.
+    /// Connects, runs until the bot is disconnected, then decides what to
+    /// do next based on whether the bot ever came online:
+    ///
+    /// - **User-initiated disconnect** (`is_disconnect_requested()`): stop
+    ///   immediately without writing an error.
+    /// - **Connection never succeeded** (`is_online()` was `false` for the
+    ///   entire `start()` call): capture a descriptive error into
+    ///   [`SharedState::set_last_error`] and stop — the user must click
+    ///   Connect again to retry.
+    /// - **Was online, then disconnected** (a proper "reconnect" scenario):
+    ///   clear `last_error` and retry with exponential backoff. The backoff
+    ///   sleep is cancelable via the
+    ///   [`CancellationToken`](tokio_util::sync::CancellationToken) so a
+    ///   Disconnect click interrupts it immediately.
     ///
     /// Spawn this as a background task via [`tokio::spawn`].
     ///
@@ -82,13 +94,17 @@ impl ConnectionManager {
         let _ = events::INJECTED_EGUI_CTX.set(egui_ctx.clone());
         let _ = events::INJECTED_SNAPSHOT_INTERVAL_MS.set(self.config.snapshot_interval_ms);
 
-        // Clear any stale disconnect request from a previous session.
+        // Clear any stale disconnect request and error from a previous
+        // session, and install a fresh cancellation token so a prior
+        // session's cancel doesn't immediately trip our backoff sleep.
         self.state.clear_disconnect_request();
+        self.state.clear_last_error();
+        self.state.reset_cancel_token();
 
         let mut attempt: u32 = 0;
 
         loop {
-            // If the user clicked Disconnect, stop retrying.
+            // If the user clicked Disconnect before we even started, stop.
             if self.state.is_disconnect_requested() {
                 info!("disconnect requested — stopping connection loop");
                 break;
@@ -107,27 +123,60 @@ impl ConnectionManager {
             // start() blocks until the client disconnects or the connection fails.
             // BotState is created internally by azalea via Default — the injected
             // statics above ensure the correct SharedState and command receiver are used.
-            let _exit = ClientBuilder::new()
+            let exit = ClientBuilder::new()
                 .set_handler(events::handle_event)
-                .start(account, address)
+                .start(account, address.clone())
                 .await;
+
+            // Was the bot online before this disconnect? The event handler
+            // sets `is_online()` to true on `Event::Spawn`, so this is true
+            // iff the bot successfully connected at some point during the
+            // `start()` call. Capture it before we clear the flag below.
+            let was_online = self.state.is_online();
 
             // Disconnected — ensure the online flag is cleared.
             self.state.set_online(false);
 
-            // If the user requested disconnect, don't retry.
+            // If the user requested disconnect, don't treat it as a failure.
             if self.state.is_disconnect_requested() {
                 info!("disconnect requested — stopping reconnect loop");
                 break;
             }
 
+            if !was_online {
+                // Connection never succeeded — fail fast. Capture a
+                // descriptive error (including the AppExit details) so the
+                // UI can display it, and stop retrying. The user must click
+                // Connect again to attempt reconnection.
+                let exit_desc = match &exit {
+                    AppExit::Success => "success".to_string(),
+                    AppExit::Error(code) => format!("error(code={code})"),
+                };
+                let msg = format!("Connection failed: {address} ({exit_desc})");
+                warn!(%address, %exit_desc, "connection failed — stopping retry loop");
+                self.state.set_last_error(msg);
+                break;
+            }
+
+            // Was online before disconnect — retry with backoff. Clear any
+            // stale error so the UI doesn't display it during the retry.
+            self.state.clear_last_error();
             let delay = self.reconnect_backoff(attempt);
             warn!(
-                "Disconnected. Reconnecting in {}s (attempt {})...",
+                "Disconnected (was online). Reconnecting in {}s (attempt {})...",
                 delay.as_secs(),
                 attempt + 1
             );
-            tokio::time::sleep(delay).await;
+            // Bind the token to a local so it lives for the duration of the
+            // select! — `cancel_token()` returns a clone by value.
+            let cancel_token = self.state.cancel_token();
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = cancel_token.cancelled() => {
+                    info!("disconnect requested — cancelling reconnect sleep");
+                    break;
+                }
+            }
             attempt = attempt.saturating_add(1);
         }
 

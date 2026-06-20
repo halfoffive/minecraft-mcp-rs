@@ -1,6 +1,6 @@
 //! Bot command implementations (move, dig, attack, interact).
 //!
-//! [`CommandExecutor`] receives [`BotCommand`]s from the MCP server via a
+//! `CommandExecutor` receives [`BotCommand`]s from the MCP server via a
 //! [`BotCommandReceiver`], dispatches them to the azalea [`Client`] API, and
 //! sends a [`BotResult`] back through the oneshot channel.
 
@@ -140,9 +140,10 @@ impl BotActions for RealBotClient {
             z: pos.z as f64,
         });
         // Insert the new Position component on the player entity.
+        // azalea 0.15.1 uses parking_lot::Mutex for ecs, so .lock() not .write().
         self.client
             .ecs
-            .write()
+            .lock()
             .entity_mut(self.client.entity)
             .insert(new_pos);
     }
@@ -186,9 +187,11 @@ impl BotActions for RealBotClient {
     }
 
     fn attack_entity(&self, entity_id: u32) -> Result<(), BotError> {
+        // azalea 0.15.1: entity_id_by_minecraft_id was renamed to
+        // ecs_entity_by_minecraft_entity and takes a MinecraftEntityId.
         let entity = self
             .client
-            .entity_id_by_minecraft_id(entity_id.into())
+            .ecs_entity_by_minecraft_entity(azalea::world::MinecraftEntityId(entity_id as i32))
             .ok_or_else(|| BotError::Internal(format!("entity with id {} not found", entity_id)))?;
         self.client.attack(entity);
         Ok(())

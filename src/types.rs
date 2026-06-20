@@ -689,81 +689,44 @@ mod tests {
 
     #[test]
     fn test_json_schema_for_block_pos() {
+        // schemars 1.0: schema_for! returns a Schema wrapping a JSON Value;
+        // the title is a top-level "title" key in the object.
         let schema = schemars::schema_for!(BlockPos);
-        assert_eq!(
-            schema
-                .schema
-                .metadata
-                .as_ref()
-                .unwrap()
-                .title
-                .as_ref()
-                .unwrap(),
-            "BlockPos"
-        );
+        let obj = schema.as_object().unwrap();
+        assert_eq!(obj.get("title").and_then(|v| v.as_str()), Some("BlockPos"));
     }
 
     #[test]
     fn test_json_schema_for_bot_command() {
         let schema = schemars::schema_for!(BotCommand);
+        let obj = schema.as_object().unwrap();
         assert_eq!(
-            schema
-                .schema
-                .metadata
-                .as_ref()
-                .unwrap()
-                .title
-                .as_ref()
-                .unwrap(),
-            "BotCommand"
+            obj.get("title").and_then(|v| v.as_str()),
+            Some("BotCommand")
         );
     }
 
     #[test]
     fn test_json_schema_for_game_mode() {
         let schema = schemars::schema_for!(GameMode);
-        assert_eq!(
-            schema
-                .schema
-                .metadata
-                .as_ref()
-                .unwrap()
-                .title
-                .as_ref()
-                .unwrap(),
-            "GameMode"
-        );
+        let obj = schema.as_object().unwrap();
+        assert_eq!(obj.get("title").and_then(|v| v.as_str()), Some("GameMode"));
     }
 
     #[test]
     fn test_json_schema_for_direction() {
         let schema = schemars::schema_for!(Direction);
-        assert_eq!(
-            schema
-                .schema
-                .metadata
-                .as_ref()
-                .unwrap()
-                .title
-                .as_ref()
-                .unwrap(),
-            "Direction"
-        );
+        let obj = schema.as_object().unwrap();
+        assert_eq!(obj.get("title").and_then(|v| v.as_str()), Some("Direction"));
     }
 
     #[test]
     fn test_json_schema_for_world_snapshot() {
         let schema = schemars::schema_for!(WorldSnapshot);
+        let obj = schema.as_object().unwrap();
         assert_eq!(
-            schema
-                .schema
-                .metadata
-                .as_ref()
-                .unwrap()
-                .title
-                .as_ref()
-                .unwrap(),
-            "WorldSnapshot"
+            obj.get("title").and_then(|v| v.as_str()),
+            Some("WorldSnapshot")
         );
     }
 

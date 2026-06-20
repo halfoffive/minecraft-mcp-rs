@@ -1,8 +1,8 @@
 //! MCP tools for combat (attack entity, shield block).
 //!
 //! Each tool validates parameters, checks online status (and entity existence
-//! for attacks), then dispatches a [`BotCommand`](crate::types::BotCommand)
-//! through the bot command channel.
+//! for attacks), then dispatches a [`BotCommand`] through the bot command
+//! channel.
 //!
 //! # Parameter structs
 //!

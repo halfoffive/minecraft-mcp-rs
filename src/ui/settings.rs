@@ -1,4 +1,5 @@
-//! Settings panel: editable [`AppConfig`] fields + Connect / Disconnect buttons.
+//! Settings panel: editable [`AppConfig`](crate::config::AppConfig) fields
+//! + Connect / Disconnect buttons.
 //!
 //! All config fields are rendered as editable widgets (text inputs for strings,
 //! [`DragValue`] for numbers).  Edits accumulate in [`EditConfig`] which is

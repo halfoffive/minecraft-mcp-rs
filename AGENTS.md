@@ -2,7 +2,7 @@
 
 An MCP (Model Context Protocol) server backed by an actual Minecraft bot via the azalea library. Exposes bot capabilities (movement, block manipulation, inventory, combat, chat) as MCP tools consumable by LLM clients. Ships with an egui desktop UI for status and settings.
 
-- **Stack:** Rust nightly, azalea (Minecraft bot), rmcp (MCP server), egui/eframe (desktop UI), tokio (async runtime), bevy_ecs (azalea's ECS), proptest (property testing)
+- **Stack:** Rust nightly (edition 2024; azalea 0.15.1's build script requires nightly), azalea 0.15.1 (Minecraft 1.21.11 bot), rmcp (MCP server), egui/eframe 0.34.3 (desktop UI), tokio 1.50 (async runtime), bevy_ecs 0.18 (azalea's ECS), schemars 1.0 (MCP JSON schemas), proptest (property testing)
 - **Entry point:** `src/main.rs` — creates shared state + channel, spawns MCP server on background thread + egui on main thread. Bot connection is spawned on a dedicated OS thread from the UI (azalea's `ClientBuilder::start` internally creates a `LocalSet` which is `!Send`, preventing `tokio::spawn` on a multi-threaded runtime).
 - **Library crate root:** `src/lib.rs`
 
@@ -19,7 +19,7 @@ An MCP (Model Context Protocol) server backed by an actual Minecraft bot via the
 | Lint | `cargo clippy --all-targets` |
 | Doc | `cargo doc --no-deps` |
 
-Requires Rust nightly (`rust-toolchain.toml` pins nightly). Dev profile uses `opt-level = 1` (with `opt-level = 3` for dependencies) for faster iteration.
+Requires Rust nightly (edition 2024; `rust-toolchain.toml` pins nightly — azalea 0.15.1's build script enforces this). Dev profile uses `opt-level = 1` (with `opt-level = 3` for dependencies) for faster iteration.
 
 ## Architecture
 
@@ -79,9 +79,11 @@ tests/
 <!-- Quick-add space for future notes -->
 - **规范:** 函数式编程，大量注释。写完后使用`cargo fmt`格式化；及时编写`cargo test`自动化测试，`cargo test`全过才能交付，编写遵循TDD；需要运行`cargo clippy`检验，全过才能交付；最后更新`README.md`、`CHANGELOG.md`和`AGENTS.md`，然后提交并推送git。
 - **Settings panel:** Uses `EditConfig` local edit buffers (in `app.rs`); fields rendered via `TextEdit::singleline`/`DragValue`. Edits applied to `SharedState` only on Connect. The `sender` parameter was removed from `settings_panel` — the UI doesn't send commands directly.
-- **Bot connection:** Spawned on dedicated OS thread (not `tokio::spawn`) because `ConnectionManager::connect()` contains `LocalSet` which is `!Send`. The thread's `JoinHandle` is held by `MinecraftApp` and joined on `Drop` for clean exit.
-- **Command executor:** Wired into `Event::Spawn` via `spawn_local`. The command receiver is stored in a `ReceiverSlot` (`Arc<Mutex<Option<BotCommandReceiver>>>`) and leased out via `ReceiverLease` on Spawn; when the executor is aborted on `Event::Disconnect`, the lease drops and returns the receiver to the slot for the next reconnect. `Event::Disconnect` also calls `bot.exit()` so `ClientBuilder::start` returns and the connect loop can retry.
-- **Connect/Disconnect:** `SharedState` has `bot_connecting` (AtomicBool) and `disconnect_requested` (AtomicBool) flags. `try_begin_connecting` guards against double-spawn. `request_disconnect` tells the reconnect loop to stop; the Disconnect button sets it. `clear_connecting` is called when the connect loop exits.
+- **MCP Config panel:** Renders a copyable JSON config (with the executable's absolute path resolved at runtime) for MCP clients like Claude Desktop / Cursor. Uses egui 0.34.3's clipboard API; schemars 1.0 `Schema` (via `schema_for!`) drives any schema rendering.
+- **Bot connection:** Spawned on dedicated OS thread (not `tokio::spawn`) because `ConnectionManager::connect()` contains `LocalSet` which is `!Send`. The thread's `JoinHandle` is held by `MinecraftApp` and joined on `Drop` for clean exit. `Drop::join` has a 3-second timeout so closing the window never hangs.
+- **Command executor:** Wired into `Event::Spawn` via `spawn_local`. The command receiver is stored in a `ReceiverSlot` (`Arc<Mutex<Option<BotCommandReceiver>>>`) and leased out via `ReceiverLease` on Spawn; when the executor is aborted on `Event::Disconnect`, the lease drops and returns the receiver to the slot for the next reconnect. `Event::Disconnect` also writes `AppExit::Success` to the ECS (`bot.ecs.lock().write_message(AppExit::Success)`) so `ClientBuilder::start` returns and the connect loop can retry (azalea 0.15.1 removed `Client::exit()`).
+- **Connect/Disconnect:** `SharedState` has `bot_connecting` (AtomicBool) and `disconnect_requested` (AtomicBool) flags. `try_begin_connecting` guards against double-spawn. `request_disconnect` tells the reconnect loop to stop; the Disconnect button sets it. `clear_connecting` is called when the connect loop exits. A `CancellationToken` (from `tokio-util`) is stored in `SharedState` and cancelled on disconnect so the reconnect backoff sleep returns immediately instead of blocking shutdown.
+- **Connection errors:** `SharedState::last_error` (behind a `Mutex<Option<String>>`) surfaces the most recent connection failure to the UI; the Status panel renders it in red. Connection failures are fail-fast — the reconnect loop stops retrying so the user sees the error and can manually retry, rather than looping infinitely.
 - **Type unification:** `error.rs` re-exports `BlockPos`, `ToolType`, `MaterialTier` from `types.rs` — no duplicate definitions. `ToolType` has 7 variants (Pickaxe, Axe, Shovel, Hoe, Sword, Shears, Hand). No `to_error_*` bridge helpers needed.
 - **Snapshot building:** `handle_tick` delegates to `SnapshotUpdater::update_from_tick` — the inline `build_and_update_snapshot` and helper functions were deleted from `events.rs` to avoid duplication with `snapshot_updater.rs`.
 - **Mutex poisoning recovery**: Extended from `SharedState` to all shared mutexes (including `channel.rs` command receiver slot and `bot/events.rs` executor handle). All use `.unwrap_or_else(|e| e.into_inner())` to prevent cascade crashes.

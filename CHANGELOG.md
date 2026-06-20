@@ -7,8 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `SharedState::last_error` field for surfacing connection errors to the UI.
+- MCP Config panel in the desktop UI — displays copyable JSON config for MCP clients.
+- `tokio-util` dependency for `CancellationToken`-based disconnect signaling.
+
+### Changed
+
+- Upgraded azalea from 0.16 to 0.15.1 for Minecraft 1.21.11 compatibility (was 26.1).
+- Upgraded eframe/egui from 0.31 to 0.34.3.
+- Upgraded schemars from 0.8 to 1.0.3.
+- Upgraded all other dependencies to latest compatible versions (tokio 1.50, serde 1.0.228, etc.).
+- Kept Rust nightly toolchain (azalea 0.15.1's build script requires nightly; stable is incompatible with MC 1.21.11 support).
+- Migrated azalea APIs: `Client::exit()` → ECS `AppExit`, `WorldHolder` → `InstanceHolder`, etc.
+- Migrated egui APIs: `App::update` split into `logic` + `ui`; clipboard API updated.
+- Connection failures now stop retrying instead of infinite reconnect loops.
+
 ### Fixed
 
+- Minecraft 1.21.11 connection failures (azalea 0.16 used the wrong protocol version).
+- Window close hanging — `Drop::join` now has a 3-second timeout.
+- Reconnect sleep no longer blocks disconnect — `CancellationToken` allows instant cancellation.
 - `calculate_mine_time` now applies the 5× wrong-tool penalty when mining tool-required blocks with an empty hand (e.g. stone).
 - MCP tools `use_item_on_block`, `walk_direction`, and `shield_block` now correctly pass their parameters (`item_slot`, `distance`, `blocking`) all the way to the bot executor instead of silently dropping them.
 - `get_inventory` now returns the full player inventory from the world snapshot instead of a placeholder stub.

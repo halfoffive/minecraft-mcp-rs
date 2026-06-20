@@ -38,6 +38,7 @@ pub mod mcp {
 }
 pub mod ui {
     pub mod app;
+    pub mod mcp_config;
     pub mod settings;
     pub mod status;
 }

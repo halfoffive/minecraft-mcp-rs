@@ -1,7 +1,7 @@
 //! MCP tools for bot movement (move_to, walk_direction, jump, teleport).
 //!
 //! Each tool validates parameters, checks online status, and dispatches a
-//! [`BotCommand`](crate::types::BotCommand) through the bot command channel.
+//! [`BotCommand`] through the bot command channel.
 //!
 //! # Parameter structs
 //!

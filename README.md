@@ -17,6 +17,8 @@ Minecraft game world. A Rust bot (backed by the [azalea] library) connects to
 your Minecraft server and exposes its abilities — moving, mining, building,
 inventory management, combat, and chatting — as MCP tools over stdio transport.
 
+The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
+
 [azalea]: https://github.com/azalea-rs/azalea
 
 ## Features
@@ -25,7 +27,9 @@ inventory management, combat, and chatting — as MCP tools over stdio transport
 - **Live world state** — the bot periodically snapshots its surroundings into a
   thread-safe `SharedState` readable by all tools
 - **Desktop UI** (egui/eframe) — status panel with live stats, settings panel
-  to configure connection and bot parameters
+  to configure connection and bot parameters, and an MCP Config panel that
+  shows a copyable JSON config (with the executable's absolute path) for
+  Claude Desktop / Cursor
 - **Auto-reconnect** — exponential backoff on disconnect; the command executor
   is cleanly aborted and re-started on each reconnect via a `ReceiverLease`
 - **Compound operations** — higher-level state machines (mine-and-collect)
@@ -56,8 +60,8 @@ inventory management, combat, and chatting — as MCP tools over stdio transport
 
 ### Prerequisites
 
-- [Rust nightly](https://rustup.rs/) (pinned in `rust-toolchain.toml`)
-- A Minecraft Java Edition server (local or remote)
+- [Rust nightly](https://rustup.rs/) (pinned in `rust-toolchain.toml`, edition 2024; azalea 0.15.1 requires nightly)
+- A Minecraft Java Edition 1.21.11 server (local or remote)
 - An MCP client (Claude Desktop, Cursor, or any MCP-compatible LLM host)
 
 ### Build
