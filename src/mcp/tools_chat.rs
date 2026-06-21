@@ -1,13 +1,17 @@
 //! MCP tools for chat, commands, and game mode operations.
 //!
-//! Provides the implementation behind `send_chat`, `execute_command`, and
-//! `set_game_mode` MCP tools. Each function validates input, constructs the
-//! appropriate [`BotCommand`], and sends it through the command channel.
+//! Provides the implementation behind `send_chat`, `execute_command`,
+//! `set_game_mode`, and `get_chat_history` MCP tools. Each function validates
+//! input, constructs the appropriate [`BotCommand`], and sends it through the
+//! command channel (or reads directly from [`SharedState`] for queries).
+
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::channel::BotCommandSender;
+use crate::state::SharedState;
 use crate::types::{BotCommand, GameMode};
 
 // ---------------------------------------------------------------------------
@@ -178,6 +182,38 @@ pub async fn handle_set_game_mode(sender: &BotCommandSender, mode: String) -> St
 }
 
 // ---------------------------------------------------------------------------
+// get_chat_history — reads recent chat messages from SharedState
+// ---------------------------------------------------------------------------
+
+/// JSON error returned when `get_chat_history` is called while the bot is
+/// offline. Matches the shape used by the query tools in `tools_query.rs`.
+const CHAT_OFFLINE_ERROR: &str = r#"{"error":"Bot is currently offline"}"#;
+
+/// Return recent chat messages (up to 10) as a JSON array.
+///
+/// Each entry is an object `{"sender":"...","message":"..."}`. Returns
+/// [`CHAT_OFFLINE_ERROR`] when the bot is not connected to a server.
+pub fn get_chat_history(state: &Arc<SharedState>) -> String {
+    if !state.is_online() {
+        return CHAT_OFFLINE_ERROR.to_string();
+    }
+
+    let messages = state.get_chat_messages();
+    let entries: Vec<_> = messages
+        .into_iter()
+        .map(|(sender, message)| {
+            json!({
+                "sender": sender,
+                "message": message,
+            })
+        })
+        .collect();
+
+    serde_json::to_string(&entries)
+        .unwrap_or_else(|e| json!({"error": format!("Serialization error: {e}")}).to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -336,5 +372,47 @@ mod tests {
         let (sender, _rx) = make_echo_channel();
         let result = handle_set_game_mode(&sender, "".into()).await;
         assert!(result.contains("Error"));
+    }
+
+    // -- get_chat_history -----------------------------------------------------
+
+    fn make_state(online: bool) -> Arc<SharedState> {
+        let state = Arc::new(SharedState::new(crate::config::AppConfig::default()));
+        state.set_online(online);
+        state
+    }
+
+    #[test]
+    fn test_get_chat_history_online() {
+        let state = make_state(true);
+        state.add_chat_message("Alice".into(), "Hello".into());
+        state.add_chat_message("Bob".into(), "Hi there".into());
+
+        let result = get_chat_history(&state);
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+        let arr = parsed
+            .as_array()
+            .expect("expected a JSON array of messages");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["sender"], "Alice");
+        assert_eq!(arr[0]["message"], "Hello");
+        assert_eq!(arr[1]["sender"], "Bob");
+        assert_eq!(arr[1]["message"], "Hi there");
+    }
+
+    #[test]
+    fn test_get_chat_history_online_empty() {
+        let state = make_state(true);
+        let result = get_chat_history(&state);
+        assert_eq!(result, "[]");
+    }
+
+    #[test]
+    fn test_get_chat_history_offline() {
+        let state = make_state(false);
+        // Even if messages exist, offline returns the offline error.
+        state.add_chat_message("Alice".into(), "Hello".into());
+        let result = get_chat_history(&state);
+        assert_eq!(result, CHAT_OFFLINE_ERROR);
     }
 }

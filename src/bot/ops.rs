@@ -590,6 +590,7 @@ mod tests {
             },
             timestamp: 1,
             chunk_summary: vec![],
+            commands_enabled: None,
         }
     }
 
@@ -609,6 +610,7 @@ mod tests {
             },
             timestamp: 1,
             chunk_summary: vec![],
+            commands_enabled: None,
         }
     }
 

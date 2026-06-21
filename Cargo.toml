@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 azalea = "0.15.1"
 azalea-inventory = "0.15.1"
-rmcp = { version = "1.7.0", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "1.7.0", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
 eframe = "0.34.3"
 egui = "0.34.3"
 tokio = { version = "1.50", features = ["full"] }
@@ -23,6 +23,9 @@ thiserror = "2.0.12"
 bevy_ecs = "0.18"
 uuid = "1.20"
 tokio-util = { version = "0.7", features = ["rt"] }
+image = "0.25"
+base64 = "0.22"
+axum = "0.8"
 
 [profile.dev]
 opt-level = 1
@@ -33,10 +36,10 @@ opt-level = 3
 [lints.rust]
 linker_messages = "allow"
 
-# Patch rsa 0.10.0-rc.13 to fix a compile error with pkcs8 0.11.0 (stable),
-# where `pkcs8::Error::KeyMalformed` changed from a unit variant to a tuple
-# variant `KeyMalformed(KeyError)`. The upstream fix exists in newer rc tags
-# but they require rand_core 0.10 (stable), which conflicts with
-# azalea-crypto's pinned `rand_core = "=0.10.0-rc-5"`.
+# Local patches to resolve dependency conflicts without committing patched
+# upstream crates to git. See .gitignore for `patches/*`.
 [patch.crates-io]
 rsa = { path = "patches/rsa" }
+rmcp = { path = "patches/rmcp" }
+
+

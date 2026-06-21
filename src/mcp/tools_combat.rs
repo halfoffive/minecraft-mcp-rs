@@ -210,6 +210,7 @@ mod tests {
             },
             timestamp: 1,
             chunk_summary: vec![],
+            commands_enabled: None,
         };
         state.update_snapshot(snap);
     }

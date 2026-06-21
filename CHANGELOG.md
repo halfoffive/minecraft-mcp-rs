@@ -9,9 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Remote MCP HTTP server (`transport-streamable-http-server` feature):
+  binds to `127.0.0.1` only, Bearer-token authenticated, port/token configurable
+  in the UI. Default token is the project name `minecraft-mcp-rs`.
+- MCP transport selector in the Settings panel (`Stdio` / `Http`) and a live
+  MCP Config panel that generates copyable JSON for the selected transport.
+- AI vision for multimodal models — `get_world_view` renders a top-down PNG of
+  nearby blocks, base64-encodes it, and returns it to the LLM.
+- New MCP tools:
+  - `get_chat_history` — recent chat messages.
+  - `get_server_info` — current world / server flags, including whether
+    commands are enabled.
+  - `get_world_view` — top-down visual snapshot of surroundings.
+  - `collect_items` — pick up nearby dropped items.
+  - `smart_move` — pathfind to a coordinate, auto-jump over 1-block gaps,
+    stop and report when blocked by higher obstacles.
+  - `fly_to` — creative-mode flight to a coordinate, stopping on obstruction.
+  - `act` — unified action tool that can move, smart-move, fly, mine, attack,
+    or collect items, then returns an environment snapshot (nearby blocks,
+    entities, and self info) so the model can call it repeatedly.
+- New `ActAction` / `ActResult` types in `types.rs` to drive the `act` tool.
+- `WorldSnapshot.commands_enabled` flag surfaced by `get_server_info`.
+- `SharedState` ECS handle storage so `request_disconnect` can write
+  `AppExit::Success` and force a clean bot shutdown.
+- Local dependency patches (ignored by git) to resolve upstream conflicts:
+  - `patches/rmcp` removes the `rand` dependency from rmcp's HTTP feature,
+    avoiding the `rand_core` version clash with azalea 0.15.1.
+  - `patches/rsa` fixes `pkcs8 0.11.0` compatibility for `rsa 0.10.0-rc.13`.
 - `SharedState::last_error` field for surfacing connection errors to the UI.
 - MCP Config panel in the desktop UI — displays copyable JSON config for MCP clients.
 - `tokio-util` dependency for `CancellationToken`-based disconnect signaling.
+
+### Changed
+
+- Default MCP transport is now `Http` so remote clients can connect without
+  extra plumbing.
+- Settings panel gained `mcp_transport`, `mcp_address`, `mcp_port`, and
+  `mcp_token` fields.
+- UI clipboards use the egui 0.34.3 `from_id_salt` API.
+- Replaced unstable `std::mem::variant_count` in tests with a stable
+  `all_bot_commands().len()` check.
+
+### Fixed
+
+- Disconnect now works reliably: `request_disconnect` writes `AppExit::Success`
+  into the bot ECS, causing `ClientBuilder::start()` to return and the connect
+  loop to exit.
 
 ### Changed
 

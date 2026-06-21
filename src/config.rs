@@ -4,8 +4,35 @@
 //! thread-safe command tracking counters.  No file I/O — LAN servers
 //! change ports each session.
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
+
+// ---------------------------------------------------------------------------
+// McpTransport — transport selection for the MCP server
+// ---------------------------------------------------------------------------
+
+/// Transport mechanism the MCP server uses to talk to clients.
+///
+/// `Stdio` is the classic JSON-RPC-over-stdio transport used by Claude
+/// Desktop / Cursor; `Http` exposes the server over HTTP (useful for
+/// remote clients and browser-based integrations).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum McpTransport {
+    /// JSON-RPC over stdio (default for local MCP clients).
+    Stdio,
+    /// JSON-RPC over HTTP.
+    Http,
+}
+
+/// Default transport is `Http` so the server is reachable remotely
+/// without extra plumbing.
+impl Default for McpTransport {
+    fn default() -> Self {
+        Self::Http
+    }
+}
 
 // ---------------------------------------------------------------------------
 // AppConfig — UI-facing settings with sensible defaults
@@ -15,7 +42,7 @@ use std::time::Instant;
 ///
 /// Every field has a sensible default so that the egui settings panel
 /// can be populated from [`AppConfig::default()`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppConfig {
     /// Minecraft server address (default: `"127.0.0.1"`).
     pub mc_address: String,
@@ -41,6 +68,19 @@ pub struct AppConfig {
     pub reconnect_max_delay_ms: u64,
     /// Timeout for bot commands in seconds (default: 30).
     pub command_timeout_secs: u64,
+    /// Authentication token presented by MCP clients over HTTP
+    /// (default: `"minecraft-mcp-rs"`).
+    #[serde(default = "default_mcp_token")]
+    pub mcp_token: String,
+    /// Transport the MCP server uses to communicate with clients
+    /// (default: [`McpTransport::Http`]).
+    #[serde(default)]
+    pub mcp_transport: McpTransport,
+}
+
+/// Serde default for [`AppConfig::mcp_token`].
+fn default_mcp_token() -> String {
+    "minecraft-mcp-rs".to_string()
 }
 
 impl Default for AppConfig {
@@ -58,6 +98,8 @@ impl Default for AppConfig {
             reconnect_initial_delay_ms: 5000,
             reconnect_max_delay_ms: 60_000,
             command_timeout_secs: 30,
+            mcp_token: default_mcp_token(),
+            mcp_transport: McpTransport::default(),
         }
     }
 }
@@ -86,6 +128,9 @@ impl AppConfig {
         }
         if self.command_timeout_secs == 0 {
             return Err("command_timeout_secs must be greater than 0".into());
+        }
+        if self.mcp_token.is_empty() {
+            return Err("mcp_token must not be empty".into());
         }
         Ok(())
     }
@@ -153,6 +198,28 @@ mod tests {
         assert_eq!(config.reconnect_initial_delay_ms, 5000);
         assert_eq!(config.reconnect_max_delay_ms, 60_000);
         assert_eq!(config.command_timeout_secs, 30);
+    }
+
+    // -- McpTransport / mcp_token defaults ----------------------------------
+
+    #[test]
+    fn test_default_config() {
+        let config = AppConfig::default();
+        assert_eq!(config.mcp_token, "minecraft-mcp-rs");
+        assert_eq!(config.mcp_transport, McpTransport::Http);
+    }
+
+    #[test]
+    fn test_mcp_transport_default_is_http() {
+        assert_eq!(McpTransport::default(), McpTransport::Http);
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_token() {
+        let mut config = AppConfig::default();
+        config.mcp_token.clear();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("mcp_token"), "got: {err}");
     }
 
     // -- Validation: chunk_scan_radius --------------------------------------

@@ -15,3 +15,7 @@
 
 # Rustc internal compiler error logs
 rustc-ice-*.txt
+
+# Local patches for dependency overrides; not committed to git.
+patches/rmcp/
+patches/rsa/

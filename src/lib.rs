@@ -27,7 +27,9 @@ pub mod bot {
     pub mod snapshot_updater;
 }
 pub mod mcp {
+    pub mod render;
     pub mod server;
+    pub mod tools_act;
     pub mod tools_block;
     pub mod tools_chat;
     pub mod tools_combat;

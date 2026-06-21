@@ -50,13 +50,15 @@ src/
     ops.rs            — Higher-level bot operations (move, mine, place, etc.)
     snapshot_updater.rs — Periodically snapshots world state into SharedState
   mcp/                — MCP server
-    server.rs         — McpBotServer (rmcp ServerHandler), stdio transport
+    server.rs         — McpBotServer (rmcp ServerHandler), stdio or HTTP transport
     tools_*.rs        — Tool definitions organized by domain: query, movement, block,
-                        item, container, combat, chat
+                        item, container, combat, chat, plus unified `act`
+    render.rs         — Top-down PNG world rendering for `get_world_view`
   ui/                 — Desktop UI
     app.rs            — egui app shell
-    settings.rs       — Settings panel
+    settings.rs       — Settings panel (includes MCP transport / port / token)
     status.rs         — Status panel with live stats
+    mcp_config.rs     — Copyable, live-generated MCP client JSON config
 tests/
   integration.rs      — Mock-based end-to-end tests (no real MC server)
   proptest.rs         — Property-based tests for block_data, command_validate

@@ -65,6 +65,7 @@ fn make_test_snapshot() -> WorldSnapshot {
         },
         timestamp: 42,
         chunk_summary: vec![(0, 0), (-1, 1)],
+        commands_enabled: None,
     }
 }
 
@@ -638,6 +639,7 @@ async fn test_auto_reconnect_sequence_simulation() {
         },
         timestamp: 99,
         chunk_summary: vec![(1, 1)],
+        commands_enabled: None,
     };
     state.update_snapshot(fresh_snap);
 

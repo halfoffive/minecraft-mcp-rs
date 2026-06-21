@@ -17,7 +17,7 @@ use crate::channel::{BotCommandReceiver, ReceiverLease};
 use crate::error::BotError;
 use crate::state::SharedState;
 use crate::tool_select::find_tool_in_inventory;
-use crate::types::{BlockPos, BotCommand, BotResult, Direction, GameMode};
+use crate::types::{ActAction, ActResult, BlockPos, BotCommand, BotResult, Direction, GameMode};
 
 // ═══════════════════════════════════════════════════════════════
 // BotActions trait — abstracts azalea Client for testability
@@ -464,6 +464,15 @@ impl<B: BotActions> CommandExecutor<B> {
             BotCommand::QuerySelfInfo => self.handle_query_self_info(),
             BotCommand::QueryInventory => self.handle_query_inventory(),
             BotCommand::QueryChunkSummary => self.handle_query_chunk_summary(),
+
+            // ── v2 foundation: extended capabilities ──────────────
+            BotCommand::SmartMove(target) => self.handle_smart_move(target).await,
+            BotCommand::FlyTo(target) => self.handle_fly_to(target).await,
+            BotCommand::CollectItems(radius) => self.handle_collect_items(radius).await,
+            BotCommand::Act(action) => self.handle_act(action).await,
+            BotCommand::QueryServerInfo => self.handle_query_server_info(),
+            BotCommand::QueryChatHistory => self.handle_query_chat_history(),
+            BotCommand::QueryWorldView(radius) => self.handle_query_world_view(radius),
         }
     }
 
@@ -936,6 +945,316 @@ impl<B: BotActions> CommandExecutor<B> {
             data: Some(serde_json::to_value(&snapshot.chunk_summary).unwrap_or_default()),
         })
     }
+
+    // ── v2 foundation handlers ───────────────────────────────────
+
+    /// Smart movement with auto-jump. Azalea's pathfinder already handles
+    /// 1-block auto-jumps, so this delegates to [`BotActions::goto`] and
+    /// inspects the result to report whether the target was reached or an
+    /// obstacle blocked progress.
+    async fn handle_smart_move(&self, target: BlockPos) -> Result<BotResult, BotError> {
+        trace!(?target, "SmartMove");
+
+        let goto_result = self.bot.goto(&target).await;
+        let current_pos = self.state.read_snapshot().self_player.position;
+
+        match goto_result {
+            Ok(()) => {
+                // Reached the target (or pathfinder believes it did).
+                let reached = (current_pos.x - target.x).abs() <= 1
+                    && (current_pos.y - target.y).abs() <= 1
+                    && (current_pos.z - target.z).abs() <= 1;
+                let reason = if reached { "reached" } else { "obstacle" };
+                let obstacle = if reached {
+                    None
+                } else {
+                    // Look for a solid block directly ahead (between current
+                    // and target) to report as the obstacle.
+                    find_obstacle_block(&self.state.read_snapshot(), current_pos, target)
+                };
+
+                Ok(BotResult {
+                    success: true,
+                    message: format!("SmartMove to {target}: {reason}"),
+                    data: Some(serde_json::json!({
+                        "reached": reached,
+                        "reason": reason,
+                        "position": [current_pos.x, current_pos.y, current_pos.z],
+                        "obstacle": obstacle,
+                    })),
+                })
+            }
+            Err(e) => {
+                // Pathfinder failed — treat as obstacle.
+                let obstacle =
+                    find_obstacle_block(&self.state.read_snapshot(), current_pos, target);
+                Ok(BotResult {
+                    success: true,
+                    message: format!("SmartMove to {target} blocked: {e}"),
+                    data: Some(serde_json::json!({
+                        "reached": false,
+                        "reason": "obstacle",
+                        "position": [current_pos.x, current_pos.y, current_pos.z],
+                        "obstacle": obstacle,
+                    })),
+                })
+            }
+        }
+    }
+
+    /// Creative-mode flight to a position. If the bot is not in creative mode,
+    /// returns `not_creative`. Otherwise delegates to [`BotActions::goto`]
+    /// (azalea's pathfinder can navigate 3D in creative flight).
+    async fn handle_fly_to(&self, target: BlockPos) -> Result<BotResult, BotError> {
+        trace!(?target, "FlyTo");
+        let snapshot = self.state.read_snapshot();
+        let gamemode = snapshot.self_player.gamemode;
+        let current_pos = snapshot.self_player.position;
+
+        if gamemode != GameMode::Creative {
+            return Ok(BotResult {
+                success: true,
+                message: format!("FlyTo {target}: not in creative mode"),
+                data: Some(serde_json::json!({
+                    "reached": false,
+                    "reason": "not_creative",
+                    "position": [current_pos.x, current_pos.y, current_pos.z],
+                })),
+            });
+        }
+
+        // In creative mode the pathfinder can fly. Fall back to goto.
+        let goto_result = self.bot.goto(&target).await;
+        let final_pos = self.state.read_snapshot().self_player.position;
+
+        let reached = (final_pos.x - target.x).abs() <= 1
+            && (final_pos.y - target.y).abs() <= 1
+            && (final_pos.z - target.z).abs() <= 1;
+        let reason = if reached { "reached" } else { "obstacle" };
+
+        let success = goto_result.is_ok() || reached;
+        Ok(BotResult {
+            success,
+            message: format!("FlyTo {target}: {reason}"),
+            data: Some(serde_json::json!({
+                "reached": reached,
+                "reason": reason,
+                "position": [final_pos.x, final_pos.y, final_pos.z],
+            })),
+        })
+    }
+
+    /// Collect dropped item entities within `radius` blocks of the player.
+    ///
+    /// Walks to each item entity in turn; auto-pickup happens when the bot
+    /// gets close. Returns the count of item entities visited.
+    async fn handle_collect_items(&self, radius: u32) -> Result<BotResult, BotError> {
+        trace!(radius, "CollectItems");
+        let snapshot = self.state.read_snapshot();
+        let player_pos = snapshot.self_player.position;
+        let r = radius as i32;
+
+        // Filter for item entities within radius. Entity types from azalea
+        // for dropped items contain "item" (e.g. "item", "item_frame").
+        // We match case-insensitively on "item" but exclude "item_frame"
+        // since those are not pickup-able.
+        let item_targets: Vec<BlockPos> = snapshot
+            .entities
+            .iter()
+            .filter(|e| {
+                let etype = e.entity_type.to_lowercase();
+                etype == "item"
+                    || etype == "item_entity"
+                    || (etype.contains("item") && !etype.contains("frame"))
+            })
+            .filter(|e| {
+                (e.position.x - player_pos.x).abs() <= r
+                    && (e.position.y - player_pos.y).abs() <= r
+                    && (e.position.z - player_pos.z).abs() <= r
+            })
+            .map(|e| e.position)
+            .collect();
+
+        if item_targets.is_empty() {
+            return Ok(BotResult {
+                success: true,
+                message: "No items to collect".into(),
+                data: Some(serde_json::json!({"collected": 0})),
+            });
+        }
+
+        let mut collected: u32 = 0;
+        for target in item_targets {
+            // Walk to the item; auto-pickup occurs on proximity.
+            if self.bot.goto(&target).await.is_ok() {
+                // Brief pause for the server to process pickup.
+                sleep(Duration::from_millis(200)).await;
+                collected += 1;
+            }
+        }
+
+        Ok(BotResult {
+            success: true,
+            message: format!("Collected {collected} item(s)"),
+            data: Some(serde_json::json!({"collected": collected})),
+        })
+    }
+
+    /// Unified Act tool — dispatches the inner [`ActAction`] to the
+    /// appropriate handler, then wraps the result in an [`ActResult`]
+    /// enriched with nearby blocks/entities and self info from the snapshot.
+    async fn handle_act(&self, action: ActAction) -> Result<BotResult, BotError> {
+        trace!(?action, "Act");
+        let (action_result, reason): (String, Option<String>) = match action {
+            ActAction::Move { target } => match self.handle_move_to(target).await {
+                Ok(r) => (r.message, None),
+                Err(e) => ("failed".into(), Some(e.to_string())),
+            },
+            ActAction::SmartMove { target } => match self.handle_smart_move(target).await {
+                Ok(r) => (r.message, None),
+                Err(e) => ("failed".into(), Some(e.to_string())),
+            },
+            ActAction::Fly { target } => match self.handle_fly_to(target).await {
+                Ok(r) => (r.message, None),
+                Err(e) => ("failed".into(), Some(e.to_string())),
+            },
+            ActAction::Mine { block_pos } => match self.handle_break_block(block_pos) {
+                Ok(r) => (r.message, None),
+                Err(e) => ("failed".into(), Some(e.to_string())),
+            },
+            ActAction::Attack { entity_id } => match self.handle_attack_entity(entity_id) {
+                Ok(r) => (r.message, None),
+                Err(e) => ("failed".into(), Some(e.to_string())),
+            },
+            ActAction::CollectItems { radius } => match self.handle_collect_items(radius).await {
+                Ok(r) => (r.message, None),
+                Err(e) => ("failed".into(), Some(e.to_string())),
+            },
+        };
+
+        // Build the enriched result from the current snapshot.
+        let snapshot = self.state.read_snapshot();
+        let player_pos = snapshot.self_player.position;
+        let perception_radius: i32 = 16;
+
+        let nearby_blocks: Vec<_> = snapshot
+            .blocks
+            .iter()
+            .filter(|b| {
+                (b.position.x - player_pos.x).abs() <= perception_radius
+                    && (b.position.y - player_pos.y).abs() <= perception_radius
+                    && (b.position.z - player_pos.z).abs() <= perception_radius
+            })
+            .cloned()
+            .collect();
+
+        let nearby_entities: Vec<_> = snapshot
+            .entities
+            .iter()
+            .filter(|e| {
+                (e.position.x - player_pos.x).abs() <= perception_radius
+                    && (e.position.y - player_pos.y).abs() <= perception_radius
+                    && (e.position.z - player_pos.z).abs() <= perception_radius
+            })
+            .cloned()
+            .collect();
+
+        let act_result = ActResult {
+            action_result,
+            reason,
+            nearby_blocks,
+            nearby_entities,
+            self_info: snapshot.self_player.clone(),
+        };
+
+        Ok(BotResult {
+            success: true,
+            message: "Act completed".into(),
+            data: Some(serde_json::to_value(&act_result).unwrap_or_default()),
+        })
+    }
+
+    /// Query server info — returns whether commands are enabled and the
+    /// current gamemode, both read from the shared snapshot.
+    fn handle_query_server_info(&self) -> Result<BotResult, BotError> {
+        trace!("QueryServerInfo");
+        let snapshot = self.state.read_snapshot();
+        let gamemode = match snapshot.self_player.gamemode {
+            GameMode::Survival => "survival",
+            GameMode::Creative => "creative",
+            GameMode::Adventure => "adventure",
+            GameMode::Spectator => "spectator",
+        };
+        Ok(BotResult {
+            success: true,
+            message: format!(
+                "commands_enabled={:?}, gamemode={gamemode}",
+                snapshot.commands_enabled
+            ),
+            data: Some(serde_json::json!({
+                "commands_enabled": snapshot.commands_enabled,
+                "gamemode": gamemode,
+            })),
+        })
+    }
+
+    /// Query recent chat history from the shared state.
+    fn handle_query_chat_history(&self) -> Result<BotResult, BotError> {
+        trace!("QueryChatHistory");
+        let messages = self.state.get_chat_messages();
+        let arr: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|(sender, message)| serde_json::json!({"sender": sender, "message": message}))
+            .collect();
+        Ok(BotResult {
+            success: true,
+            message: format!("{} recent chat message(s)", arr.len()),
+            data: Some(serde_json::Value::Array(arr)),
+        })
+    }
+
+    /// Query world view — returns a placeholder. The actual PNG rendering
+    /// happens at the MCP tool layer which reads the snapshot directly.
+    fn handle_query_world_view(&self, radius: u8) -> Result<BotResult, BotError> {
+        trace!(radius, "QueryWorldView");
+        Ok(BotResult {
+            success: true,
+            message: format!("World view radius {radius} (rendered at tool layer)"),
+            data: Some(serde_json::json!({
+                "radius": radius,
+                "note": "rendered at tool layer",
+            })),
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Free-function helpers for v2 handlers
+// ═══════════════════════════════════════════════════════════════
+
+/// Find the first solid block between `current` and `target` to report as
+/// the obstacle that blocked movement. Returns the block type as a string,
+/// or `None` if no candidate is found in the snapshot.
+fn find_obstacle_block(
+    snapshot: &crate::types::WorldSnapshot,
+    current: BlockPos,
+    target: BlockPos,
+) -> Option<String> {
+    // Walk the integer line from current toward target (XZ plane) and
+    // return the first non-air block found in the snapshot.
+    let dx = (target.x - current.x).signum();
+    let dz = (target.z - current.z).signum();
+    let steps = ((target.x - current.x).abs()).max((target.z - current.z).abs());
+    for i in 1..=steps {
+        let pos = BlockPos::new(current.x + dx * i, current.y, current.z + dz * i);
+        if let Some(block) = snapshot.blocks.iter().find(|b| b.position == pos)
+            && !block.block_type.is_empty()
+            && block.block_type != "air"
+        {
+            return Some(block.block_type.clone());
+        }
+    }
+    None
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1158,6 +1477,7 @@ mod tests {
             },
             timestamp: 1,
             chunk_summary: vec![(0, 0), (1, 0)],
+            commands_enabled: None,
         };
         state.update_snapshot(snap);
     }

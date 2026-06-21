@@ -299,6 +299,145 @@ pub async fn handle_teleport(
     }
 }
 
+// ── smart_move ──────────────────────────────────────────────────────────────
+
+/// Input for the `smart_move` MCP tool.
+#[derive(Deserialize, Default)]
+pub struct SmartMoveInput {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+impl rmcp::schemars::JsonSchema for SmartMoveInput {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("SmartMoveInput")
+    }
+
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+        schema_from_json(json!({
+            "type": "object",
+            "properties": {
+                "x": {
+                    "type": "integer",
+                    "description": "X coordinate to move to"
+                },
+                "y": {
+                    "type": "integer",
+                    "description": "Y coordinate to move to"
+                },
+                "z": {
+                    "type": "integer",
+                    "description": "Z coordinate to move to"
+                }
+            },
+            "required": ["x", "y", "z"],
+            "additionalProperties": false
+        }))
+    }
+}
+
+/// Handle `smart_move` MCP tool.
+///
+/// Smart movement toward a target coordinate. The bot auto-jumps over
+/// 1-block obstacles and stops when encountering an impassable obstacle
+/// (2+ blocks high). Validates coordinates, checks online status, then
+/// sends [`BotCommand::SmartMove`].
+pub async fn handle_smart_move(
+    state: &Arc<SharedState>,
+    sender: &BotCommandSender,
+    input: SmartMoveInput,
+) -> String {
+    if let Err(e) = validate_block_pos(&BlockPos::new(input.x, input.y, input.z)) {
+        return format!(r#"{{"success":false,"error":"{e}"}}"#);
+    }
+
+    if !state.is_online() {
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+    }
+
+    let cmd = BotCommand::SmartMove(BlockPos::new(input.x, input.y, input.z));
+    match sender.send_command(cmd).await {
+        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
+            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
+        }),
+        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+    }
+}
+
+// ── fly_to ──────────────────────────────────────────────────────────────────
+
+/// Input for the `fly_to` MCP tool.
+#[derive(Deserialize, Default)]
+pub struct FlyToInput {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+impl rmcp::schemars::JsonSchema for FlyToInput {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("FlyToInput")
+    }
+
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+        schema_from_json(json!({
+            "type": "object",
+            "properties": {
+                "x": {
+                    "type": "integer",
+                    "description": "X coordinate to fly to"
+                },
+                "y": {
+                    "type": "integer",
+                    "description": "Y coordinate to fly to"
+                },
+                "z": {
+                    "type": "integer",
+                    "description": "Z coordinate to fly to"
+                }
+            },
+            "required": ["x", "y", "z"],
+            "additionalProperties": false
+        }))
+    }
+}
+
+/// Handle `fly_to` MCP tool.
+///
+/// Creative mode only. Flies toward a target coordinate in 3D. Stops on
+/// obstacle. Fails if not in Creative mode. Validates coordinates, checks
+/// online status and gamemode, then sends [`BotCommand::FlyTo`].
+pub async fn handle_fly_to(
+    state: &Arc<SharedState>,
+    sender: &BotCommandSender,
+    input: FlyToInput,
+) -> String {
+    if let Err(e) = validate_block_pos(&BlockPos::new(input.x, input.y, input.z)) {
+        return format!(r#"{{"success":false,"error":"{e}"}}"#);
+    }
+
+    // Fly requires Creative mode
+    {
+        let snap = state.read_snapshot();
+        if snap.self_player.gamemode != GameMode::Creative {
+            return r#"{"success":false,"error":"Fly requires Creative mode"}"#.to_string();
+        }
+    }
+
+    if !state.is_online() {
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+    }
+
+    let cmd = BotCommand::FlyTo(BlockPos::new(input.x, input.y, input.z));
+    match sender.send_command(cmd).await {
+        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
+            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
+        }),
+        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -334,6 +473,7 @@ mod tests {
             },
             timestamp: 1,
             chunk_summary: vec![],
+            commands_enabled: None,
         };
         state.update_snapshot(snap);
     }
@@ -559,5 +699,157 @@ mod tests {
         };
         let result = handle_teleport(&state, &sender, input).await;
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
+    }
+
+    // ── smart_move ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_smart_move_offline() {
+        let (state, sender) = setup();
+        let input = SmartMoveInput { x: 0, y: 64, z: 0 };
+        let result = handle_smart_move(&state, &sender, input).await;
+        assert!(result.contains("not connected"));
+    }
+
+    #[tokio::test]
+    async fn test_smart_move_invalid_coords() {
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = SmartMoveInput { x: 0, y: 500, z: 0 };
+        let result = handle_smart_move(&state, &sender, input).await;
+        assert!(result.contains("out of bounds") || result.contains("out of range"));
+    }
+
+    #[tokio::test]
+    async fn test_smart_move_valid() {
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = SmartMoveInput {
+            x: 10,
+            y: 64,
+            z: -5,
+        };
+        let result = handle_smart_move(&state, &sender, input).await;
+        let _: Value = serde_json::from_str(&result).expect("valid JSON");
+    }
+
+    #[tokio::test]
+    async fn test_smart_move_sends_correct_command() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        make_online(&state);
+        let (sender, mut receiver) = create_command_channel(4);
+
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            assert!(
+                matches!(
+                    wrapped.command,
+                    BotCommand::SmartMove(pos) if pos == BlockPos::new(7, 64, -3)
+                ),
+                "expected SmartMove((7, 64, -3)), got: {:?}",
+                wrapped.command
+            );
+            wrapped
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "reached".into(),
+                    data: None,
+                }))
+                .expect("should respond");
+        });
+
+        let input = SmartMoveInput { x: 7, y: 64, z: -3 };
+        let result = handle_smart_move(&state, &sender, input).await;
+        let json: Value = serde_json::from_str(&result).expect("valid JSON");
+        assert!(
+            json.get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
+        responder.await.expect("responder should finish");
+    }
+
+    // ── fly_to ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_fly_to_offline() {
+        let (state, sender) = setup();
+        make_creative(&state);
+        let input = FlyToInput { x: 0, y: 80, z: 0 };
+        let result = handle_fly_to(&state, &sender, input).await;
+        assert!(result.contains("not connected"));
+    }
+
+    #[tokio::test]
+    async fn test_fly_to_not_creative() {
+        let (state, sender) = setup();
+        make_online(&state);
+        // Default snapshot is Survival mode
+        let input = FlyToInput { x: 0, y: 80, z: 0 };
+        let result = handle_fly_to(&state, &sender, input).await;
+        assert!(result.contains("requires Creative"));
+    }
+
+    #[tokio::test]
+    async fn test_fly_to_invalid_coords() {
+        let (state, sender) = setup();
+        make_online(&state);
+        make_creative(&state);
+        let input = FlyToInput { x: 0, y: 500, z: 0 };
+        let result = handle_fly_to(&state, &sender, input).await;
+        assert!(result.contains("out of bounds") || result.contains("out of range"));
+    }
+
+    #[tokio::test]
+    async fn test_fly_to_valid() {
+        let (state, sender) = setup();
+        make_online(&state);
+        make_creative(&state);
+        let input = FlyToInput {
+            x: 100,
+            y: 80,
+            z: 200,
+        };
+        let result = handle_fly_to(&state, &sender, input).await;
+        let _: Value = serde_json::from_str(&result).expect("valid JSON");
+    }
+
+    #[tokio::test]
+    async fn test_fly_to_sends_correct_command() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        make_online(&state);
+        make_creative(&state);
+        let (sender, mut receiver) = create_command_channel(4);
+
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            assert!(
+                matches!(
+                    wrapped.command,
+                    BotCommand::FlyTo(pos) if pos == BlockPos::new(12, 80, 5)
+                ),
+                "expected FlyTo((12, 80, 5)), got: {:?}",
+                wrapped.command
+            );
+            wrapped
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "flew".into(),
+                    data: None,
+                }))
+                .expect("should respond");
+        });
+
+        let input = FlyToInput { x: 12, y: 80, z: 5 };
+        let result = handle_fly_to(&state, &sender, input).await;
+        let json: Value = serde_json::from_str(&result).expect("valid JSON");
+        assert!(
+            json.get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
+        responder.await.expect("responder should finish");
     }
 }

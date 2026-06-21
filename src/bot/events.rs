@@ -149,6 +149,18 @@ pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::R
 fn handle_spawn(bot: Client, state: &BotState) {
     state.shared_state.set_online(true);
 
+    // Store the ECS handle so request_disconnect can trigger shutdown by
+    // writing AppExit::Success to the ECS World (same pattern as
+    // handle_disconnect below). Without this, the Disconnect button can
+    // only cancel the backoff sleep — it cannot interrupt a running
+    // ClientBuilder::start().
+    let ecs = bot.ecs.clone();
+    state
+        .shared_state
+        .set_bot_ecs(crate::state::BotEcsHandle::new(move || {
+            ecs.lock().write_message(AppExit::Success);
+        }));
+
     // Abort any previous command executor (e.g. left over from a prior
     // connection that dropped without firing Disconnect). Aborting drops the
     // ReceiverLease, which returns the receiver to the slot below.
@@ -193,6 +205,10 @@ fn handle_spawn(bot: Client, state: &BotState) {
 
 fn handle_disconnect(bot: Client, state: &BotState) {
     state.shared_state.set_online(false);
+
+    // Clear the ECS handle — the bot is already disconnecting, so
+    // request_disconnect no longer needs to write AppExit::Success.
+    state.shared_state.clear_bot_ecs();
 
     // Abort the command executor so it can't use the now-stale azalea Client
     // (which would panic when touching the ECS after disconnect). The

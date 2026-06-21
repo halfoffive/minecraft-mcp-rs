@@ -20,6 +20,53 @@ use crate::config::{AppConfig, RunStats};
 use crate::types::WorldSnapshot;
 
 // ---------------------------------------------------------------------------
+// BotEcsHandle
+// ---------------------------------------------------------------------------
+
+/// Handle to the bot's ECS [`World`](bevy_ecs::world::World), used to trigger
+/// [`ClientBuilder::start`](azalea::ClientBuilder::start) to return by writing
+/// [`AppExit::Success`](azalea::prelude::AppExit) to the ECS.
+///
+/// The underlying `bot.ecs` field on azalea's [`Client`](azalea::Client) has
+/// type `Arc<parking_lot::Mutex<World>>`. Because `parking_lot` is not a
+/// direct dependency of this crate, that type cannot be named in a field
+/// signature. Instead, [`BotEcsHandle`] stores a closure that captures
+/// `bot.ecs.clone()` and invokes `ecs.lock().write_message(AppExit::Success)`
+/// when called — the same pattern used by the `Event::Disconnect` handler in
+/// `bot/events.rs`.
+///
+/// The closure is `Send + Sync` so the handle can be shared across threads
+/// via [`SharedState`]. Cloning the handle is cheap (it clones an [`Arc`]).
+#[derive(Clone)]
+pub struct BotEcsHandle(Arc<dyn Fn() + Send + Sync>);
+
+impl BotEcsHandle {
+    /// Create a new handle from a closure that writes `AppExit::Success` to
+    /// the bot's ECS World.
+    ///
+    /// In practice the closure captures `bot.ecs.clone()` (an
+    /// `Arc<parking_lot::Mutex<World>>`) and calls
+    /// `ecs.lock().write_message(AppExit::Success)`.
+    pub fn new(write_app_exit: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Arc::new(write_app_exit))
+    }
+
+    /// Invoke the stored closure, writing `AppExit::Success` to the ECS World.
+    ///
+    /// This causes `ClientBuilder::start()` to return, allowing the reconnect
+    /// loop to exit or retry.
+    pub fn write_app_exit(&self) {
+        (self.0)();
+    }
+}
+
+impl std::fmt::Debug for BotEcsHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BotEcsHandle").finish_non_exhaustive()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SharedState
 // ---------------------------------------------------------------------------
 
@@ -61,6 +108,15 @@ pub struct SharedState {
     /// can be replaced with a fresh token on each new connection attempt
     /// (see [`reset_cancel_token`](Self::reset_cancel_token)).
     cancel_token: Mutex<CancellationToken>,
+    /// Handle to the bot's ECS World, set on `Event::Spawn` and cleared on
+    /// `Event::Disconnect`. When [`request_disconnect`](Self::request_disconnect)
+    /// is called, the handle's [`BotEcsHandle::write_app_exit`] is invoked,
+    /// which writes `AppExit::Success` to the ECS and causes
+    /// `ClientBuilder::start()` to return — the same pattern used by the
+    /// `Event::Disconnect` handler in `bot/events.rs`. This is what actually
+    /// closes a live TCP connection (cancelling the backoff sleep alone
+    /// cannot interrupt a running `ClientBuilder::start()`).
+    bot_ecs: Mutex<Option<BotEcsHandle>>,
 }
 
 impl SharedState {
@@ -84,6 +140,7 @@ impl SharedState {
             },
             timestamp: 0,
             chunk_summary: vec![],
+            commands_enabled: None,
         };
 
         Self {
@@ -97,6 +154,7 @@ impl SharedState {
             chat_messages: Mutex::new(VecDeque::new()),
             last_error: Mutex::new(None),
             cancel_token: Mutex::new(CancellationToken::new()),
+            bot_ecs: Mutex::new(None),
         }
     }
 
@@ -156,12 +214,25 @@ impl SharedState {
     ///
     /// Also cancels the [`CancellationToken`] so any pending reconnect
     /// backoff sleep returns immediately.
+    ///
+    /// If the bot's ECS handle is present (set on `Event::Spawn`), this
+    /// also writes `AppExit::Success` to the ECS World, which causes
+    /// `ClientBuilder::start()` to return. Without this, a running
+    /// `ClientBuilder::start()` cannot be interrupted by the cancel token
+    /// alone, and the bot would stay connected until the server drops it.
     pub fn request_disconnect(&self) {
         self.disconnect_requested.store(true, Ordering::SeqCst);
         self.cancel_token
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .cancel();
+        // If the bot's ECS handle is present, write AppExit::Success to
+        // trigger ClientBuilder::start() to return (same pattern as
+        // Event::Disconnect in bot/events.rs).
+        let guard = self.bot_ecs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(handle) = guard.as_ref() {
+            handle.write_app_exit();
+        }
     }
 
     /// Clear the disconnect request (called when starting a new connection).
@@ -317,6 +388,35 @@ impl SharedState {
         let guard = self.last_error.lock().unwrap_or_else(|e| e.into_inner());
         guard.clone()
     }
+
+    /// Store the bot's ECS handle (set on `Event::Spawn`).
+    ///
+    /// The handle wraps a closure that writes `AppExit::Success` to the ECS
+    /// World, triggering `ClientBuilder::start()` to return. See
+    /// [`BotEcsHandle`] for details.
+    pub fn set_bot_ecs(&self, handle: BotEcsHandle) {
+        let mut guard = self.bot_ecs.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(handle);
+    }
+
+    /// Clear the bot's ECS handle (set on `Event::Disconnect`).
+    ///
+    /// After this call, [`request_disconnect`](Self::request_disconnect) will
+    /// not attempt to write `AppExit::Success` (the bot is already
+    /// disconnecting).
+    pub fn clear_bot_ecs(&self) {
+        let mut guard = self.bot_ecs.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = None;
+    }
+
+    /// Return a clone of the bot's ECS handle, if any.
+    ///
+    /// Returns `None` if no handle is stored (e.g. before `Event::Spawn` or
+    /// after `Event::Disconnect`). Cloning is cheap — it clones an [`Arc`].
+    pub fn bot_ecs(&self) -> Option<BotEcsHandle> {
+        let guard = self.bot_ecs.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().cloned()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +426,7 @@ impl SharedState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
 
     // -- Construction --------------------------------------------------------
@@ -391,6 +491,7 @@ mod tests {
             },
             timestamp: 42,
             chunk_summary: vec![(0, 0)],
+            commands_enabled: None,
         };
 
         state.update_snapshot(new_snap);
@@ -452,6 +553,7 @@ mod tests {
                     },
                     timestamp: i,
                     chunk_summary: vec![],
+                    commands_enabled: None,
                 };
                 s_write.update_snapshot(snap);
             }
@@ -698,5 +800,74 @@ mod tests {
         assert!(!token.is_cancelled());
         state.request_disconnect();
         assert!(token.is_cancelled());
+    }
+
+    // -- bot_ecs --------------------------------------------------------------
+
+    #[test]
+    fn test_bot_ecs_initially_none() {
+        let state = SharedState::new(AppConfig::default());
+        assert!(state.bot_ecs().is_none());
+    }
+
+    #[test]
+    fn test_set_clear_bot_ecs() {
+        let state = SharedState::new(AppConfig::default());
+        assert!(state.bot_ecs().is_none());
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = Arc::clone(&flag);
+        let handle = BotEcsHandle::new(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+        state.set_bot_ecs(handle);
+        assert!(state.bot_ecs().is_some());
+
+        state.clear_bot_ecs();
+        assert!(state.bot_ecs().is_none());
+    }
+
+    #[test]
+    fn test_bot_ecs_clone_invokes_same_closure() {
+        // Cloning the handle should share the same closure state.
+        let state = SharedState::new(AppConfig::default());
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = Arc::clone(&flag);
+        state.set_bot_ecs(BotEcsHandle::new(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        }));
+
+        let cloned = state.bot_ecs().expect("handle should be present");
+        cloned.write_app_exit();
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_request_disconnect_writes_appexit_when_ecs_present() {
+        let state = SharedState::new(AppConfig::default());
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = Arc::clone(&flag);
+        state.set_bot_ecs(BotEcsHandle::new(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        }));
+        state.request_disconnect();
+        // The closure should have been invoked, setting the flag.
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_request_disconnect_no_panic_when_ecs_absent() {
+        let state = SharedState::new(AppConfig::default());
+        // bot_ecs is None — request_disconnect should not panic.
+        state.request_disconnect();
+        assert!(state.is_disconnect_requested());
+    }
+
+    #[test]
+    fn test_clear_bot_ecs_no_panic_when_absent() {
+        let state = SharedState::new(AppConfig::default());
+        // Clearing when already None should not panic.
+        state.clear_bot_ecs();
+        assert!(state.bot_ecs().is_none());
     }
 }

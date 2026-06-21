@@ -207,7 +207,12 @@ async fn build_snapshot_inner(
 
     builder = builder.with_chunk_summary(chunk_summary);
 
-    Ok(builder.build())
+    let mut snapshot = builder.build();
+    // Populate `commands_enabled` from the player's permission level.
+    // OP level > 0 means commands are enabled; == 0 means disabled;
+    // unavailable (component not yet present) means unknown.
+    snapshot.commands_enabled = read_commands_enabled(bot);
+    Ok(snapshot)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -241,6 +246,16 @@ fn read_inventory(bot: &Client) -> Vec<InventorySlot> {
             }
         })
         .collect()
+}
+
+/// Read whether server commands are enabled for the bot.
+///
+/// Returns `Some(true)` if the player's permission level is > 0 (OP),
+/// `Some(false)` if it's 0 (no OP), or `None` if the `PermissionLevel`
+/// component isn't available yet (e.g. before joining the world).
+fn read_commands_enabled(bot: &Client) -> Option<bool> {
+    bot.get_component::<azalea::local_player::PermissionLevel>()
+        .map(|level| level.0 > 0)
 }
 
 fn block_state_to_name(block_state: azalea::block::BlockState) -> String {

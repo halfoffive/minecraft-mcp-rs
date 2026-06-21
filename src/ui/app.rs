@@ -21,7 +21,7 @@ use egui::Context;
 
 use crate::bot::connection::ConnectionManager;
 use crate::channel::{BotCommandReceiver, BotCommandSender};
-use crate::config::AppConfig;
+use crate::config::{AppConfig, McpTransport};
 use crate::state::SharedState;
 use crate::ui::{mcp_config, settings, status};
 
@@ -60,6 +60,10 @@ pub struct EditConfig {
     pub reconnect_initial_delay_ms: u64,
     pub reconnect_max_delay_ms: u64,
     pub command_timeout_secs: u64,
+    /// Bearer token presented by MCP clients over HTTP auth.
+    pub mcp_token: String,
+    /// Transport mechanism the MCP server uses to talk to clients.
+    pub mcp_transport: McpTransport,
 }
 
 impl From<&AppConfig> for EditConfig {
@@ -77,6 +81,8 @@ impl From<&AppConfig> for EditConfig {
             reconnect_initial_delay_ms: cfg.reconnect_initial_delay_ms,
             reconnect_max_delay_ms: cfg.reconnect_max_delay_ms,
             command_timeout_secs: cfg.command_timeout_secs,
+            mcp_token: cfg.mcp_token.clone(),
+            mcp_transport: cfg.mcp_transport,
         }
     }
 }
@@ -97,6 +103,8 @@ impl EditConfig {
             cfg.reconnect_initial_delay_ms = self.reconnect_initial_delay_ms;
             cfg.reconnect_max_delay_ms = self.reconnect_max_delay_ms;
             cfg.command_timeout_secs = self.command_timeout_secs;
+            cfg.mcp_token = self.mcp_token.clone();
+            cfg.mcp_transport = self.mcp_transport;
         });
     }
 }
@@ -235,7 +243,9 @@ impl App for MinecraftApp {
                 });
 
                 ui.collapsing("MCP Config", |ui| {
-                    mcp_config::mcp_config_panel(ui);
+                    if let Some(ref edit) = self.edit_config {
+                        mcp_config::mcp_config_panel(ui, edit);
+                    }
                 });
             });
         });

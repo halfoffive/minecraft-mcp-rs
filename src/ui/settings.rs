@@ -8,6 +8,7 @@
 
 use egui::{DragValue, TextEdit, Ui};
 
+use crate::config::McpTransport;
 use crate::state::SharedState;
 use crate::ui::app::EditConfig;
 
@@ -50,6 +51,29 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
         ui.label("Bind Port:");
         ui.add(DragValue::new(&mut edit.mcp_port).range(1..=65535));
     });
+    ui.horizontal(|ui| {
+        ui.label("Transport:");
+        egui::ComboBox::from_id_salt("mcp_transport_combo")
+            .selected_text(format!("{:?}", edit.mcp_transport))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut edit.mcp_transport, McpTransport::Http, "HTTP (remote)");
+                ui.selectable_value(
+                    &mut edit.mcp_transport,
+                    McpTransport::Stdio,
+                    "Stdio (subprocess)",
+                );
+            });
+    });
+    if edit.mcp_transport == McpTransport::Http {
+        ui.horizontal(|ui| {
+            ui.label("Token:");
+            ui.add(
+                TextEdit::singleline(&mut edit.mcp_token)
+                    .hint_text("Bearer token for HTTP auth")
+                    .desired_width(180.0),
+            );
+        });
+    }
 
     ui.separator();
 

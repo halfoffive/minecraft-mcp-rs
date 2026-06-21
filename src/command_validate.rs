@@ -6,7 +6,7 @@
 //! ranges, without consulting any external state.
 
 use crate::error::BotError;
-use crate::types::{BlockPos, BotCommand};
+use crate::types::{ActAction, BlockPos, BotCommand};
 
 // ── World bounds constants ────────────────────────────────────────────────
 
@@ -107,6 +107,57 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
             }
             Ok(())
         }
+
+        // ── v2 foundation variants ──────────────────────────────────────
+
+        // Smart movement and flight use the same position bounds as MoveTo.
+        BotCommand::SmartMove(pos) | BotCommand::FlyTo(pos) => validate_position(pos),
+
+        // Item pickup radius must be positive and capped at 64 blocks.
+        BotCommand::CollectItems(radius) => {
+            if *radius == 0 || *radius > 64 {
+                return Err(BotError::InvalidParams(format!(
+                    "CollectItems radius must be between 1 and 64, got {radius}"
+                )));
+            }
+            Ok(())
+        }
+
+        // Parameterless queries — always valid.
+        BotCommand::QueryServerInfo | BotCommand::QueryChatHistory => Ok(()),
+
+        // World view radius is capped at 32 chunks.
+        BotCommand::QueryWorldView(radius) => {
+            if *radius == 0 {
+                return Err(BotError::InvalidParams(format!(
+                    "QueryWorldView radius must be between 1 and 32, got {radius}"
+                )));
+            }
+            Ok(())
+        }
+
+        // Unified Act tool — delegate to the inner action's validation.
+        BotCommand::Act(action) => validate_act_action(action),
+    }
+}
+
+/// Validate an [`ActAction`] payload by delegating to the equivalent
+/// standalone command's validation.
+fn validate_act_action(action: &ActAction) -> Result<(), BotError> {
+    match action {
+        ActAction::Move { target }
+        | ActAction::SmartMove { target }
+        | ActAction::Fly { target } => validate_position(target),
+        ActAction::Mine { block_pos } => validate_position(block_pos),
+        ActAction::Attack { entity_id: _ } => Ok(()),
+        ActAction::CollectItems { radius } => {
+            if *radius == 0 || *radius > 64 {
+                return Err(BotError::InvalidParams(format!(
+                    "CollectItems radius must be between 1 and 64, got {radius}"
+                )));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -181,7 +232,7 @@ fn validate_position(pos: &BlockPos) -> Result<(), BotError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Direction, GameMode, ToolType};
+    use crate::types::{ActAction, Direction, GameMode, ToolType};
 
     // ── Position validation ─────────────────────────────────────────
 
@@ -631,12 +682,138 @@ mod tests {
         );
     }
 
-    // ── Exhaustive match on all 25 variants ────────────────────────
+    // ── v2 foundation variant validation ──────────────────────────
+
+    #[test]
+    fn test_smart_move_valid() {
+        let cmd = BotCommand::SmartMove(BlockPos::new(10, 64, 20));
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_smart_move_invalid_y() {
+        let cmd = BotCommand::SmartMove(BlockPos::new(0, 500, 0));
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_fly_to_valid() {
+        let cmd = BotCommand::FlyTo(BlockPos::new(0, 100, 0));
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_fly_to_invalid_x() {
+        let cmd = BotCommand::FlyTo(BlockPos::new(99_999_999, 64, 0));
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_collect_items_valid() {
+        for radius in 1..=64u32 {
+            let cmd = BotCommand::CollectItems(radius);
+            assert!(
+                validate_command(&cmd).is_ok(),
+                "CollectItems radius {radius} should be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn test_collect_items_zero() {
+        let cmd = BotCommand::CollectItems(0);
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_collect_items_too_large() {
+        let cmd = BotCommand::CollectItems(65);
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_query_server_info_valid() {
+        assert!(validate_command(&BotCommand::QueryServerInfo).is_ok());
+    }
+
+    #[test]
+    fn test_query_chat_history_valid() {
+        assert!(validate_command(&BotCommand::QueryChatHistory).is_ok());
+    }
+
+    #[test]
+    fn test_query_world_view_valid() {
+        for radius in 1..=32u8 {
+            let cmd = BotCommand::QueryWorldView(radius);
+            assert!(
+                validate_command(&cmd).is_ok(),
+                "QueryWorldView radius {radius} should be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn test_query_world_view_zero() {
+        let cmd = BotCommand::QueryWorldView(0);
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_act_move_valid() {
+        let cmd = BotCommand::Act(ActAction::Move {
+            target: BlockPos::new(10, 64, 20),
+        });
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_act_smart_move_invalid() {
+        let cmd = BotCommand::Act(ActAction::SmartMove {
+            target: BlockPos::new(0, 500, 0),
+        });
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_act_fly_valid() {
+        let cmd = BotCommand::Act(ActAction::Fly {
+            target: BlockPos::new(0, 200, 0),
+        });
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_act_mine_invalid() {
+        let cmd = BotCommand::Act(ActAction::Mine {
+            block_pos: BlockPos::new(0, -65, 0),
+        });
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_act_attack_valid() {
+        let cmd = BotCommand::Act(ActAction::Attack { entity_id: 42 });
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_act_collect_items_zero() {
+        let cmd = BotCommand::Act(ActAction::CollectItems { radius: 0 });
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_act_collect_items_valid() {
+        let cmd = BotCommand::Act(ActAction::CollectItems { radius: 16 });
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    // ── Exhaustive match on all 32 variants ────────────────────────
     //
     // These tests provide compile-time coverage: if a new BotCommand variant
     // is added, the compiler will flag these matches as non-exhaustive.
 
-    /// Count the number of variants �?returns 1 for any valid command.
+    /// Count the number of variants — returns 1 for any valid command.
     /// Exists purely as a compile-time check that all variants are handled.
     #[allow(unreachable_code)]
     fn count_variants(cmd: &BotCommand) -> u32 {
@@ -666,6 +843,14 @@ mod tests {
             BotCommand::QuerySelfInfo => 1,
             BotCommand::QueryInventory => 1,
             BotCommand::QueryChunkSummary => 1,
+            // ── v2 foundation variants ─────────────────────────────
+            BotCommand::SmartMove(_) => 1,
+            BotCommand::FlyTo(_) => 1,
+            BotCommand::CollectItems(_) => 1,
+            BotCommand::QueryServerInfo => 1,
+            BotCommand::QueryChatHistory => 1,
+            BotCommand::QueryWorldView(_) => 1,
+            BotCommand::Act(_) => 1,
         }
     }
 
@@ -713,6 +898,16 @@ mod tests {
             BotCommand::QuerySelfInfo,
             BotCommand::QueryInventory,
             BotCommand::QueryChunkSummary,
+            // ── v2 foundation variants ─────────────────────────────
+            BotCommand::SmartMove(BlockPos::new(0, 0, 0)),
+            BotCommand::FlyTo(BlockPos::new(0, 0, 0)),
+            BotCommand::CollectItems(8),
+            BotCommand::QueryServerInfo,
+            BotCommand::QueryChatHistory,
+            BotCommand::QueryWorldView(4),
+            BotCommand::Act(ActAction::Move {
+                target: BlockPos::new(0, 0, 0),
+            }),
         ]
     }
 }

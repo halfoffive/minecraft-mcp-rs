@@ -15,7 +15,8 @@
 This project bridges an LLM client (Claude Desktop, Cursor, etc.) to a live
 Minecraft game world. A Rust bot (backed by the [azalea] library) connects to
 your Minecraft server and exposes its abilities — moving, mining, building,
-inventory management, combat, and chatting — as MCP tools over stdio transport.
+inventory management, combat, and chatting — as MCP tools over **stdio** or
+**remote HTTP** (loopback-only, Bearer-token protected).
 
 The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 
@@ -23,13 +24,18 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 
 ## Features
 
-- **25+ MCP tools** organized into 7 domains
+- **30+ MCP tools** organized into 7 domains, plus a unified `act` tool
 - **Live world state** — the bot periodically snapshots its surroundings into a
   thread-safe `SharedState` readable by all tools
+- **Remote MCP HTTP server** — loopback-only (`127.0.0.1`), Bearer-token
+  protected; transport mode (stdio / HTTP) selectable in the UI
+- **AI vision for multimodal models** — `get_world_view` renders a top-down PNG
+  of nearby blocks and returns it as base64
+- **Smart movement & flight** — `smart_move` auto-jumps over 1-block gaps and
+  stops on larger obstacles; `fly_to` flies to a target in creative mode
 - **Desktop UI** (egui/eframe) — status panel with live stats, settings panel
-  to configure connection and bot parameters, and an MCP Config panel that
-  shows a copyable JSON config (with the executable's absolute path) for
-  Claude Desktop / Cursor
+  to configure connection, bot parameters, and MCP transport, plus an MCP
+  Config panel that shows a copyable JSON config for Claude Desktop / Cursor
 - **Auto-reconnect** — exponential backoff on disconnect; the command executor
   is cleanly aborted and re-started on each reconnect via a `ReceiverLease`
 - **Compound operations** — higher-level state machines (mine-and-collect)
@@ -48,13 +54,14 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 
 | Category | Tools |
 |----------|-------|
-| **Query** | `get_self_info`, `get_inventory`, `get_nearby_blocks`, `get_nearby_entities`, `get_chunk_summary`, `is_connected` |
-| **Movement** | `move_to`, `walk_direction`, `jump`, `teleport` |
+| **Query** | `get_self_info`, `get_inventory`, `get_nearby_blocks`, `get_nearby_entities`, `get_chunk_summary`, `is_connected`, `get_chat_history`, `get_server_info`, `get_world_view` |
+| **Movement** | `move_to`, `walk_direction`, `jump`, `teleport`, `smart_move`, `fly_to` |
 | **Block** | `break_block`, `place_block`, `use_item_on_block` |
-| **Item** | `drop_item`, `equip_tool`, `switch_hotbar_slot`, `use_item` |
+| **Item** | `drop_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items` |
 | **Container** | `open_container`, `take_from_container`, `put_into_container`, `close_container` |
 | **Combat** | `attack_entity`, `shield_block` |
 | **Chat** | `send_chat`, `execute_command`, `set_gamemode` |
+| **Unified** | `act` — one tool that can move, smart-move, fly, mine, attack, or collect items and returns an environment snapshot |
 
 ## Quick Start
 
@@ -76,8 +83,15 @@ cargo build
 cargo run
 ```
 
-This starts both the MCP server (on stdio) and the egui desktop UI. The MCP
-server listens on stdin/stdout — connect your MCP client accordingly.
+This starts both the MCP server and the egui desktop UI. Choose the MCP
+transport in the Settings panel:
+
+- **stdio** — the MCP server listens on stdin/stdout (default for Claude
+  Desktop / Cursor).
+- **HTTP** — the MCP server binds to `127.0.0.1` only; set the port and
+  Bearer token (defaults to the project name `minecraft-mcp-rs`). The MCP
+  Config panel generates the matching JSON config for copying into your MCP
+  client.
 
 By default the bot tries to connect to `127.0.0.1:25565` as `AI_Bot`. Tweak
 settings in the UI panel or via environment before startup (see Configuration).
@@ -103,6 +117,10 @@ settings and spawn the bot connection on a dedicated background thread.
 | `mc_address` | `127.0.0.1` | Minecraft server address |
 | `mc_port` | `25565` | Minecraft server port |
 | `ai_username` | `AI_Bot` | Bot in-game username |
+| `mcp_transport` | `Http` | MCP transport: `Stdio` or `Http` |
+| `mcp_address` | `127.0.0.1` | MCP HTTP bind address (loopback only) |
+| `mcp_port` | `3000` | MCP HTTP port |
+| `mcp_token` | `minecraft-mcp-rs` | Bearer token for HTTP transport |
 | `chunk_scan_radius` | `8` | Chunks to scan (1–16) |
 | `block_perception_radius` | `32` | Block awareness range (8–64) |
 | `snapshot_interval_ms` | `500` | World snapshot interval |
@@ -127,7 +145,7 @@ settings and spawn the bot connection on a dedicated background thread.
 └────────────┼─────────────────────────────────────┘
              │ reads
 ┌────────────┼─────────────────────────────────────┐
-│   MCP Server (rmcp, stdio transport)            │
+│   MCP Server (rmcp, stdio or HTTP transport)    │
 │  ┌──────────┐   ┌───────────────────────────┐   │
 │  │  Router  │──▶│ tools_query/movement/... │   │
 │  └────┬─────┘   └───────────────────────────┘   │
@@ -147,7 +165,7 @@ and a `BotCommand` channel (tokio mpsc + oneshot for response).
 
 ```
 src/
-  types.rs            — Shared data types (BlockPos, BotCommand, WorldSnapshot, …)
+  types.rs            — Shared data types (BlockPos, BotCommand, ActAction, …)
   error.rs            — BotError enum (actionable variants for AI agents)
   config.rs           — AppConfig + RunStats (atomic counters)
   state.rs            — SharedState thread-safe hub
@@ -160,8 +178,8 @@ src/
   channel.rs          — mpsc/oneshot command channel
   logging.rs          — tracing-subscriber (stderr only)
   bot/                — Bot lifecycle, events, commands, ops
-  mcp/                — MCP server + 7 tool modules
-  ui/                 — egui app shell, settings, status
+  mcp/                — MCP server + 8 tool modules (incl. act, render)
+  ui/                 — egui app shell, settings, status, mcp_config
 tests/
   integration.rs      — Mock-based end-to-end tests
   proptest.rs         — Property-based tests

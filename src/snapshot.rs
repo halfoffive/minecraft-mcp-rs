@@ -152,6 +152,7 @@ impl SnapshotBuilder {
             self_player,
             timestamp,
             chunk_summary,
+            commands_enabled: None,
         }
     }
 }
@@ -223,6 +224,7 @@ mod tests {
             },
             timestamp: 0,
             chunk_summary: vec![(0, 0)],
+            commands_enabled: None,
         }
     }
 

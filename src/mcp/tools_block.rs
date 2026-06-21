@@ -21,6 +21,19 @@ use crate::command_validate::validate_block_pos;
 use crate::state::SharedState;
 use crate::types::{BlockPos, BotCommand};
 
+// ── Tool descriptions (with Creative-mode hint) ───────────────────────────
+
+/// Hint appended to block-tool descriptions recommending Creative-mode
+/// alternatives for bulk building.
+pub const CREATIVE_MODE_HINT: &str =
+    "In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
+
+/// Full description for the `break_block` MCP tool.
+pub const BREAK_BLOCK_DESCRIPTION: &str = "Break a block at the given position. In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
+
+/// Full description for the `place_block` MCP tool.
+pub const PLACE_BLOCK_DESCRIPTION: &str = "Place a block at the given position. In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
+
 // ── Helper ──────────────────────────────────────────────────────────────────
 
 fn schema_from_json(v: Value) -> rmcp::schemars::Schema {
@@ -77,6 +90,8 @@ impl rmcp::schemars::JsonSchema for BreakBlockInput {
 /// [`BotCommand::BreakBlock`]. When `use_best_tool` is `true`, the
 /// response includes a flag so the bot executor can trigger the compound
 /// mine_block flow (tool selection → movement → break).
+///
+/// In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.
 pub async fn handle_break_block(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
@@ -160,6 +175,8 @@ impl rmcp::schemars::JsonSchema for PlaceBlockInput {
 /// [`BotCommand::PlaceBlock`] with the target position. The `item_slot`
 /// is encoded as `"slot:N"` in the block type field so the bot executor
 /// can resolve the actual block type from the player's inventory.
+///
+/// In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.
 pub async fn handle_place_block(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
@@ -571,5 +588,19 @@ mod tests {
         );
 
         responder.await.expect("responder should finish");
+    }
+
+    // ── Creative-mode hint in descriptions ─────────────────────────
+
+    #[test]
+    fn test_creative_hint_in_descriptions() {
+        assert!(
+            BREAK_BLOCK_DESCRIPTION.contains(CREATIVE_MODE_HINT),
+            "break_block description must contain the Creative-mode hint"
+        );
+        assert!(
+            PLACE_BLOCK_DESCRIPTION.contains(CREATIVE_MODE_HINT),
+            "place_block description must contain the Creative-mode hint"
+        );
     }
 }

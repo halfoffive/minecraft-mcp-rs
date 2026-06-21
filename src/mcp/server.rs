@@ -3,26 +3,44 @@
 //! Uses rmcp 1.7.0 with `#[tool_router]`/`#[tool_handler]` macros to define
 //! 25+ MCP tools. All logging goes to stderr via `tracing`.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::{
+    Router,
+    extract::{Request, State},
+    http::{HeaderMap, StatusCode},
+    middleware::{Next, from_fn_with_state},
+    response::{IntoResponse, Response},
+};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::wrapper::Parameters,
     model::{Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::io::stdio,
+    transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    },
 };
+use tokio::net::TcpListener;
 use tracing::{error, info};
 
 use crate::channel::BotCommandSender;
+use crate::mcp::tools_act::ActInput;
 use crate::mcp::tools_block::{BreakBlockInput, PlaceBlockInput, UseItemOnBlockInput};
 use crate::mcp::tools_chat::{ExecuteCommandInput, SendChatInput, SetGameModeInput};
 use crate::mcp::tools_combat::{AttackEntityInput, ShieldBlockInput};
 use crate::mcp::tools_container::{
     CloseContainerInput, OpenContainerInput, PutIntoContainerInput, TakeFromContainerInput,
 };
-use crate::mcp::tools_item::{DropItemInput, EquipToolInput, SwitchHotbarSlotInput, UseItemInput};
-use crate::mcp::tools_movement::{JumpInput, MoveToInput, TeleportInput, WalkDirectionInput};
+use crate::mcp::tools_item::{
+    CollectItemsInput, DropItemInput, EquipToolInput, SwitchHotbarSlotInput, UseItemInput,
+};
+use crate::mcp::tools_movement::{
+    FlyToInput, JumpInput, MoveToInput, SmartMoveInput, TeleportInput, WalkDirectionInput,
+};
+use crate::mcp::tools_query::GetWorldViewInput;
 use crate::state::SharedState;
 
 // ---------------------------------------------------------------------------
@@ -108,6 +126,33 @@ impl McpBotServer {
         crate::mcp::tools_query::is_connected(&self.state)
     }
 
+    #[tool(
+        description = "Returns recent chat messages (up to 10). Each message has sender and message fields.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_chat_history(&self) -> String {
+        crate::mcp::tools_chat::get_chat_history(&self.state)
+    }
+
+    #[tool(
+        description = "Reports whether commands are enabled on the server and the current gamemode. commands_enabled is true/false/null.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_server_info(&self) -> String {
+        crate::mcp::tools_query::get_server_info(&self.state)
+    }
+
+    #[tool(
+        description = "Renders a top-down PNG image of nearby blocks and entities. Returns base64 PNG for multimodal models. Radius 1-32.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_world_view(
+        &self,
+        Parameters(input): Parameters<GetWorldViewInput>,
+    ) -> rmcp::model::Content {
+        crate::mcp::tools_query::get_world_view(&self.state, input.radius)
+    }
+
     // ── Movement tools ───────────────────────────────────────
 
     #[tool(description = "Move the bot to a specific position")]
@@ -128,6 +173,22 @@ impl McpBotServer {
     #[tool(description = "Teleport the bot to a position (requires Creative mode)")]
     async fn teleport(&self, Parameters(input): Parameters<TeleportInput>) -> String {
         crate::mcp::tools_movement::handle_teleport(&self.state, &self.sender, input).await
+    }
+
+    #[tool(
+        description = "Smart movement toward target with auto-jump over 1-block obstacles. Stops on impassable obstacle and reports it.",
+        annotations(destructive_hint = true)
+    )]
+    async fn smart_move(&self, Parameters(input): Parameters<SmartMoveInput>) -> String {
+        crate::mcp::tools_movement::handle_smart_move(&self.state, &self.sender, input).await
+    }
+
+    #[tool(
+        description = "Creative mode only. Flies toward target in 3D. Stops on obstacle. Returns reached status.",
+        annotations(destructive_hint = true)
+    )]
+    async fn fly_to(&self, Parameters(input): Parameters<FlyToInput>) -> String {
+        crate::mcp::tools_movement::handle_fly_to(&self.state, &self.sender, input).await
     }
 
     // ── Block tools (destructive) ────────────────────────────
@@ -194,6 +255,14 @@ impl McpBotServer {
     )]
     async fn equip_tool(&self, Parameters(input): Parameters<EquipToolInput>) -> String {
         crate::mcp::tools_item::handle_equip_tool(&self.state, &self.sender, input).await
+    }
+
+    #[tool(
+        description = "Walks toward and picks up nearby dropped item entities within radius. Returns count collected.",
+        annotations(destructive_hint = true)
+    )]
+    async fn collect_items(&self, Parameters(input): Parameters<CollectItemsInput>) -> String {
+        crate::mcp::tools_item::handle_collect_items(&self.state, &self.sender, input).await
     }
 
     // ── Container tools (destructive) ────────────────────────
@@ -288,6 +357,16 @@ impl McpBotServer {
     ) -> String {
         crate::mcp::tools_chat::handle_set_game_mode(&self.sender, mode).await
     }
+
+    // ── Unified action tool ──────────────────────────────────
+
+    #[tool(
+        description = "Unified action tool. Executes one action and returns the result plus nearby blocks, entities, and self info for iterative mining/exploration loops.",
+        annotations(destructive_hint = true)
+    )]
+    async fn act(&self, Parameters(input): Parameters<ActInput>) -> String {
+        crate::mcp::tools_act::handle_act(&self.state, &self.sender, input).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +412,92 @@ pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
         Err(e) => {
             error!(error = %e, "MCP server failed");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP transport
+// ---------------------------------------------------------------------------
+
+/// Extract the Bearer token from an `Authorization` header value.
+///
+/// Returns `Some(token)` only when the header starts with `Bearer ` (case-sensitive
+/// per RFC 6750). The returned token is trimmed of surrounding whitespace.
+fn extract_bearer_token(header: &str) -> Option<&str> {
+    header.strip_prefix("Bearer ").map(str::trim)
+}
+
+/// Check whether the request's `Authorization` header carries the expected
+/// Bearer token.
+///
+/// Reads the expected token from `state.config().mcp_token` on every request so
+/// configuration changes take effect immediately.
+fn is_bearer_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
+    headers
+        .get("Authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(extract_bearer_token)
+        .is_some_and(|token| token == expected_token)
+}
+
+/// Axum middleware that enforces the configured Bearer token.
+///
+/// Returns 401 Unauthorized for missing or mismatched tokens. Valid requests
+/// are forwarded to the inner MCP streamable HTTP handler.
+async fn bearer_auth_middleware(
+    State(state): State<Arc<SharedState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let expected_token = state.read_config().mcp_token.clone();
+    if is_bearer_authorized(request.headers(), &expected_token) {
+        next.run(request).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+    }
+}
+
+/// Start the MCP server on the streamable HTTP transport.
+///
+/// Binds a TCP listener on `addr` (expected to be loopback), mounts the rmcp
+/// streamable HTTP service at `/mcp`, and wraps it with Bearer token
+/// authentication read live from [`SharedState::read_config`]. Runs until the
+/// process exits or the axum server encounters an unrecoverable error.
+pub async fn serve_http(state: Arc<SharedState>, sender: BotCommandSender, addr: SocketAddr) {
+    // The streamable HTTP service creates a fresh McpBotServer per session,
+    // so capture cheap clones of state and sender in the factory closure.
+    let state_for_factory = Arc::clone(&state);
+    let sender_for_factory = sender.clone();
+    let mcp_service: StreamableHttpService<McpBotServer, LocalSessionManager> =
+        StreamableHttpService::new(
+            move || {
+                Ok::<_, std::io::Error>(McpBotServer::new(
+                    Arc::clone(&state_for_factory),
+                    sender_for_factory.clone(),
+                ))
+            },
+            Arc::new(LocalSessionManager::default()),
+            StreamableHttpServerConfig::default(),
+        );
+
+    let middleware_state = Arc::clone(&state);
+    let app = Router::new()
+        .nest_service("/mcp", mcp_service)
+        .layer(from_fn_with_state(middleware_state, bearer_auth_middleware))
+        .with_state(state);
+
+    let listener = match TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            error!(error = %e, "Failed to bind MCP HTTP listener");
+            return;
+        }
+    };
+
+    info!("MCP server starting on HTTP at {addr}");
+
+    if let Err(e) = axum::serve(listener, app).await {
+        error!(error = %e, "MCP HTTP server error");
     }
 }
 
@@ -701,5 +866,60 @@ mod tests {
             }))
             .await;
         assert!(result.contains("Unknown tool type"));
+    }
+
+    // ── Bearer token helper tests ───────────────────────────────────────
+
+    #[test]
+    fn test_extract_bearer_token_valid() {
+        assert_eq!(extract_bearer_token("Bearer secret"), Some("secret"));
+        assert_eq!(
+            extract_bearer_token("Bearer minecraft-mcp-rs"),
+            Some("minecraft-mcp-rs")
+        );
+    }
+
+    #[test]
+    fn test_extract_bearer_token_trims_whitespace() {
+        assert_eq!(extract_bearer_token("Bearer  token  "), Some("token"));
+    }
+
+    #[test]
+    fn test_extract_bearer_token_rejects_missing_prefix() {
+        assert_eq!(extract_bearer_token("secret"), None);
+        assert_eq!(extract_bearer_token("Basic secret"), None);
+        assert_eq!(extract_bearer_token("bearer secret"), None);
+    }
+
+    #[test]
+    fn test_is_bearer_authorized_accepts_valid_token() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let expected = state.read_config().mcp_token.clone();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "Authorization",
+            format!("Bearer {expected}").parse().unwrap(),
+        );
+        assert!(is_bearer_authorized(&headers, &expected));
+    }
+
+    #[test]
+    fn test_is_bearer_authorized_rejects_wrong_token() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let expected = state.read_config().mcp_token.clone();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Bearer wrong".parse().unwrap());
+        assert!(!is_bearer_authorized(&headers, &expected));
+    }
+
+    #[test]
+    fn test_is_bearer_authorized_rejects_missing_header() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let expected = state.read_config().mcp_token.clone();
+
+        let headers = HeaderMap::new();
+        assert!(!is_bearer_authorized(&headers, &expected));
     }
 }

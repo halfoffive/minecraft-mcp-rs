@@ -303,6 +303,66 @@ pub async fn handle_equip_tool(
     }
 }
 
+// ── collect_items ──────────────────────────────────────────────────────────
+
+/// Input for the `collect_items` MCP tool.
+#[derive(Deserialize, Default)]
+pub struct CollectItemsInput {
+    pub radius: u32,
+}
+
+impl rmcp::schemars::JsonSchema for CollectItemsInput {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("CollectItemsInput")
+    }
+
+    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
+        schema_from_json(json!({
+            "type": "object",
+            "properties": {
+                "radius": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 64,
+                    "description": "Pickup radius in blocks (1-64). The bot walks toward dropped item entities within this radius."
+                }
+            },
+            "required": ["radius"],
+            "additionalProperties": false
+        }))
+    }
+}
+
+/// Handle `collect_items` MCP tool.
+///
+/// Validates `radius` is in `1..=64`, checks online status, then sends
+/// [`BotCommand::CollectItems`]. The bot walks toward dropped item entities
+/// within the radius; items are picked up automatically when the bot gets
+/// close enough.
+pub async fn handle_collect_items(
+    state: &Arc<SharedState>,
+    sender: &BotCommandSender,
+    input: CollectItemsInput,
+) -> String {
+    if input.radius < 1 || input.radius > 64 {
+        return format!(
+            r#"{{"success":false,"error":"radius must be 1-64, got {}"}}"#,
+            input.radius
+        );
+    }
+    if !state.is_online() {
+        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+    }
+
+    let cmd = BotCommand::CollectItems(input.radius);
+    match sender.send_command(cmd).await {
+        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
+            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
+        }),
+        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -514,5 +574,78 @@ mod tests {
     fn test_parse_tool_type_unknown() {
         assert_eq!(parse_tool_type("invalid"), None);
         assert_eq!(parse_tool_type(""), None);
+    }
+
+    // ── collect_items ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_collect_items_offline() {
+        let (state, sender) = setup();
+        let input = CollectItemsInput { radius: 8 };
+        let result = handle_collect_items(&state, &sender, input).await;
+        assert!(result.contains("not connected"));
+    }
+
+    #[tokio::test]
+    async fn test_collect_items_invalid_radius_zero() {
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = CollectItemsInput { radius: 0 };
+        let result = handle_collect_items(&state, &sender, input).await;
+        assert!(result.contains("radius must be 1-64"));
+        assert!(result.contains("got 0"));
+    }
+
+    #[tokio::test]
+    async fn test_collect_items_invalid_radius_too_large() {
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = CollectItemsInput { radius: 65 };
+        let result = handle_collect_items(&state, &sender, input).await;
+        assert!(result.contains("radius must be 1-64"));
+        assert!(result.contains("got 65"));
+    }
+
+    #[tokio::test]
+    async fn test_collect_items_valid_radius() {
+        let (state, sender) = make_echo_channel();
+        make_online(&state);
+        let input = CollectItemsInput { radius: 16 };
+        let result = handle_collect_items(&state, &sender, input).await;
+        let _: Value = serde_json::from_str(&result).expect("valid JSON");
+    }
+
+    #[tokio::test]
+    async fn test_collect_items_sends_correct_command() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        state.set_online(true);
+        let (sender, mut receiver) = create_command_channel(4);
+
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            assert!(
+                matches!(wrapped.command, BotCommand::CollectItems(16)),
+                "expected CollectItems(16), got: {:?}",
+                wrapped.command
+            );
+            wrapped
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "collected 3 items".into(),
+                    data: None,
+                }))
+                .expect("should respond");
+        });
+
+        let input = CollectItemsInput { radius: 16 };
+        let result = handle_collect_items(&state, &sender, input).await;
+        let json: Value = serde_json::from_str(&result).expect("valid JSON");
+        assert!(
+            json.get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        );
+        responder.await.expect("responder should finish");
     }
 }

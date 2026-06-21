@@ -7,7 +7,7 @@ use std::fmt;
 // ═══════════════════════════════════════════════════════════════
 
 /// A position in the Minecraft world.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct BlockPos {
     pub x: i32,
     pub y: i32,
@@ -104,8 +104,9 @@ impl fmt::Display for MaterialTier {
 // ═══════════════════════════════════════════════════════════════
 
 /// Minecraft game modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum GameMode {
+    #[default]
     Survival,
     Creative,
     Adventure,
@@ -183,6 +184,65 @@ pub enum BotCommand {
     QueryInventory,
     /// Query a summary of loaded chunks.
     QueryChunkSummary,
+    // ── v2 foundation: extended capabilities ──────────────────
+    /// Smart movement to a position with auto-jump enabled.
+    SmartMove(BlockPos),
+    /// Fly to a position (creative-mode flight).
+    FlyTo(BlockPos),
+    /// Collect nearby items within the given pickup radius (in blocks).
+    CollectItems(u32),
+    /// Query server info (e.g. whether commands are enabled).
+    QueryServerInfo,
+    /// Query recent chat history.
+    QueryChatHistory,
+    /// Render a top-down world view with the given radius (in chunks).
+    QueryWorldView(u8),
+    /// Unified action tool — dispatches one of the [`ActAction`] variants.
+    Act(ActAction),
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Unified Action Tool (Act)
+// ═══════════════════════════════════════════════════════════════
+
+/// Discriminated action payload for the unified `Act` tool.
+///
+/// Each variant corresponds to a single high-level bot action. The
+/// MCP `act` tool accepts this enum and dispatches to the appropriate
+/// handler, returning an [`ActResult`] with surrounding context.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub enum ActAction {
+    /// Move to the target position (basic pathfinder movement).
+    Move { target: BlockPos },
+    /// Move to the target position with auto-jump enabled.
+    SmartMove { target: BlockPos },
+    /// Fly to the target position (requires creative mode).
+    Fly { target: BlockPos },
+    /// Mine the block at the given position.
+    Mine { block_pos: BlockPos },
+    /// Attack the entity with the given ID.
+    Attack { entity_id: u32 },
+    /// Collect nearby items within the given radius (in blocks).
+    CollectItems { radius: u32 },
+}
+
+/// Structured result returned by the unified `Act` tool.
+///
+/// Always includes the player's own info and a snapshot of nearby
+/// blocks/entities so the LLM can reason about the outcome without
+/// issuing follow-up queries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ActResult {
+    /// Human-readable summary of the action outcome.
+    pub action_result: String,
+    /// Optional reason explaining why the action succeeded or failed.
+    pub reason: Option<String>,
+    /// Blocks near the player at the time the action completed.
+    pub nearby_blocks: Vec<BlockEntry>,
+    /// Entities near the player at the time the action completed.
+    pub nearby_entities: Vec<EntityEntry>,
+    /// The player's own state at the time the action completed.
+    pub self_info: SelfPlayer,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -242,6 +302,33 @@ pub struct WorldSnapshot {
     pub self_player: SelfPlayer,
     pub timestamp: u64,
     pub chunk_summary: Vec<(i32, i32)>,
+    /// Whether server commands are enabled for the bot (`None` if unknown).
+    ///
+    /// Populated by `QueryServerInfo`; `None` until the server reports it.
+    #[serde(default)]
+    pub commands_enabled: Option<bool>,
+}
+
+impl Default for WorldSnapshot {
+    fn default() -> Self {
+        Self {
+            blocks: Vec::new(),
+            entities: Vec::new(),
+            self_player: SelfPlayer {
+                uuid: String::new(),
+                username: String::new(),
+                position: BlockPos::new(0, 0, 0),
+                health: 0.0,
+                hunger: 0,
+                gamemode: GameMode::Survival,
+                held_item_slot: 0,
+                inventory: Vec::new(),
+            },
+            timestamp: 0,
+            chunk_summary: Vec::new(),
+            commands_enabled: None,
+        }
+    }
 }
 
 /// A single inventory slot entry.
@@ -253,7 +340,7 @@ pub struct InventorySlot {
 }
 
 /// Information about the local player.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SelfPlayer {
     pub uuid: String,
     pub username: String,
@@ -267,7 +354,7 @@ pub struct SelfPlayer {
 }
 
 /// A block entry in the world.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct BlockEntry {
     pub position: BlockPos,
     pub block_type: String,
@@ -275,7 +362,7 @@ pub struct BlockEntry {
 }
 
 /// An entity entry in the world.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EntityEntry {
     pub id: u32,
     pub uuid: String,
@@ -398,13 +485,13 @@ mod tests {
         assert_eq!(modes.len(), 4);
     }
 
-    // ── BotCommand: 25-variant contract ─────────────────────
+    // ── BotCommand: variant-count contract ──────────────────
 
     /// Exhaustive match on all BotCommand variants.
     /// The compiler will flag this match as non-exhaustive if a new
     /// variant is added, serving as a compile-time check.
     #[allow(unreachable_code)]
-    fn require_exactly_25_variants(cmd: &BotCommand) -> u32 {
+    fn require_all_variants(cmd: &BotCommand) -> u32 {
         match cmd {
             BotCommand::MoveTo(_) => 1,
             BotCommand::WalkDirection(_, _) => 1,
@@ -431,17 +518,25 @@ mod tests {
             BotCommand::QuerySelfInfo => 1,
             BotCommand::QueryInventory => 1,
             BotCommand::QueryChunkSummary => 1,
+            BotCommand::SmartMove(_) => 1,
+            BotCommand::FlyTo(_) => 1,
+            BotCommand::CollectItems(_) => 1,
+            BotCommand::QueryServerInfo => 1,
+            BotCommand::QueryChatHistory => 1,
+            BotCommand::QueryWorldView(_) => 1,
+            BotCommand::Act(_) => 1,
         }
     }
 
     #[test]
-    fn test_bot_command_exactly_25_variants() {
+    fn test_bot_command_variant_count() {
+        // 25 original variants + 7 v2 foundation variants = 32 total.
         let cmds = all_bot_commands();
         // Verify each variant returns 1 from the exhaustive match
         for cmd in &cmds {
-            assert_eq!(require_exactly_25_variants(cmd), 1);
+            assert_eq!(require_all_variants(cmd), 1);
         }
-        assert_eq!(cmds.len(), 25);
+        assert_eq!(cmds.len(), 32);
     }
 
     #[test]
@@ -649,6 +744,7 @@ mod tests {
             },
             timestamp: 1234567890,
             chunk_summary: vec![(0, 0), (1, 0)],
+            commands_enabled: Some(true),
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let deserialized: WorldSnapshot = serde_json::from_str(&json).unwrap();
@@ -657,6 +753,13 @@ mod tests {
         assert_eq!(deserialized.self_player.username, "Player");
         assert_eq!(deserialized.timestamp, 1234567890);
         assert_eq!(deserialized.chunk_summary, vec![(0, 0), (1, 0)]);
+        assert_eq!(deserialized.commands_enabled, Some(true));
+    }
+
+    #[test]
+    fn test_world_snapshot_default_commands_enabled_none() {
+        let snap = WorldSnapshot::default();
+        assert_eq!(snap.commands_enabled, None);
     }
 
     #[test]
@@ -759,6 +862,16 @@ mod tests {
             BotCommand::QuerySelfInfo,
             BotCommand::QueryInventory,
             BotCommand::QueryChunkSummary,
+            // ── v2 foundation variants ─────────────────────────
+            BotCommand::SmartMove(BlockPos::new(0, 0, 0)),
+            BotCommand::FlyTo(BlockPos::new(0, 0, 0)),
+            BotCommand::CollectItems(8),
+            BotCommand::QueryServerInfo,
+            BotCommand::QueryChatHistory,
+            BotCommand::QueryWorldView(4),
+            BotCommand::Act(ActAction::Move {
+                target: BlockPos::new(0, 0, 0),
+            }),
         ]
     }
 }
