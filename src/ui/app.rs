@@ -23,6 +23,7 @@ use crate::bot::connection::ConnectionManager;
 use crate::channel::{BotCommandReceiver, BotCommandSender};
 use crate::config::{AppConfig, McpTransport};
 use crate::state::SharedState;
+use crate::ui::i18n::Language;
 use crate::ui::{mcp_config, settings, status};
 
 /// Main egui application shell.
@@ -64,6 +65,8 @@ pub struct EditConfig {
     pub mcp_token: String,
     /// Transport mechanism the MCP server uses to talk to clients.
     pub mcp_transport: McpTransport,
+    /// UI display language (mirrors [`AppConfig::language`]).
+    pub language: Language,
 }
 
 impl From<&AppConfig> for EditConfig {
@@ -83,6 +86,7 @@ impl From<&AppConfig> for EditConfig {
             command_timeout_secs: cfg.command_timeout_secs,
             mcp_token: cfg.mcp_token.clone(),
             mcp_transport: cfg.mcp_transport,
+            language: cfg.language,
         }
     }
 }
@@ -105,6 +109,7 @@ impl EditConfig {
             cfg.command_timeout_secs = self.command_timeout_secs;
             cfg.mcp_token = self.mcp_token.clone();
             cfg.mcp_transport = self.mcp_transport;
+            cfg.language = self.language;
         });
     }
 }
@@ -221,32 +226,53 @@ impl App for MinecraftApp {
     /// in a `CentralPanel` via `show_inside` to get the standard background
     /// and margins.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // ── Per-frame language sync ─────────────────────────────────
+        // Keep the active i18n language in lock-step with the persisted
+        // AppConfig value.  Cheap RwLock write, only fires when the value
+        // actually changes (e.g. after a fresh config load on startup or
+        // when the user applies edits).  The settings panel also calls
+        // `i18n::set` directly when the dropdown changes so the new
+        // language applies on the next frame without a reconnect.
+        let cfg_lang = self.state.read_config().language;
+        if crate::ui::i18n::current() != cfg_lang {
+            crate::ui::i18n::set(cfg_lang);
+        }
+
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            ui.heading("Minecraft MCP Server");
+            ui.heading(crate::ui::i18n::tr(crate::ui::i18n::TextKey::AppTitle));
             ui.separator();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.collapsing("Settings", |ui| {
-                    if let Some(ref mut edit) = self.edit_config {
-                        let connect_clicked = settings::settings_panel(ui, &self.state, edit);
+                ui.collapsing(
+                    crate::ui::i18n::tr(crate::ui::i18n::TextKey::Settings),
+                    |ui| {
+                        if let Some(ref mut edit) = self.edit_config {
+                            let connect_clicked = settings::settings_panel(ui, &self.state, edit);
 
-                        if connect_clicked {
-                            // Persist edits before connecting.
-                            edit.apply(&self.state);
-                            self.connect_bot();
+                            if connect_clicked {
+                                // Persist edits before connecting.
+                                edit.apply(&self.state);
+                                self.connect_bot();
+                            }
                         }
-                    }
-                });
+                    },
+                );
 
-                ui.collapsing("Status", |ui| {
-                    status::status_panel(ui, &self.state);
-                });
+                ui.collapsing(
+                    crate::ui::i18n::tr(crate::ui::i18n::TextKey::Status),
+                    |ui| {
+                        status::status_panel(ui, &self.state);
+                    },
+                );
 
-                ui.collapsing("MCP Config", |ui| {
-                    if let Some(ref edit) = self.edit_config {
-                        mcp_config::mcp_config_panel(ui, edit);
-                    }
-                });
+                ui.collapsing(
+                    crate::ui::i18n::tr(crate::ui::i18n::TextKey::McpConfig),
+                    |ui| {
+                        if let Some(ref edit) = self.edit_config {
+                            mcp_config::mcp_config_panel(ui, edit);
+                        }
+                    },
+                );
             });
         });
     }

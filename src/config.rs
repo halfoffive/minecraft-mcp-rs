@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
+use crate::ui::i18n::Language;
+
 // ---------------------------------------------------------------------------
 // McpTransport — transport selection for the MCP server
 // ---------------------------------------------------------------------------
@@ -76,6 +78,9 @@ pub struct AppConfig {
     /// (default: [`McpTransport::Http`]).
     #[serde(default)]
     pub mcp_transport: McpTransport,
+    /// UI display language (default: [`Language::En`]).
+    #[serde(default)]
+    pub language: Language,
 }
 
 /// Serde default for [`AppConfig::mcp_token`].
@@ -100,6 +105,7 @@ impl Default for AppConfig {
             command_timeout_secs: 30,
             mcp_token: default_mcp_token(),
             mcp_transport: McpTransport::default(),
+            language: Language::default(),
         }
     }
 }
@@ -212,6 +218,39 @@ mod tests {
     #[test]
     fn test_mcp_transport_default_is_http() {
         assert_eq!(McpTransport::default(), McpTransport::Http);
+    }
+
+    // -- Language field -----------------------------------------------------
+
+    #[test]
+    fn test_default_config_language() {
+        let config = AppConfig::default();
+        assert_eq!(config.language, Language::En);
+    }
+
+    #[test]
+    fn test_old_config_without_language_deserializes() {
+        // A JSON payload lacking the `language` field (as written by older
+        // binaries before i18n existed) must still deserialize, with the
+        // field falling back to its `#[serde(default)]` value.
+        let json = r#"{
+            "mc_address": "127.0.0.1",
+            "mc_port": 25565,
+            "ai_username": "AI_Bot",
+            "mcp_address": "127.0.0.1",
+            "mcp_port": 3000,
+            "task_name": "mining",
+            "chunk_scan_radius": 8,
+            "block_perception_radius": 32,
+            "snapshot_interval_ms": 500,
+            "reconnect_initial_delay_ms": 5000,
+            "reconnect_max_delay_ms": 60000,
+            "command_timeout_secs": 30,
+            "mcp_token": "minecraft-mcp-rs",
+            "mcp_transport": "Http"
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).expect("must deserialize");
+        assert_eq!(config.language, Language::En);
     }
 
     #[test]

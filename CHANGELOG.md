@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **UI internationalization (i18n):** desktop UI now supports English and
+  Simplified Chinese, switchable at runtime via a Language dropdown in the
+  Settings panel (takes effect next frame, no reconnect needed). Translation
+  strings live in a functional one-file-per-language module
+  (`src/ui/i18n/{en,zh_cn}.rs`) with a thread-safe `tr()` lookup.
+- **CJK system font auto-loading:** on startup the app probes the platform's
+  default CJK font (Windows `msyh.ttc`, macOS `PingFang.ttc`, Linux
+  Noto/WenQuanYi) and injects it into egui `FontDefinitions` so Chinese text
+  renders without manual font setup. Falls back to the default font with a
+  `warn` log if none is found.
+- **`AppConfig::language` field** (`Language::En` default, `#[serde(default)]`
+  for backward-compatible deserialization of older config files).
+- **Cross-platform multi-architecture CI:** `.github/workflows/build.yml`
+  builds the release binary for Windows / macOS / Linux × x86_64 / aarch64
+  (native ARM runners) and uploads per-target artifacts.
+- **VitePress documentation site** under `docs/` with English + Simplified
+  Chinese locales (mirrors the vuejs/vitepress config split pattern).
+- **GitHub Pages deployment workflow** `.github/workflows/deploy-docs.yml`
+  builds the VitePress site with Node 20 and deploys via
+  `actions/deploy-pages@v4`.
+
+### Changed
+
+- All hardcoded English strings in `app.rs`, `settings.rs`, `status.rs`, and
+  `mcp_config.rs` now route through `i18n::tr()`. MCP tool descriptions and
+  JSON field names remain English (external API contract).
+
 - Remote MCP HTTP server (`transport-streamable-http-server` feature):
   binds to `127.0.0.1` only, Bearer-token authenticated, port/token configurable
   in the UI. Default token is the project name `minecraft-mcp-rs`.

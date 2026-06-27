@@ -19,3 +19,8 @@ rustc-ice-*.txt
 # Local patches for dependency overrides; not committed to git.
 patches/rmcp/
 patches/rsa/
+
+# VitePress docs
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
