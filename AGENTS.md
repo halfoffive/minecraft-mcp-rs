@@ -56,7 +56,12 @@ src/
     render.rs         — Top-down PNG world rendering for `get_world_view`
   ui/                 — Desktop UI
     app.rs            — egui app shell
-    settings.rs       — Settings panel (includes MCP transport / port / token)
+    fonts.rs          — CJK system font auto-detection + injection into egui FontDefinitions
+    i18n/             — UI internationalization (functional, one file per language)
+      mod.rs          — Language enum, TextKey enum, thread-safe current()/set()/tr()
+      en.rs           — English lookup table
+      zh_cn.rs        — Simplified Chinese lookup table
+    settings.rs       — Settings panel (includes MCP transport / port / token / language)
     status.rs         — Status panel with live stats
     mcp_config.rs     — Copyable, live-generated MCP client JSON config
 tests/
@@ -90,3 +95,7 @@ tests/
 - **Snapshot building:** `handle_tick` delegates to `SnapshotUpdater::update_from_tick` — the inline `build_and_update_snapshot` and helper functions were deleted from `events.rs` to avoid duplication with `snapshot_updater.rs`.
 - **Mutex poisoning recovery**: Extended from `SharedState` to all shared mutexes (including `channel.rs` command receiver slot and `bot/events.rs` executor handle). All use `.unwrap_or_else(|e| e.into_inner())` to prevent cascade crashes.
 - **Command timeout:** `BotCommandSender::with_timeout` honours `AppConfig::command_timeout_secs`; `main.rs` wires the configured value at startup.
+- **UI i18n:** Functional, one-file-per-language module under `src/ui/i18n/`. `Language` enum (`En`, `ZhCn`) with `Default = En`; `TextKey` enum enumerates all UI strings; `tr(key) -> &'static str` is a pure dispatch to the current language's `lookup`. Current language is held in a `static RwLock<Language>` (`current()`/`set()`). `AppConfig::language` persists the choice (`#[serde(default)]` for backward compat). The Settings panel Language dropdown calls `i18n::set()` on change for next-frame effect (no reconnect). MCP tool descriptions and JSON field names stay English (external API contract).
+- **CJK fonts:** `src/ui/fonts.rs::install_system_cjk_fonts(ctx)` probes the platform default CJK font (Windows `msyh.ttc`, macOS `PingFang.ttc`, Linux Noto/WenQuanYi) at startup and injects it into egui `FontDefinitions` (prepended to `Proportional`, appended to `Monospace`). Falls back to the default font with a `warn` log if none found — never panics. Called once in the eframe creation closure.
+- **CI (build):** `.github/workflows/build.yml` matrix-builds the release binary for Windows/macOS/Linux × x86_64/aarch64 using native ARM runners (`ubuntu-24.04-arm`, `macos-14`, `windows-11-arm`). Artifacts named `minecraft-mcp-rs-<os>-<arch>`.
+- **Docs (VitePress):** `docs/` holds a bilingual (English + 简体中文) VitePress site. Config split mirrors vuejs/vitepress: `config/index.ts` assembles `locales` (root=EN, `zh`=ZH); `en.ts`/`zh.ts` hold per-locale nav/sidebar/theme text. `base` reads `BASE_PATH` env var (default `/minecraft-mcp-rs/`) for GitHub Pages project sites. `.github/workflows/deploy-docs.yml` builds with Node 20 and deploys via `actions/deploy-pages@v4`. Run locally: `npm install && npm run docs:dev`.

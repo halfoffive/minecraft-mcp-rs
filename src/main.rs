@@ -35,6 +35,11 @@ fn main() {
     // only `send` operations (which are async) need the runtime.
     // ══════════════════════════════════════════════════════════════════
     let config = AppConfig::default();
+    // Set the active i18n language from the persisted/default config BEFORE
+    // constructing any UI strings (notably the window title passed to
+    // `eframe::run_native` below).  This ensures the title and all UI text
+    // honour the user's saved language from the very first frame.
+    minecraft_mcp_rs::ui::i18n::set(config.language);
     let state = Arc::new(SharedState::new(config.clone()));
     let (sender, receiver) = channel::create_command_channel(64);
     // Honour the user-configurable command timeout (editable in the UI).
@@ -100,9 +105,19 @@ fn main() {
     };
 
     eframe::run_native(
-        "Minecraft MCP Server",
+        minecraft_mcp_rs::ui::i18n::tr(minecraft_mcp_rs::ui::i18n::TextKey::AppTitle),
         native_options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            // Install the platform-default CJK system font so Simplified
+            // Chinese characters render correctly (egui's bundled fonts
+            // are Latin-only).  Falls back to the default with a warning
+            // if no CJK font is installed on the host.
+            minecraft_mcp_rs::ui::fonts::install_system_cjk_fonts(&cc.egui_ctx);
+            // Re-sync the i18n language from the persisted config in case
+            // anything changed between the early `set()` call above and
+            // the egui closure firing.
+            let lang = state_for_egui.read_config().language;
+            minecraft_mcp_rs::ui::i18n::set(lang);
             Ok(Box::new(MinecraftApp::new(
                 state_for_egui,
                 sender_for_egui,

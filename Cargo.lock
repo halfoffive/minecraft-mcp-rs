@@ -5054,6 +5054,7 @@ dependencies = [
  "http-body-util",
  "pastey 0.2.3",
  "pin-project-lite",
+ "rand 0.10.0-rc.7",
  "rmcp-macros",
  "schemars",
  "serde",
