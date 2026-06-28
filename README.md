@@ -25,6 +25,9 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 ## Features
 
 - **30+ MCP tools** organized into 7 domains, plus a unified `act` tool
+- **Bilingual UI (English / 简体中文)** — switch languages at runtime in the
+  Settings panel; CJK system fonts are auto-detected so Chinese renders
+  out of the box
 - **Live world state** — the bot periodically snapshots its surroundings into a
   thread-safe `SharedState` readable by all tools
 - **Remote MCP HTTP server** — loopback-only (`127.0.0.1`), Bearer-token
@@ -62,6 +65,32 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 | **Combat** | `attack_entity`, `shield_block` |
 | **Chat** | `send_chat`, `execute_command`, `set_gamemode` |
 | **Unified** | `act` — one tool that can move, smart-move, fly, mine, attack, or collect items and returns an environment snapshot |
+
+## Documentation
+
+A bilingual (English / 简体中文) documentation site built with VitePress is
+available. After enabling GitHub Pages on the repository, it is served at
+`https://<user>.github.io/minecraft-mcp-rs/`.
+
+To run the docs locally:
+
+```bash
+npm install
+npm run docs:dev      # dev server at http://localhost:5173
+npm run docs:build    # production build into docs/.vitepress/dist
+```
+
+## Language / 语言切换
+
+The desktop UI supports **English** and **简体中文**. Pick a language from the
+**Language** dropdown in the Settings panel — the change takes effect on the
+next frame without reconnecting. On startup the app auto-detects the system's
+default CJK font (Windows `msyh.ttc`, macOS `PingFang.ttc`, Linux Noto /
+WenQuanYi) so Chinese text renders correctly without manual font setup.
+
+桌面 UI 支持 **英文** 与 **简体中文**。在"设置"面板的"语言"下拉框中切换，下一帧即
+生效，无需重连。启动时会自动探测系统默认中文字体（Windows `msyh.ttc`、macOS
+`PingFang.ttc`、Linux Noto / 文泉驿），无需手动安装字体即可正常显示中文。
 
 ## Quick Start
 
@@ -105,6 +134,22 @@ cargo test --test integration  # mock-based integration tests
 cargo test --test proptest     # property-based tests
 ```
 
+## Dependency Patches
+
+The repository includes two small, tracked patches under `patches/` to resolve
+upstream dependency conflicts that block a clean build:
+
+- `patches/rmcp` — based on `rmcp 1.8.0` (Apache-2.0). Downgrades the optional
+  `rand` dependency from `0.10` to `0.9` so it does not conflict with
+  `azalea-crypto`'s pinned `rand_core = "=0.10.0-rc-5"`.
+- `patches/rsa` — based on `rsa 0.10.0-rc.13` (MIT OR Apache-2.0). Adjusts
+  `src/encoding.rs` to use the tuple variant `pkcs8::Error::KeyMalformed(...)`
+  required by `pkcs8 0.11.0`.
+
+These directories are committed to git and are referenced by the
+`[patch.crates-io]` section in `Cargo.toml`. Do not add them to `.gitignore`;
+CI and other clones need them on disk to resolve dependencies.
+
 ## Configuration
 
 All settings have sensible defaults and can be changed at runtime through the
@@ -121,6 +166,7 @@ settings and spawn the bot connection on a dedicated background thread.
 | `mcp_address` | `127.0.0.1` | MCP HTTP bind address (loopback only) |
 | `mcp_port` | `3000` | MCP HTTP port |
 | `mcp_token` | `minecraft-mcp-rs` | Bearer token for HTTP transport |
+| `language` | `En` | UI language: `En` or `ZhCn` |
 | `chunk_scan_radius` | `8` | Chunks to scan (1–16) |
 | `block_perception_radius` | `32` | Block awareness range (8–64) |
 | `snapshot_interval_ms` | `500` | World snapshot interval |

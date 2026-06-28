@@ -1,0 +1,76 @@
+# Builds the release binary for Windows/macOS/Linux on both x86_64 and aarch64
+# using native ARM runners where available.
+name: Build (multi-platform, multi-arch)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            label: linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            label: linux-aarch64
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            label: macos-x86_64
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            label: macos-aarch64
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            label: windows-x86_64
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            label: windows-aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.label }}
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Strip binary
+        if: runner.os != 'Windows'
+        run: strip target/release/minecraft-mcp-rs
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/release/minecraft-mcp-rs.exe" "minecraft-mcp-rs-${{ matrix.label }}.exe"
+          else
+            cp "target/release/minecraft-mcp-rs" "minecraft-mcp-rs-${{ matrix.label }}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-mcp-rs-${{ matrix.label }}
+          path: minecraft-mcp-rs-${{ matrix.label }}*
+          if-no-files-found: error
