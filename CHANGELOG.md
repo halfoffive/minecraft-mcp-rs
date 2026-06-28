@@ -79,6 +79,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI build failure:** `patches/rmcp/` and `patches/rsa/` are now tracked in
+  git and included in the repository. Previously they were ignored, causing
+  GitHub Actions `cargo build --release --locked` to fail with
+  "failed to load source for dependency `rmcp`" because the `[patch.crates-io]`
+  path dependencies did not exist in the CI checkout.
 - Disconnect now works reliably: `request_disconnect` writes `AppExit::Success`
   into the bot ECS, causing `ClientBuilder::start()` to return and the connect
   loop to exit.

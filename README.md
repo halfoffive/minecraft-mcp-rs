@@ -134,6 +134,22 @@ cargo test --test integration  # mock-based integration tests
 cargo test --test proptest     # property-based tests
 ```
 
+## Dependency Patches
+
+The repository includes two small, tracked patches under `patches/` to resolve
+upstream dependency conflicts that block a clean build:
+
+- `patches/rmcp` — based on `rmcp 1.8.0` (Apache-2.0). Downgrades the optional
+  `rand` dependency from `0.10` to `0.9` so it does not conflict with
+  `azalea-crypto`'s pinned `rand_core = "=0.10.0-rc-5"`.
+- `patches/rsa` — based on `rsa 0.10.0-rc.13` (MIT OR Apache-2.0). Adjusts
+  `src/encoding.rs` to use the tuple variant `pkcs8::Error::KeyMalformed(...)`
+  required by `pkcs8 0.11.0`.
+
+These directories are committed to git and are referenced by the
+`[patch.crates-io]` section in `Cargo.toml`. Do not add them to `.gitignore`;
+CI and other clones need them on disk to resolve dependencies.
+
 ## Configuration
 
 All settings have sensible defaults and can be changed at runtime through the
