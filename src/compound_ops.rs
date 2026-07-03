@@ -125,11 +125,16 @@ impl MineBlockOperation {
 pub struct PlaceBlockOperation {
     pub target: BlockPos,
     pub block_type: String,
+    pub tool: ToolType,
 }
 
 impl PlaceBlockOperation {
-    pub fn new(target: BlockPos, block_type: String) -> Self {
-        Self { target, block_type }
+    pub fn new(target: BlockPos, block_type: String, tool: ToolType) -> Self {
+        Self {
+            target,
+            block_type,
+            tool,
+        }
     }
 
     pub fn advance(&self, state: OperationState, event: OperationEvent) -> OperationState {
@@ -159,6 +164,7 @@ impl PlaceBlockOperation {
 
     pub fn current_action(&self, state: &OperationState) -> Option<BotCommand> {
         match state {
+            OperationState::EquippingTool => Some(BotCommand::EquipTool(self.tool)),
             OperationState::MovingToTarget => Some(BotCommand::MoveTo(self.target)),
             OperationState::ExecutingAction => {
                 Some(BotCommand::PlaceBlock(self.target, self.block_type.clone()))
@@ -457,7 +463,7 @@ mod tests {
 
     #[test]
     fn test_place_block_happy_path() {
-        let op = PlaceBlockOperation::new(test_pos(), "stone".into());
+        let op = PlaceBlockOperation::new(test_pos(), "stone".into(), ToolType::Hand);
         let mut state = OperationState::Idle;
 
         state = op.advance(state, OperationEvent::Start);
@@ -475,8 +481,12 @@ mod tests {
 
     #[test]
     fn test_place_block_current_actions() {
-        let op = PlaceBlockOperation::new(test_pos(), "dirt".into());
+        let op = PlaceBlockOperation::new(test_pos(), "dirt".into(), ToolType::Hand);
 
+        assert_eq!(
+            op.current_action(&OperationState::EquippingTool),
+            Some(BotCommand::EquipTool(ToolType::Hand))
+        );
         assert_eq!(
             op.current_action(&OperationState::MovingToTarget),
             Some(BotCommand::MoveTo(test_pos()))
@@ -485,7 +495,6 @@ mod tests {
             op.current_action(&OperationState::ExecutingAction),
             Some(BotCommand::PlaceBlock(test_pos(), "dirt".into()))
         );
-        assert_eq!(op.current_action(&OperationState::EquippingTool), None);
         assert_eq!(op.current_action(&OperationState::Idle), None);
         assert_eq!(op.current_action(&OperationState::Completed), None);
     }
@@ -494,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_place_block_fails_from_idle() {
-        let op = PlaceBlockOperation::new(test_pos(), "stone".into());
+        let op = PlaceBlockOperation::new(test_pos(), "stone".into(), ToolType::Hand);
         let err = test_err();
         let state = op.advance(OperationState::Idle, OperationEvent::Failed(err.clone()));
         assert_eq!(state, OperationState::Failed(err));
@@ -502,7 +511,7 @@ mod tests {
 
     #[test]
     fn test_place_block_fails_from_equipping() {
-        let op = PlaceBlockOperation::new(test_pos(), "stone".into());
+        let op = PlaceBlockOperation::new(test_pos(), "stone".into(), ToolType::Hand);
         let err = test_err();
         let state = op.advance(
             OperationState::EquippingTool,
@@ -513,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_place_block_fails_from_moving() {
-        let op = PlaceBlockOperation::new(test_pos(), "stone".into());
+        let op = PlaceBlockOperation::new(test_pos(), "stone".into(), ToolType::Hand);
         let err = test_err();
         let state = op.advance(
             OperationState::MovingToTarget,
@@ -524,7 +533,7 @@ mod tests {
 
     #[test]
     fn test_place_block_fails_from_executing() {
-        let op = PlaceBlockOperation::new(test_pos(), "stone".into());
+        let op = PlaceBlockOperation::new(test_pos(), "stone".into(), ToolType::Hand);
         let err = test_err();
         let state = op.advance(
             OperationState::ExecutingAction,
@@ -535,14 +544,14 @@ mod tests {
 
     #[test]
     fn test_place_block_completed_is_sticky() {
-        let op = PlaceBlockOperation::new(test_pos(), "stone".into());
+        let op = PlaceBlockOperation::new(test_pos(), "stone".into(), ToolType::Hand);
         let state = op.advance(OperationState::Completed, OperationEvent::Start);
         assert_eq!(state, OperationState::Completed);
     }
 
     #[test]
     fn test_place_block_failed_is_sticky() {
-        let op = PlaceBlockOperation::new(test_pos(), "stone".into());
+        let op = PlaceBlockOperation::new(test_pos(), "stone".into(), ToolType::Hand);
         let err = test_err();
         let failed = OperationState::Failed(err);
         let state = op.advance(failed.clone(), OperationEvent::Start);
@@ -551,7 +560,7 @@ mod tests {
 
     #[test]
     fn test_place_block_invalid_transition_stays() {
-        let op = PlaceBlockOperation::new(test_pos(), "stone".into());
+        let op = PlaceBlockOperation::new(test_pos(), "stone".into(), ToolType::Hand);
         let state = op.advance(OperationState::Idle, OperationEvent::Arrived);
         assert_eq!(state, OperationState::Idle);
     }
@@ -731,7 +740,7 @@ mod tests {
     #[test]
     fn test_place_block_with_different_types() {
         let pos = BlockPos::new(1, 2, 3);
-        let op = PlaceBlockOperation::new(pos, "oak_planks".into());
+        let op = PlaceBlockOperation::new(pos, "oak_planks".into(), ToolType::Hand);
         assert_eq!(
             op.current_action(&OperationState::ExecutingAction),
             Some(BotCommand::PlaceBlock(pos, "oak_planks".into()))
@@ -774,7 +783,7 @@ mod tests {
 
     #[test]
     fn test_all_states_are_reachable_in_place_block() {
-        let op = PlaceBlockOperation::new(test_pos(), "cobblestone".into());
+        let op = PlaceBlockOperation::new(test_pos(), "cobblestone".into(), ToolType::Hand);
         let mut state = OperationState::Idle;
 
         state = op.advance(state, OperationEvent::Start);

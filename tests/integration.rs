@@ -144,7 +144,8 @@ async fn test_full_mcp_cycle_initialize_and_query() {
     });
 
     let chat_response =
-        minecraft_mcp_rs::mcp::tools_chat::handle_send_chat(&sender, "Hello World".into()).await;
+        minecraft_mcp_rs::mcp::tools_chat::handle_send_chat(&state, &sender, "Hello World".into())
+            .await;
     assert!(chat_response.contains("message sent"));
 
     responder.await.expect("responder should complete");

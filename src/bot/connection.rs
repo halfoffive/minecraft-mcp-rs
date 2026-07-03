@@ -92,7 +92,10 @@ impl ConnectionManager {
         let _ = events::INJECTED_SHARED_STATE.set(Arc::clone(&self.state));
         let _ = events::INJECTED_COMMAND_RECEIVER.set(Arc::clone(&command_receiver));
         let _ = events::INJECTED_EGUI_CTX.set(egui_ctx.clone());
-        let _ = events::INJECTED_SNAPSHOT_INTERVAL_MS.set(self.config.snapshot_interval_ms);
+        events::INJECTED_SNAPSHOT_INTERVAL_MS.store(
+            self.config.snapshot_interval_ms,
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         // Clear any stale disconnect request and error from a previous
         // session, and install a fresh cancellation token so a prior

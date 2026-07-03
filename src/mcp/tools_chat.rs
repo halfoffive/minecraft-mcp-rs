@@ -120,9 +120,18 @@ impl rmcp::schemars::JsonSchema for SetGameModeInput {
 
 /// Send a chat message to the server.
 ///
-/// Validates the message is non-empty (whitespace-only is also rejected),
-/// then sends [`BotCommand::SendChat`] through the command channel.
-pub async fn handle_send_chat(sender: &BotCommandSender, message: String) -> String {
+/// Returns an offline error if the bot is not connected. Otherwise validates
+/// the message is non-empty (whitespace-only is also rejected), then sends
+/// [`BotCommand::SendChat`] through the command channel.
+pub async fn handle_send_chat(
+    state: &Arc<SharedState>,
+    sender: &BotCommandSender,
+    message: String,
+) -> String {
+    if !state.is_online() {
+        return "Error: Bot is offline".to_string();
+    }
+
     if message.trim().is_empty() {
         return "Error: Message cannot be empty".to_string();
     }
@@ -136,9 +145,18 @@ pub async fn handle_send_chat(sender: &BotCommandSender, message: String) -> Str
 
 /// Execute a Minecraft command.
 ///
-/// Validates the command is non-empty, auto-prepends `/` if it does not
-/// already start with one, then sends [`BotCommand::ExecuteCommand`].
-pub async fn handle_execute_command(sender: &BotCommandSender, command: String) -> String {
+/// Returns an offline error if the bot is not connected. Otherwise validates
+/// the command is non-empty, auto-prepends `/` if it does not already start
+/// with one, then sends [`BotCommand::ExecuteCommand`].
+pub async fn handle_execute_command(
+    state: &Arc<SharedState>,
+    sender: &BotCommandSender,
+    command: String,
+) -> String {
+    if !state.is_online() {
+        return "Error: Bot is offline".to_string();
+    }
+
     if command.trim().is_empty() {
         return "Error: Command cannot be empty".to_string();
     }
@@ -159,9 +177,18 @@ pub async fn handle_execute_command(sender: &BotCommandSender, command: String) 
 
 /// Set the bot's game mode.
 ///
-/// Validates the mode string (case-insensitive) is one of: survival, creative,
+/// Returns an offline error if the bot is not connected. Otherwise validates
+/// the mode string (case-insensitive) is one of: survival, creative,
 /// adventure, or spectator. Requires operator permissions on the server.
-pub async fn handle_set_game_mode(sender: &BotCommandSender, mode: String) -> String {
+pub async fn handle_set_game_mode(
+    state: &Arc<SharedState>,
+    sender: &BotCommandSender,
+    mode: String,
+) -> String {
+    if !state.is_online() {
+        return "Error: Bot is offline".to_string();
+    }
+
     let game_mode = match mode.to_lowercase().as_str() {
         "survival" => GameMode::Survival,
         "creative" => GameMode::Creative,
@@ -185,17 +212,14 @@ pub async fn handle_set_game_mode(sender: &BotCommandSender, mode: String) -> St
 // get_chat_history — reads recent chat messages from SharedState
 // ---------------------------------------------------------------------------
 
-/// JSON error returned when `get_chat_history` is called while the bot is
-/// offline. Matches the shape used by the query tools in `tools_query.rs`.
-const CHAT_OFFLINE_ERROR: &str = r#"{"error":"Bot is currently offline"}"#;
-
 /// Return recent chat messages (up to 10) as a JSON array.
 ///
-/// Each entry is an object `{"sender":"...","message":"..."}`. Returns
-/// [`CHAT_OFFLINE_ERROR`] when the bot is not connected to a server.
+/// Each entry is an object `{"sender":"...","message":"..."}`. Returns an
+/// empty JSON array (`"[]"`) when the bot is not connected to a server so the
+/// return type is always a JSON array.
 pub fn get_chat_history(state: &Arc<SharedState>) -> String {
     if !state.is_online() {
-        return CHAT_OFFLINE_ERROR.to_string();
+        return "[]".to_string();
     }
 
     let messages = state.get_chat_messages();
@@ -257,14 +281,16 @@ mod tests {
     #[tokio::test]
     async fn test_handle_send_chat_valid() {
         let (sender, _rx) = make_echo_channel();
-        let result = handle_send_chat(&sender, "hello".into()).await;
+        let state = make_state(true);
+        let result = handle_send_chat(&state, &sender, "hello".into()).await;
         assert!(!result.contains("Error"), "unexpected error: {result}");
     }
 
     #[tokio::test]
     async fn test_handle_send_chat_empty_rejected() {
         let (sender, _rx) = make_echo_channel();
-        let result = handle_send_chat(&sender, "".into()).await;
+        let state = make_state(true);
+        let result = handle_send_chat(&state, &sender, "".into()).await;
         assert!(result.contains("Error"), "empty should be rejected");
         assert!(result.contains("empty"));
     }
@@ -272,8 +298,18 @@ mod tests {
     #[tokio::test]
     async fn test_handle_send_chat_whitespace_rejected() {
         let (sender, _rx) = make_echo_channel();
-        let result = handle_send_chat(&sender, "   ".into()).await;
+        let state = make_state(true);
+        let result = handle_send_chat(&state, &sender, "   ".into()).await;
         assert!(result.contains("Error"), "whitespace should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_handle_send_chat_offline() {
+        let (sender, _rx) = make_echo_channel();
+        let state = make_state(false);
+        let result = handle_send_chat(&state, &sender, "hello".into()).await;
+        assert!(result.contains("Error"));
+        assert!(result.contains("offline"));
     }
 
     // -- execute_command ------------------------------------------------------
@@ -281,7 +317,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_execute_command_valid() {
         let (sender, mut rx) = make_echo_channel();
-        let _ = handle_execute_command(&sender, "gamemode creative".into()).await;
+        let state = make_state(true);
+        let _ = handle_execute_command(&state, &sender, "gamemode creative".into()).await;
 
         // The command should have been auto-prepended with /
         let sent = rx.recv().await.expect("should receive command");
@@ -294,7 +331,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_execute_command_with_slash() {
         let (sender, mut rx) = make_echo_channel();
-        let _ = handle_execute_command(&sender, "/gamemode creative".into()).await;
+        let state = make_state(true);
+        let _ = handle_execute_command(&state, &sender, "/gamemode creative".into()).await;
 
         let sent = rx.recv().await.expect("should receive command");
         assert!(
@@ -306,8 +344,18 @@ mod tests {
     #[tokio::test]
     async fn test_handle_execute_command_empty_rejected() {
         let (sender, _rx) = make_echo_channel();
-        let result = handle_execute_command(&sender, "".into()).await;
+        let state = make_state(true);
+        let result = handle_execute_command(&state, &sender, "".into()).await;
         assert!(result.contains("Error"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_execute_command_offline() {
+        let (sender, _rx) = make_echo_channel();
+        let state = make_state(false);
+        let result = handle_execute_command(&state, &sender, "gamemode creative".into()).await;
+        assert!(result.contains("Error"));
+        assert!(result.contains("offline"));
     }
 
     // -- set_game_mode --------------------------------------------------------
@@ -315,7 +363,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_set_game_mode_survival() {
         let (sender, mut rx) = make_echo_channel();
-        let result = handle_set_game_mode(&sender, "survival".into()).await;
+        let state = make_state(true);
+        let result = handle_set_game_mode(&state, &sender, "survival".into()).await;
         assert!(!result.contains("Error"), "unexpected error: {result}");
 
         let sent = rx.recv().await.expect("should receive command");
@@ -325,7 +374,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_set_game_mode_creative() {
         let (sender, mut rx) = make_echo_channel();
-        let _ = handle_set_game_mode(&sender, "creative".into()).await;
+        let state = make_state(true);
+        let _ = handle_set_game_mode(&state, &sender, "creative".into()).await;
 
         let sent = rx.recv().await.expect("should receive command");
         assert!(sent.contains("SetGameMode(Creative)"));
@@ -334,7 +384,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_set_game_mode_adventure() {
         let (sender, mut rx) = make_echo_channel();
-        let _ = handle_set_game_mode(&sender, "adventure".into()).await;
+        let state = make_state(true);
+        let _ = handle_set_game_mode(&state, &sender, "adventure".into()).await;
 
         let sent = rx.recv().await.expect("should receive command");
         assert!(sent.contains("SetGameMode(Adventure)"));
@@ -343,7 +394,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_set_game_mode_spectator() {
         let (sender, mut rx) = make_echo_channel();
-        let _ = handle_set_game_mode(&sender, "spectator".into()).await;
+        let state = make_state(true);
+        let _ = handle_set_game_mode(&state, &sender, "spectator".into()).await;
 
         let sent = rx.recv().await.expect("should receive command");
         assert!(sent.contains("SetGameMode(Spectator)"));
@@ -352,7 +404,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_set_game_mode_case_insensitive() {
         let (sender, mut rx) = make_echo_channel();
-        let _ = handle_set_game_mode(&sender, "Creative".into()).await;
+        let state = make_state(true);
+        let _ = handle_set_game_mode(&state, &sender, "Creative".into()).await;
 
         let sent = rx.recv().await.expect("should receive command");
         assert!(sent.contains("SetGameMode(Creative)"));
@@ -361,7 +414,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_set_game_mode_invalid_mode() {
         let (sender, _rx) = make_echo_channel();
-        let result = handle_set_game_mode(&sender, "invalid".into()).await;
+        let state = make_state(true);
+        let result = handle_set_game_mode(&state, &sender, "invalid".into()).await;
         assert!(result.contains("Error"));
         assert!(result.contains("Invalid game mode"));
         assert!(result.contains("invalid"));
@@ -370,8 +424,18 @@ mod tests {
     #[tokio::test]
     async fn test_handle_set_game_mode_empty_rejected() {
         let (sender, _rx) = make_echo_channel();
-        let result = handle_set_game_mode(&sender, "".into()).await;
+        let state = make_state(true);
+        let result = handle_set_game_mode(&state, &sender, "".into()).await;
         assert!(result.contains("Error"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_set_game_mode_offline() {
+        let (sender, _rx) = make_echo_channel();
+        let state = make_state(false);
+        let result = handle_set_game_mode(&state, &sender, "creative".into()).await;
+        assert!(result.contains("Error"));
+        assert!(result.contains("offline"));
     }
 
     // -- get_chat_history -----------------------------------------------------
@@ -410,9 +474,10 @@ mod tests {
     #[test]
     fn test_get_chat_history_offline() {
         let state = make_state(false);
-        // Even if messages exist, offline returns the offline error.
+        // Even if messages exist, offline returns an empty JSON array so the
+        // return type is always a JSON array.
         state.add_chat_message("Alice".into(), "Hello".into());
         let result = get_chat_history(&state);
-        assert_eq!(result, CHAT_OFFLINE_ERROR);
+        assert_eq!(result, "[]");
     }
 }

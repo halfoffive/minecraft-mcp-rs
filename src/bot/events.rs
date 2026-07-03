@@ -1,5 +1,6 @@
 //! Event processing from the Minecraft client (chat, move, damage, etc.).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -39,7 +40,13 @@ pub(crate) static INJECTED_COMMAND_RECEIVER: OnceLock<ReceiverSlot> = OnceLock::
 pub(crate) static INJECTED_EGUI_CTX: OnceLock<Option<egui::Context>> = OnceLock::new();
 
 /// Pre-initialized snapshot interval to inject into [`BotState`].
-pub(crate) static INJECTED_SNAPSHOT_INTERVAL_MS: OnceLock<u64> = OnceLock::new();
+///
+/// Uses [`AtomicU64`] (rather than [`OnceLock`]) so the value can be
+/// refreshed on each reconnect — `OnceLock::set` only succeeds once, which
+/// silently dropped updates to `snapshot_interval_ms` on subsequent
+/// connection attempts. A value of `0` means "not set"; [`BotState::default`]
+/// falls back to `500` in that case.
+pub(crate) static INJECTED_SNAPSHOT_INTERVAL_MS: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // BotState
@@ -86,7 +93,13 @@ impl Default for BotState {
 
         let egui_ctx = INJECTED_EGUI_CTX.get().cloned().flatten();
 
-        let snapshot_interval_ms = INJECTED_SNAPSHOT_INTERVAL_MS.get().copied().unwrap_or(500);
+        let snapshot_interval_ms = {
+            let v = INJECTED_SNAPSHOT_INTERVAL_MS.load(Ordering::Relaxed);
+            // A value of 0 means "not injected yet" — fall back to the
+            // default 500 ms so unit tests and any pre-inject path still
+            // get a sane throttle interval.
+            if v == 0 { 500 } else { v }
+        };
 
         Self {
             shared_state,
@@ -164,15 +177,21 @@ fn handle_spawn(bot: Client, state: &BotState) {
     // Abort any previous command executor (e.g. left over from a prior
     // connection that dropped without firing Disconnect). Aborting drops the
     // ReceiverLease, which returns the receiver to the slot below.
-    {
+    //
+    // Take the handle out of the mutex first and drop the lock before
+    // calling `abort()` — `JoinHandle::abort` may park/schedule and must
+    // not be called while holding the `executor_handle` mutex (the aborted
+    // task's cleanup path could otherwise try to re-acquire it).
+    let handle_to_abort = {
         let mut handle_guard = state
             .executor_handle
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(handle) = handle_guard.take() {
-            handle.abort();
-            info!("aborted previous command executor before starting a new one");
-        }
+        handle_guard.take()
+    };
+    if let Some(handle) = handle_to_abort {
+        handle.abort();
+        info!("aborted previous command executor before starting a new one");
     }
 
     // Lease the command receiver and start a new executor driving it.
@@ -264,6 +283,12 @@ fn handle_chat(state: &BotState, chat_packet: azalea::chat::ChatPacket) {
 }
 
 fn handle_death(state: &BotState) {
+    // TODO(race): this clone-modify-write can lose updates written by
+    // `SnapshotUpdater::update_from_tick` between the clone and the
+    // store. `SharedState` exposes no `modify_snapshot` closure and its
+    // `ArcSwap` is private, so an RCU fix can't be done from events.rs
+    // alone — it needs a new method on `SharedState` (state.rs). The race
+    // is display-only (health), so it is tolerated for now.
     let mut snapshot = (*state.shared_state.read_snapshot()).clone();
     snapshot.self_player.health = 0.0;
     state.shared_state.update_snapshot(snapshot);
@@ -302,6 +327,9 @@ fn add_player_to_snapshot(
     id: u32,
     position: BlockPos,
 ) {
+    // TODO(race): clone-modify-write races with SnapshotUpdater — see
+    // `handle_death` for details. Needs a `modify_snapshot` method on
+    // `SharedState` to fix from events.rs alone.
     let mut snapshot = (*state.shared_state.read_snapshot()).clone();
     snapshot
         .entities
@@ -319,6 +347,8 @@ fn add_player_to_snapshot(
 }
 
 fn handle_remove_player(state: &BotState, info: &azalea::player::PlayerInfo) {
+    // TODO(race): clone-modify-write races with SnapshotUpdater — see
+    // `handle_death` for details.
     let mut snapshot = (*state.shared_state.read_snapshot()).clone();
     snapshot
         .entities
@@ -328,6 +358,8 @@ fn handle_remove_player(state: &BotState, info: &azalea::player::PlayerInfo) {
 }
 
 fn handle_update_player(state: &BotState, info: &azalea::player::PlayerInfo) {
+    // TODO(race): clone-modify-write races with SnapshotUpdater — see
+    // `handle_death` for details.
     let mut snapshot = (*state.shared_state.read_snapshot()).clone();
     if let Some(entity) = snapshot
         .entities

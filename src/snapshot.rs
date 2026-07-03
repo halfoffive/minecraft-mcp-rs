@@ -64,7 +64,7 @@ pub struct SnapshotBuilder {
     dirty_blocks: HashSet<BlockPos>,
     dirty_chunks: HashSet<(i32, i32)>,
     new_blocks: Vec<BlockEntry>,
-    new_entities: Vec<EntityEntry>,
+    new_entities: Option<Vec<EntityEntry>>,
     new_self_player: Option<SelfPlayer>,
     new_chunk_summary: Option<Vec<(i32, i32)>>,
 }
@@ -77,7 +77,7 @@ impl SnapshotBuilder {
             dirty_blocks: HashSet::new(),
             dirty_chunks: HashSet::new(),
             new_blocks: Vec::new(),
-            new_entities: Vec::new(),
+            new_entities: None,
             new_self_player: None,
             new_chunk_summary: None,
         }
@@ -98,7 +98,11 @@ impl SnapshotBuilder {
     }
 
     /// Provide a complete replacement entity list.
-    pub fn with_entities(mut self, entities: Vec<EntityEntry>) -> Self {
+    ///
+    /// Pass `Some(vec)` to replace the entity list — an empty vec clears it.
+    /// Pass `None` (or skip calling this method) to keep the old entities
+    /// unchanged.
+    pub fn with_entities(mut self, entities: Option<Vec<EntityEntry>>) -> Self {
         self.new_entities = entities;
         self
     }
@@ -133,11 +137,7 @@ impl SnapshotBuilder {
             .collect();
         blocks.extend(self.new_blocks);
 
-        let entities = if self.new_entities.is_empty() {
-            self.old.entities
-        } else {
-            self.new_entities
-        };
+        let entities = self.new_entities.unwrap_or(self.old.entities);
 
         let self_player = self.new_self_player.unwrap_or(self.old.self_player);
         let chunk_summary = self.new_chunk_summary.unwrap_or(self.old.chunk_summary);
@@ -368,11 +368,30 @@ mod tests {
     fn test_builder_replaces_entities() {
         let old = make_snapshot(vec![], vec![entity(1, BlockPos::new(0, 0, 0), "zombie")]);
         let new = SnapshotBuilder::new(old)
-            .with_entities(vec![entity(2, BlockPos::new(10, 0, 10), "creeper")])
+            .with_entities(Some(vec![entity(2, BlockPos::new(10, 0, 10), "creeper")]))
             .build();
         assert_eq!(new.entities.len(), 1);
         assert_eq!(new.entities[0].id, 2);
         assert_eq!(new.entities[0].entity_type, "creeper");
+    }
+
+    #[test]
+    fn test_builder_clears_entities_with_empty_vec() {
+        let old = make_snapshot(vec![], vec![entity(1, BlockPos::new(0, 0, 0), "zombie")]);
+        let new = SnapshotBuilder::new(old)
+            .with_entities(Some(Vec::new()))
+            .build();
+        assert!(new.entities.is_empty());
+    }
+
+    #[test]
+    fn test_builder_with_entities_none_keeps_old() {
+        let old = make_snapshot(vec![], vec![entity(1, BlockPos::new(0, 0, 0), "zombie")]);
+        let new = SnapshotBuilder::new(old.clone())
+            .with_entities(None)
+            .build();
+        assert_eq!(new.entities.len(), 1);
+        assert_eq!(new.entities[0].id, 1);
     }
 
     #[test]
