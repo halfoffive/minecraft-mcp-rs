@@ -27,11 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **VitePress documentation site** under `docs/` with English + Simplified
   Chinese locales (mirrors the vuejs/vitepress config split pattern).
 - **GitHub Pages deployment workflow** `.github/workflows/deploy-docs.yml`
-  builds the VitePress site with Node 20 and deploys via
-  `actions/deploy-pages@v4`.
+  builds the VitePress site with Node 24 and deploys via
+  `actions/deploy-pages@v5`.
 
 ### Changed
 
+- **GitHub Actions runtime bump:** workflows now use Node.js 24 and the
+  latest Node-24-compatible official actions — `actions/checkout@v6`,
+  `actions/setup-node@v6`, `actions/upload-artifact@v7`,
+  `actions/upload-pages-artifact@v5`, and `actions/deploy-pages@v5`.
 - All hardcoded English strings in `app.rs`, `settings.rs`, `status.rs`, and
   `mcp_config.rs` now route through `i18n::tr()`. MCP tool descriptions and
   JSON field names remain English (external API contract).
