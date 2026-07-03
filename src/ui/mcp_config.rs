@@ -16,6 +16,7 @@ use egui::{FontId, TextEdit, Ui};
 
 use crate::config::McpTransport;
 use crate::ui::app::EditConfig;
+use crate::ui::i18n::{self, TextKey};
 
 /// Render the MCP Config panel.
 ///
@@ -60,10 +61,10 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig) {
 
     // ── Copy button + hint ─────────────────────────────────────
     ui.horizontal(|ui| {
-        if ui.button("Copy").clicked() {
+        if ui.button(i18n::tr(TextKey::Copy)).clicked() {
             ui.ctx().copy_text(json_text.clone());
         }
-        ui.label("Copy this JSON into your MCP client config (Claude Desktop / Cursor):");
+        ui.label(i18n::tr(TextKey::CopyHint));
     });
 
     // ── Read-only JSON display ─────────────────────────────────

@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 azalea = "0.15.1"
 azalea-inventory = "0.15.1"
-rmcp = { version = "1.7.0", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
+rmcp = { version = "1.8.0", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
 eframe = "0.34.3"
 egui = "0.34.3"
 tokio = { version = "1.50", features = ["full"] }
@@ -36,8 +36,8 @@ opt-level = 3
 [lints.rust]
 linker_messages = "allow"
 
-# Local patches to resolve dependency conflicts without committing patched
-# upstream crates to git. See .gitignore for `patches/*`.
+# Local patches to resolve dependency conflicts.
+# These directories are tracked in git (see README.md for license notes).
 [patch.crates-io]
 rsa = { path = "patches/rsa" }
 rmcp = { path = "patches/rmcp" }
