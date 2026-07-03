@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   latest Node-24-compatible official actions — `actions/checkout@v6`,
   `actions/setup-node@v6`, `actions/upload-artifact@v7`,
   `actions/upload-pages-artifact@v5`, and `actions/deploy-pages@v5`.
+- **CI build matrix update:** dropped the `x86_64-apple-darwin` / `macos-13`
+  target due to long GitHub-hosted runner queues and deprecation, and moved
+  `aarch64-apple-darwin` to `macos-latest` (Apple Silicon).
 - All hardcoded English strings in `app.rs`, `settings.rs`, `status.rs`, and
   `mcp_config.rs` now route through `i18n::tr()`. MCP tool descriptions and
   JSON field names remain English (external API contract).
