@@ -4,7 +4,23 @@ name: Build (multi-platform, multi-arch)
 
 on:
   push:
+    paths:
+      - '.github/workflows/build.yml'
+      - 'src/**'
+      - 'tests/**'
+      - 'patches/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
   pull_request:
+    paths:
+      - '.github/workflows/build.yml'
+      - 'src/**'
+      - 'tests/**'
+      - 'patches/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
   workflow_dispatch:
 
 env:
