@@ -42,6 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All hardcoded English strings in `app.rs`, `settings.rs`, `status.rs`, and
   `mcp_config.rs` now route through `i18n::tr()`. MCP tool descriptions and
   JSON field names remain English (external API contract).
+- **GitHub Actions path filtering:**
+  - `.github/workflows/deploy-docs.yml` now only triggers on `push` when
+    `docs/**` or the workflow itself changes.
+  - `.github/workflows/build.yml` now only triggers on `push` and
+    `pull_request` when `src/**`, `tests/**`, `patches/**`, `Cargo.toml`,
+    `Cargo.lock`, `rust-toolchain.toml`, or the workflow itself changes.
+- **Bilingual README:** `README.md` main content is now expanded to English
+  and Simplified Chinese, with a Chinese translation immediately following
+  each major English paragraph.
 
 - Remote MCP HTTP server (`transport-streamable-http-server` feature):
   binds to `127.0.0.1` only, Bearer-token authenticated, port/token configurable
