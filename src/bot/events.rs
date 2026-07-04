@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use azalea::ecs::component::Component;
 use azalea::prelude::AppExit;
 use azalea::{Client, Event};
+use tokio::task::AbortHandle;
 use tracing::{info, trace, warn};
 
 use super::commands::{CommandExecutor, RealBotClient};
@@ -69,6 +70,12 @@ pub struct BotState {
     /// connection drops; the leased receiver is returned to
     /// [`BotState::command_receiver`] by the `ReceiverLease` drop guard.
     pub executor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// `AbortHandle`s for every outstanding `Event::Tick` task spawned via
+    /// `spawn_local` since the last `Spawn`. On disconnect we drain this and
+    /// abort each one so no tick task keeps touching the azalea `Client`
+    /// (which would panic once the ECS tears down). The `JoinHandle`s
+    /// themselves are dropped — only the `AbortHandle`s are retained.
+    pub tick_abort_handles: Arc<Mutex<Vec<AbortHandle>>>,
     /// Optional egui context for requesting UI repaints.
     pub egui_ctx: Option<egui::Context>,
     /// Tracks which blocks/chunks changed since the last snapshot.
@@ -105,6 +112,7 @@ impl Default for BotState {
             shared_state,
             command_receiver,
             executor_handle: Arc::new(Mutex::new(None)),
+            tick_abort_handles: Arc::new(Mutex::new(Vec::new())),
             egui_ctx,
             dirty_tracker: Arc::new(Mutex::new(DirtyTracker::new())),
             last_snapshot_time: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(3600))),
@@ -160,19 +168,19 @@ pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::R
 // ---------------------------------------------------------------------------
 
 fn handle_spawn(bot: Client, state: &BotState) {
-    state.shared_state.set_online(true);
-
-    // Store the ECS handle so request_disconnect can trigger shutdown by
-    // writing AppExit::Success to the ECS World (same pattern as
-    // handle_disconnect below). Without this, the Disconnect button can
-    // only cancel the backoff sleep — it cannot interrupt a running
-    // ClientBuilder::start().
+    // Store the ECS handle BEFORE flipping online=true so that a Disconnect
+    // racing in between the two calls can always write `AppExit::Success`
+    // (the handle is what `request_disconnect` uses to interrupt a running
+    // `ClientBuilder::start`). The closure only captures `bot.ecs.clone()`,
+    // so it has no dependency on the online flag.
     let ecs = bot.ecs.clone();
     state
         .shared_state
         .set_bot_ecs(crate::state::BotEcsHandle::new(move || {
             ecs.lock().write_message(AppExit::Success);
         }));
+
+    state.shared_state.set_online(true);
 
     // Abort any previous command executor (e.g. left over from a prior
     // connection that dropped without firing Disconnect). Aborting drops the
@@ -233,16 +241,49 @@ fn handle_disconnect(bot: Client, state: &BotState) {
     // (which would panic when touching the ECS after disconnect). The
     // ReceiverLease guard drops and returns the receiver to the slot, ready
     // for the next Spawn.
-    let aborted = {
+    //
+    // Take the handle out of the mutex first and drop the lock before
+    // calling `abort()` — `JoinHandle::abort` may park/schedule and must
+    // not be called while holding the `executor_handle` mutex (the aborted
+    // task's cleanup path could otherwise try to re-acquire it). Mirrors
+    // `handle_spawn`'s symmetric take-then-abort pattern.
+    let handle_to_abort = {
         let mut handle_guard = state
             .executor_handle
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        handle_guard.take().is_some()
+        handle_guard.take()
     };
-    if aborted {
+    if let Some(handle) = handle_to_abort {
+        handle.abort();
         info!("aborted command executor on disconnect");
     }
+
+    // Abort every outstanding tick task so none keeps touching the now-stale
+    // azalea Client (which would panic once the ECS tears down). The handles
+    // are drained so the next Spawn starts from an empty set.
+    let tick_count = {
+        let mut handles = state
+            .tick_abort_handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let n = handles.len();
+        for abort in handles.drain(..) {
+            abort.abort();
+        }
+        n
+    };
+    if tick_count > 0 {
+        info!(
+            "aborted {} outstanding tick task(s) on disconnect",
+            tick_count
+        );
+    }
+
+    // M11: clear any open container handle so it auto-closes on disconnect.
+    // Dropping the `ContainerHandle` tells azalea to close the container,
+    // preventing a stale handle from being used after the bot reconnects.
+    state.shared_state.set_container_handle(None);
 
     // Tell azalea to end the client so ClientBuilder::start returns and the
     // connection loop can retry. Without this the bot thread may hang waiting
@@ -266,13 +307,24 @@ async fn handle_tick(bot: Client, state: BotState) {
         state.snapshot_interval_ms,
     );
     let egui_ctx = state.egui_ctx.clone();
-    tokio::task::spawn_local(async move {
+    let join_handle = tokio::task::spawn_local(async move {
         if updater.update_from_tick(&bot).await.is_some()
             && let Some(ctx) = &egui_ctx
         {
             ctx.request_repaint();
         }
     });
+    // Track the AbortHandle so handle_disconnect can cancel outstanding tick
+    // tasks before the azalea Client is torn down. Dropping the JoinHandle
+    // does NOT abort the task — only AbortHandle::abort / JoinHandle::abort
+    // does — so we keep the AbortHandle and drop the JoinHandle explicitly.
+    let abort = join_handle.abort_handle();
+    drop(join_handle);
+    state
+        .tick_abort_handles
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(abort);
 }
 
 fn handle_chat(state: &BotState, chat_packet: azalea::chat::ChatPacket) {
@@ -283,15 +335,12 @@ fn handle_chat(state: &BotState, chat_packet: azalea::chat::ChatPacket) {
 }
 
 fn handle_death(state: &BotState) {
-    // TODO(race): this clone-modify-write can lose updates written by
-    // `SnapshotUpdater::update_from_tick` between the clone and the
-    // store. `SharedState` exposes no `modify_snapshot` closure and its
-    // `ArcSwap` is private, so an RCU fix can't be done from events.rs
-    // alone — it needs a new method on `SharedState` (state.rs). The race
-    // is display-only (health), so it is tolerated for now.
-    let mut snapshot = (*state.shared_state.read_snapshot()).clone();
-    snapshot.self_player.health = 0.0;
-    state.shared_state.update_snapshot(snapshot);
+    // Atomically read-modify-write the snapshot so concurrent updates from
+    // `SnapshotUpdater::update_from_tick` can't be lost (ArcSwap::rcu retries
+    // the closure on contention).
+    state.shared_state.modify_snapshot(|s| {
+        s.self_player.health = 0.0;
+    });
     request_repaint(state);
     trace!("bot died, set health=0");
 }
@@ -327,48 +376,47 @@ fn add_player_to_snapshot(
     id: u32,
     position: BlockPos,
 ) {
-    // TODO(race): clone-modify-write races with SnapshotUpdater — see
-    // `handle_death` for details. Needs a `modify_snapshot` method on
-    // `SharedState` to fix from events.rs alone.
-    let mut snapshot = (*state.shared_state.read_snapshot()).clone();
-    snapshot
-        .entities
-        .retain(|e| e.uuid != info.uuid.to_string());
-    snapshot.entities.push(EntityEntry {
-        id,
-        uuid: info.uuid.to_string(),
-        entity_type: "player".to_string(),
-        position,
-        display_name: info.display_name.as_ref().map(|dt| dt.to_string()),
-        health: None,
+    // Atomically read-modify-write the snapshot so concurrent updates from
+    // `SnapshotUpdater::update_from_tick` can't be lost (ArcSwap::rcu retries
+    // the closure on contention).
+    let uuid_str = info.uuid.to_string();
+    let display_name = info.display_name.as_ref().map(|dt| dt.to_string());
+    state.shared_state.modify_snapshot(|s| {
+        s.entities.retain(|e| e.uuid != uuid_str);
+        s.entities.push(EntityEntry {
+            id,
+            uuid: uuid_str.clone(),
+            entity_type: "player".to_string(),
+            position,
+            display_name: display_name.clone(),
+            health: None,
+        });
     });
-    state.shared_state.update_snapshot(snapshot);
     trace!("player added: {}", info.profile.name);
 }
 
 fn handle_remove_player(state: &BotState, info: &azalea::player::PlayerInfo) {
-    // TODO(race): clone-modify-write races with SnapshotUpdater — see
-    // `handle_death` for details.
-    let mut snapshot = (*state.shared_state.read_snapshot()).clone();
-    snapshot
-        .entities
-        .retain(|e| e.uuid != info.uuid.to_string());
-    state.shared_state.update_snapshot(snapshot);
+    // Atomically read-modify-write the snapshot so concurrent updates from
+    // `SnapshotUpdater::update_from_tick` can't be lost (ArcSwap::rcu retries
+    // the closure on contention).
+    let uuid_str = info.uuid.to_string();
+    state.shared_state.modify_snapshot(|s| {
+        s.entities.retain(|e| e.uuid != uuid_str);
+    });
     trace!("player removed: {}", info.profile.name);
 }
 
 fn handle_update_player(state: &BotState, info: &azalea::player::PlayerInfo) {
-    // TODO(race): clone-modify-write races with SnapshotUpdater — see
-    // `handle_death` for details.
-    let mut snapshot = (*state.shared_state.read_snapshot()).clone();
-    if let Some(entity) = snapshot
-        .entities
-        .iter_mut()
-        .find(|e| e.uuid == info.uuid.to_string())
-    {
-        entity.display_name = info.display_name.as_ref().map(|dt| dt.to_string());
-    }
-    state.shared_state.update_snapshot(snapshot);
+    // Atomically read-modify-write the snapshot so concurrent updates from
+    // `SnapshotUpdater::update_from_tick` can't be lost (ArcSwap::rcu retries
+    // the closure on contention).
+    let uuid_str = info.uuid.to_string();
+    let display_name = info.display_name.as_ref().map(|dt| dt.to_string());
+    state.shared_state.modify_snapshot(|s| {
+        if let Some(entity) = s.entities.iter_mut().find(|e| e.uuid == uuid_str) {
+            entity.display_name = display_name.clone();
+        }
+    });
     trace!("player updated: {}", info.profile.name);
 }
 
@@ -539,6 +587,93 @@ mod tests {
             snapshot.entities[0].display_name,
             Some("SteveAdmin".to_string())
         );
+    }
+
+    // -- modify_snapshot handlers (H1 regression) ---------------------------
+    //
+    // Regression test for the H1 fix: the four snapshot-mutating handlers
+    // (`handle_death`, `add_player_to_snapshot`, `handle_remove_player`,
+    // `handle_update_player`) now route their edits through
+    // `SharedState::modify_snapshot` instead of clone-modify-write, so
+    // concurrent `SnapshotUpdater::update_from_tick` edits can't be lost.
+    //
+    // This exercises the happy path (no contention) — the no-lost-update
+    // guarantee under contention is covered by
+    // `state::tests::test_modify_snapshot_no_lost_update`. The
+    // `spawn_local`-based tick path (`handle_tick`) and the AbortHandle
+    // tracking (H2) depend on a live azalea `Client` + tokio `LocalSet`
+    // and can't be exercised in isolation here.
+
+    #[test]
+    fn test_modify_snapshot_handlers_use_atomic_api() {
+        let state = BotState::default();
+
+        // Add a player via the atomic API.
+        let uuid = uuid::Uuid::new_v4();
+        let info_add = azalea::player::PlayerInfo {
+            profile: azalea::auth::game_profile::GameProfile {
+                uuid: uuid::Uuid::new_v4(),
+                name: "Steve".to_string(),
+                properties: std::sync::Arc::new(
+                    azalea::auth::game_profile::GameProfileProperties::default(),
+                ),
+            },
+            uuid,
+            gamemode: azalea::core::game_type::GameMode::Survival,
+            latency: 20,
+            display_name: None,
+        };
+        add_player_to_snapshot(&state, &info_add, 42, BlockPos::new(1, 2, 3));
+        {
+            let snapshot = state.shared_state.read_snapshot();
+            assert_eq!(snapshot.entities.len(), 1);
+            assert_eq!(snapshot.entities[0].id, 42);
+            assert_eq!(snapshot.entities[0].position, BlockPos::new(1, 2, 3));
+            assert_eq!(snapshot.entities[0].display_name, None);
+        }
+
+        // Update the player's display name via the atomic API.
+        let info_update = azalea::player::PlayerInfo {
+            profile: azalea::auth::game_profile::GameProfile {
+                uuid: uuid::Uuid::new_v4(),
+                name: "Steve".to_string(),
+                properties: std::sync::Arc::new(
+                    azalea::auth::game_profile::GameProfileProperties::default(),
+                ),
+            },
+            uuid,
+            gamemode: azalea::core::game_type::GameMode::Survival,
+            latency: 20,
+            display_name: Some(Box::new(azalea::FormattedText::from("SteveAdmin"))),
+        };
+        handle_update_player(&state, &info_update);
+        {
+            let snapshot = state.shared_state.read_snapshot();
+            assert_eq!(snapshot.entities.len(), 1);
+            assert_eq!(
+                snapshot.entities[0].display_name,
+                Some("SteveAdmin".to_string())
+            );
+        }
+
+        // Death sets health to 0 via the atomic API.
+        handle_death(&state);
+        {
+            let snapshot = state.shared_state.read_snapshot();
+            assert_eq!(snapshot.self_player.health, 0.0);
+            // The player entity must survive the death update — only
+            // self_player.health changed.
+            assert_eq!(snapshot.entities.len(), 1);
+        }
+
+        // Remove the player via the atomic API.
+        handle_remove_player(&state, &info_update);
+        {
+            let snapshot = state.shared_state.read_snapshot();
+            assert!(snapshot.entities.is_empty());
+            // Health is unchanged by the remove-player edit.
+            assert_eq!(snapshot.self_player.health, 0.0);
+        }
     }
 
     // -- Throttle logic ------------------------------------------------------

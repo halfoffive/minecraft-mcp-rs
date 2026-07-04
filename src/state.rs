@@ -117,6 +117,16 @@ pub struct SharedState {
     /// closes a live TCP connection (cancelling the backoff sleep alone
     /// cannot interrupt a running `ClientBuilder::start()`).
     bot_ecs: Mutex<Option<BotEcsHandle>>,
+    /// Cancellation token used to gracefully shut down the MCP server (both
+    /// stdio and HTTP transports) when the application is exiting. Triggered
+    /// by [`MinecraftApp::drop`](crate::ui::app::MinecraftApp) on window
+    /// close via [`trigger_shutdown`](Self::trigger_shutdown).
+    ///
+    /// Stored as a bare [`CancellationToken`] (not behind a `Mutex`) because
+    /// `CancellationToken` is already `Send + Sync + Clone`; cloning it
+    /// distributes a handle to the same cancellation state, so no interior
+    /// mutability is required to share it across threads.
+    shutdown_token: CancellationToken,
 }
 
 impl SharedState {
@@ -155,6 +165,7 @@ impl SharedState {
             last_error: Mutex::new(None),
             cancel_token: Mutex::new(CancellationToken::new()),
             bot_ecs: Mutex::new(None),
+            shutdown_token: CancellationToken::new(),
         }
     }
 
@@ -164,6 +175,34 @@ impl SharedState {
     /// snapshot on their next [`load`](ArcSwap::load) without blocking.
     pub fn update_snapshot(&self, new: WorldSnapshot) {
         self.world_snapshot.store(Arc::new(new));
+    }
+
+    /// Atomically read-modify-write the world snapshot using a closure.
+    ///
+    /// The closure receives `&mut WorldSnapshot` (a clone of the current
+    /// snapshot). The modified snapshot is stored atomically via
+    /// [`ArcSwap::rcu`], which retries if another thread updated the snapshot
+    /// concurrently (no lost updates).
+    ///
+    /// Use this instead of `read_snapshot` + `update_snapshot` when you need
+    /// to apply a partial update (e.g. update one player's position) without
+    /// clobbering concurrent updates from other event handlers.
+    ///
+    /// The closure bound is [`FnMut`] (not `FnOnce`) because [`ArcSwap::rcu`]
+    /// may re-invoke the closure on retry when another thread raced ahead —
+    /// each retry re-applies the modification to a fresh clone of the latest
+    /// snapshot. A `FnOnce` closure could not be re-applied, so updates would
+    /// be lost under contention.
+    ///
+    /// # Panics
+    /// If the closure panics, the snapshot is left in its previous state
+    /// (the in-progress clone is discarded).
+    pub fn modify_snapshot<F: FnMut(&mut WorldSnapshot)>(&self, mut f: F) {
+        self.world_snapshot.rcu(|old| {
+            let mut new: WorldSnapshot = (**old).clone();
+            f(&mut new);
+            Arc::new(new)
+        });
     }
 
     /// Lock-free read of the current world snapshot.
@@ -417,6 +456,24 @@ impl SharedState {
         let guard = self.bot_ecs.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
     }
+
+    /// Return a clone of the MCP server shutdown token.
+    ///
+    /// The returned token can be awaited (via `cancelled()`) to detect
+    /// application shutdown. Cloning a [`CancellationToken`] is cheap — it
+    /// shares the same underlying cancellation state.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown_token.clone()
+    }
+
+    /// Trigger MCP server shutdown (cancels the shutdown token).
+    ///
+    /// Called by [`MinecraftApp::drop`](crate::ui::app::MinecraftApp) on
+    /// window close so the MCP server's stdio/HTTP transport returns
+    /// promptly instead of blocking on stdin EOF or an open listener.
+    pub fn trigger_shutdown(&self) {
+        self.shutdown_token.cancel();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +628,56 @@ mod tests {
 
         for h in handles {
             h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_modify_snapshot_no_lost_update() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        // Default snapshot already has 0 entities.
+
+        // Two threads each add 100 distinct entities via modify_snapshot.
+        // Under contention ArcSwap::rcu retries, re-applying each closure to
+        // a fresh clone of the latest snapshot — so no updates are lost.
+        let state1 = Arc::clone(&state);
+        let state2 = Arc::clone(&state);
+        let t1 = thread::spawn(move || {
+            for i in 0..100u32 {
+                state1.modify_snapshot(|s| {
+                    s.entities.push(make_test_entity(i));
+                });
+            }
+        });
+        let t2 = thread::spawn(move || {
+            for i in 100..200u32 {
+                state2.modify_snapshot(|s| {
+                    s.entities.push(make_test_entity(i));
+                });
+            }
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        let snap = state.read_snapshot();
+        assert_eq!(
+            snap.entities.len(),
+            200,
+            "no lost updates — all 200 entities present"
+        );
+        // All ids present and unique.
+        let mut ids: Vec<u32> = snap.entities.iter().map(|e| e.id).collect();
+        ids.sort();
+        assert_eq!(ids, (0..200).collect::<Vec<_>>());
+    }
+
+    fn make_test_entity(id: u32) -> crate::types::EntityEntry {
+        crate::types::EntityEntry {
+            id,
+            uuid: format!("ent-{id}"),
+            entity_type: "test".into(),
+            position: crate::types::BlockPos::new(id as i32, 0, 0),
+            display_name: None,
+            health: None,
         }
     }
 
@@ -869,5 +976,37 @@ mod tests {
         // Clearing when already None should not panic.
         state.clear_bot_ecs();
         assert!(state.bot_ecs().is_none());
+    }
+
+    // -- shutdown_token -------------------------------------------------------
+
+    #[test]
+    fn test_shutdown_token_initially_not_cancelled() {
+        let state = SharedState::new(AppConfig::default());
+        let token = state.shutdown_token();
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn test_trigger_shutdown_cancels_token() {
+        let state = SharedState::new(AppConfig::default());
+        let token = state.shutdown_token();
+        assert!(!token.is_cancelled());
+        state.trigger_shutdown();
+        assert!(token.is_cancelled());
+    }
+
+    /// `cancelled()` future resolves immediately after `trigger_shutdown`,
+    /// so `serve_http`/`serve_stdio`'s graceful-shutdown select branch fires
+    /// without delay. (End-to-end transport tests need a live axum bind +
+    /// tokio runtime and are not unit-testable here.)
+    #[tokio::test]
+    async fn test_shutdown_token_triggers_graceful_exit() {
+        let state = SharedState::new(AppConfig::default());
+        let token = state.shutdown_token();
+        state.trigger_shutdown();
+        tokio::time::timeout(std::time::Duration::from_millis(100), token.cancelled())
+            .await
+            .expect("shutdown token cancelled resolves immediately");
     }
 }

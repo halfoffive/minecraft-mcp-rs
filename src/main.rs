@@ -61,8 +61,13 @@ fn main() {
     // Spawn the MCP server on a dedicated OS thread with its own tokio
     // runtime.  The EnterGuard ensures that `tokio::spawn` and other
     // runtime-dependent operations work within the `block_on` scope.
+    //
+    // The JoinHandle is captured so `MinecraftApp::drop` can trigger
+    // `SharedState::trigger_shutdown` and then join this thread, letting the
+    // MCP transport (stdio or HTTP) exit gracefully on window close instead
+    // of being torn down mid-request when the process exits.
     // ══════════════════════════════════════════════════════════════════
-    std::thread::Builder::new()
+    let mcp_handle: std::thread::JoinHandle<()> = std::thread::Builder::new()
         .name("mcp-server".into())
         .spawn(move || {
             let rt = tokio::runtime::Runtime::new()
@@ -122,6 +127,7 @@ fn main() {
                 state_for_egui,
                 sender_for_egui,
                 receiver_for_egui,
+                mcp_handle,
             )))
         }),
     )

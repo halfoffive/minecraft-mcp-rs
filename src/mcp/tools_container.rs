@@ -143,7 +143,7 @@ impl rmcp::schemars::JsonSchema for TakeFromContainerInput {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 64,
-                    "description": "Number of items to take (default 1)"
+                    "description": "Number of items to take (currently ignored — whole stack is moved; will be respected in a future release)"
                 }
             },
             "required": ["slot"],
@@ -210,7 +210,7 @@ impl rmcp::schemars::JsonSchema for PutIntoContainerInput {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 64,
-                    "description": "Number of items to put (default 1)"
+                    "description": "Number of items to put (currently ignored — whole stack is moved; will be respected in a future release)"
                 }
             },
             "required": ["slot"],

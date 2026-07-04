@@ -17,7 +17,9 @@ use crate::channel::{BotCommandReceiver, ReceiverLease};
 use crate::error::BotError;
 use crate::state::SharedState;
 use crate::tool_select::find_tool_in_inventory;
-use crate::types::{ActAction, ActResult, BlockPos, BotCommand, BotResult, Direction, GameMode};
+use crate::types::{
+    ActAction, ActResult, BlockEntry, BlockPos, BotCommand, BotResult, Direction, GameMode,
+};
 
 // ═══════════════════════════════════════════════════════════════
 // BotActions trait — abstracts azalea Client for testability
@@ -758,7 +760,7 @@ impl<B: BotActions> CommandExecutor<B> {
                 message: format!(
                     "Shift-clicked container slot {slot} (moved whole stack; count={count} is a hint)"
                 ),
-                data: None,
+                data: Some(container_count_ignored_warning()),
             })
         } else {
             Err(BotError::Internal("no container is currently open".into()))
@@ -785,7 +787,7 @@ impl<B: BotActions> CommandExecutor<B> {
                 message: format!(
                     "Shift-clicked slot {slot} to move stack into the container (count={count} is a hint)"
                 ),
-                data: None,
+                data: Some(container_count_ignored_warning()),
             })
         } else {
             Err(BotError::Internal("no container is currently open".into()))
@@ -886,14 +888,13 @@ impl<B: BotActions> CommandExecutor<B> {
         trace!(radius, "QueryNearbyBlocks");
         let snapshot = self.state.read_snapshot();
         let pos = snapshot.self_player.position;
-        let r = radius as i32;
         let blocks: Vec<_> = snapshot
             .blocks
             .iter()
             .filter(|b| {
-                (b.position.x - pos.x).abs() <= r
-                    && (b.position.y - pos.y).abs() <= r
-                    && (b.position.z - pos.z).abs() <= r
+                b.position.x.abs_diff(pos.x) <= radius
+                    && b.position.y.abs_diff(pos.y) <= radius
+                    && b.position.z.abs_diff(pos.z) <= radius
             })
             .cloned()
             .collect();
@@ -909,14 +910,13 @@ impl<B: BotActions> CommandExecutor<B> {
         trace!(radius, "QueryNearbyEntities");
         let snapshot = self.state.read_snapshot();
         let pos = snapshot.self_player.position;
-        let r = radius as i32;
         let entities: Vec<_> = snapshot
             .entities
             .iter()
             .filter(|e| {
-                (e.position.x - pos.x).abs() <= r
-                    && (e.position.y - pos.y).abs() <= r
-                    && (e.position.z - pos.z).abs() <= r
+                e.position.x.abs_diff(pos.x) <= radius
+                    && e.position.y.abs_diff(pos.y) <= radius
+                    && e.position.z.abs_diff(pos.z) <= radius
             })
             .cloned()
             .collect();
@@ -987,9 +987,9 @@ impl<B: BotActions> CommandExecutor<B> {
         match goto_result {
             Ok(()) => {
                 // Reached the target (or pathfinder believes it did).
-                let reached = (current_pos.x - target.x).abs() <= 1
-                    && (current_pos.y - target.y).abs() <= 1
-                    && (current_pos.z - target.z).abs() <= 1;
+                let reached = current_pos.x.abs_diff(target.x) <= 1u32
+                    && current_pos.y.abs_diff(target.y) <= 1u32
+                    && current_pos.z.abs_diff(target.z) <= 1u32;
                 let reason = if reached { "reached" } else { "obstacle" };
                 let obstacle = if reached {
                     None
@@ -1011,18 +1011,13 @@ impl<B: BotActions> CommandExecutor<B> {
                 })
             }
             Err(e) => {
-                // Pathfinder failed — treat as obstacle.
-                let obstacle =
-                    find_obstacle_block(&self.state.read_snapshot(), current_pos, target);
+                // Pathfinder failed — report failure honestly (H9). Previously
+                // this returned `success: true`, misrepresenting a failed
+                // pathfinding attempt as success.
                 Ok(BotResult {
-                    success: true,
-                    message: format!("SmartMove to {target} blocked: {e}"),
-                    data: Some(serde_json::json!({
-                        "reached": false,
-                        "reason": "obstacle",
-                        "position": [current_pos.x, current_pos.y, current_pos.z],
-                        "obstacle": obstacle,
-                    })),
+                    success: false,
+                    message: format!("Pathfinding failed: {e}"),
+                    data: None,
                 })
             }
         }
@@ -1039,7 +1034,7 @@ impl<B: BotActions> CommandExecutor<B> {
 
         if gamemode != GameMode::Creative {
             return Ok(BotResult {
-                success: true,
+                success: false,
                 message: format!("FlyTo {target}: not in creative mode"),
                 data: Some(serde_json::json!({
                     "reached": false,
@@ -1053,9 +1048,9 @@ impl<B: BotActions> CommandExecutor<B> {
         let goto_result = self.bot.goto(&target).await;
         let final_pos = self.state.read_snapshot().self_player.position;
 
-        let reached = (final_pos.x - target.x).abs() <= 1
-            && (final_pos.y - target.y).abs() <= 1
-            && (final_pos.z - target.z).abs() <= 1;
+        let reached = final_pos.x.abs_diff(target.x) <= 1u32
+            && final_pos.y.abs_diff(target.y) <= 1u32
+            && final_pos.z.abs_diff(target.z) <= 1u32;
         let reason = if reached { "reached" } else { "obstacle" };
 
         let success = goto_result.is_ok() || reached;
@@ -1078,7 +1073,6 @@ impl<B: BotActions> CommandExecutor<B> {
         trace!(radius, "CollectItems");
         let snapshot = self.state.read_snapshot();
         let player_pos = snapshot.self_player.position;
-        let r = radius as i32;
 
         // Filter for item entities within radius. Entity types from azalea
         // for dropped items contain "item" (e.g. "item", "item_frame").
@@ -1094,9 +1088,9 @@ impl<B: BotActions> CommandExecutor<B> {
                     || (etype.contains("item") && !etype.contains("frame"))
             })
             .filter(|e| {
-                (e.position.x - player_pos.x).abs() <= r
-                    && (e.position.y - player_pos.y).abs() <= r
-                    && (e.position.z - player_pos.z).abs() <= r
+                e.position.x.abs_diff(player_pos.x) <= radius
+                    && e.position.y.abs_diff(player_pos.y) <= radius
+                    && e.position.z.abs_diff(player_pos.z) <= radius
             })
             .map(|e| e.position)
             .collect();
@@ -1105,24 +1099,27 @@ impl<B: BotActions> CommandExecutor<B> {
             return Ok(BotResult {
                 success: true,
                 message: "No items to collect".into(),
-                data: Some(serde_json::json!({"collected": 0})),
+                data: Some(serde_json::json!({"approached": 0})),
             });
         }
 
-        let mut collected: u32 = 0;
+        // Walk toward each item entity; auto-pickup *may* occur on proximity,
+        // but we cannot verify it from the bot API, so the count is reported
+        // as `approached` rather than `collected` (H10).
+        let mut approached: u32 = 0;
         for target in item_targets {
             // Walk to the item; auto-pickup occurs on proximity.
             if self.bot.goto(&target).await.is_ok() {
                 // Brief pause for the server to process pickup.
                 sleep(Duration::from_millis(200)).await;
-                collected += 1;
+                approached += 1;
             }
         }
 
         Ok(BotResult {
             success: true,
-            message: format!("Collected {collected} item(s)"),
-            data: Some(serde_json::json!({"collected": collected})),
+            message: format!("approached {approached} items, pickup unverified"),
+            data: Some(serde_json::json!({"approached": approached})),
         })
     }
 
@@ -1131,69 +1128,64 @@ impl<B: BotActions> CommandExecutor<B> {
     /// enriched with nearby blocks/entities and self info from the snapshot.
     async fn handle_act(&self, action: ActAction) -> Result<BotResult, BotError> {
         trace!(?action, "Act");
-        let (action_result, reason): (String, Option<String>) = match action {
+        // Each arm yields `(action_result, reason, action_success)`.
+        // `action_success` propagates the inner handler's success/failure to
+        // the top-level `BotResult` instead of always reporting `true` (H8/H9).
+        let (action_result, reason, action_success): (String, Option<String>, bool) = match action {
             ActAction::Move { target } => match self.handle_move_to(target).await {
-                Ok(r) => (r.message, None),
-                Err(e) => ("failed".into(), Some(e.to_string())),
+                Ok(r) => (r.message, None, true),
+                Err(e) => ("failed".into(), Some(e.to_string()), false),
             },
             ActAction::SmartMove { target } => match self.handle_smart_move(target).await {
-                Ok(r) => (r.message, None),
-                Err(e) => ("failed".into(), Some(e.to_string())),
+                Ok(r) => (r.message, None, r.success),
+                Err(e) => ("failed".into(), Some(e.to_string()), false),
             },
             ActAction::Fly { target } => match self.handle_fly_to(target).await {
-                Ok(r) => (r.message, None),
-                Err(e) => ("failed".into(), Some(e.to_string())),
+                Ok(r) => (r.message, None, r.success),
+                Err(e) => ("failed".into(), Some(e.to_string()), false),
             },
             ActAction::Mine { block_pos } => match self.handle_break_block(block_pos) {
-                // TODO(bug): `handle_break_block` only *starts* mining via
+                // `handle_break_block` only *starts* mining via
                 // `Client::start_mining` and returns immediately — it does not
-                // wait for the block to actually break. The compound operation
-                // `CompoundOpExecutor::execute_mine_block` in `bot/ops.rs` waits
-                // for completion (walks to the block, selects the best tool,
-                // sleeps for the calculated mine time, and verifies the block
-                // broke), but it requires a `BotCommandSender` to construct,
-                // which `CommandExecutor` does not own (it holds the receiver,
-                // not a sender). Wiring it in here needs a cross-file change
-                // (passing a sender into the executor). Until then, the
-                // `Act::Mine` result honestly reports that mining was *started*
-                // (see `handle_break_block`'s "Started mining block at {pos}"
-                // message), not completed.
-                Ok(r) => (r.message, None),
-                Err(e) => ("failed".into(), Some(e.to_string())),
+                // wait for the block to actually break. In the `act` context
+                // we report `success=false` and flag completion as unverified
+                // (H8). The compound `CompoundOpExecutor::execute_mine_block`
+                // in `bot/ops.rs` does wait for completion, but wiring it here
+                // needs a `BotCommandSender` the executor doesn't own (it
+                // holds the receiver, not a sender).
+                Ok(_) => (
+                    format!("Started mining block at {} (fire-and-forget)", block_pos),
+                    Some("mining started but completion unverified".into()),
+                    false,
+                ),
+                Err(e) => ("failed".into(), Some(e.to_string()), false),
             },
             ActAction::Attack { entity_id } => match self.handle_attack_entity(entity_id) {
-                Ok(r) => (r.message, None),
-                Err(e) => ("failed".into(), Some(e.to_string())),
+                Ok(r) => (r.message, None, true),
+                Err(e) => ("failed".into(), Some(e.to_string()), false),
             },
             ActAction::CollectItems { radius } => match self.handle_collect_items(radius).await {
-                Ok(r) => (r.message, None),
-                Err(e) => ("failed".into(), Some(e.to_string())),
+                Ok(r) => (r.message, None, r.success),
+                Err(e) => ("failed".into(), Some(e.to_string()), false),
             },
         };
 
-        // Build the enriched result from the current snapshot.
+        // Build the enriched result from the current snapshot. The perception
+        // radius is read from AppConfig (H14) instead of a hardcoded 16.
         let snapshot = self.state.read_snapshot();
         let player_pos = snapshot.self_player.position;
-        let perception_radius: i32 = 16;
+        let perception_radius: u32 = self.state.read_config().block_perception_radius as u32;
 
-        let nearby_blocks: Vec<_> = snapshot
-            .blocks
-            .iter()
-            .filter(|b| {
-                (b.position.x - player_pos.x).abs() <= perception_radius
-                    && (b.position.y - player_pos.y).abs() <= perception_radius
-                    && (b.position.z - player_pos.z).abs() <= perception_radius
-            })
-            .cloned()
-            .collect();
+        let nearby_blocks =
+            filter_blocks_by_perception(&snapshot.blocks, player_pos, perception_radius);
 
         let nearby_entities: Vec<_> = snapshot
             .entities
             .iter()
             .filter(|e| {
-                (e.position.x - player_pos.x).abs() <= perception_radius
-                    && (e.position.y - player_pos.y).abs() <= perception_radius
-                    && (e.position.z - player_pos.z).abs() <= perception_radius
+                e.position.x.abs_diff(player_pos.x) <= perception_radius
+                    && e.position.y.abs_diff(player_pos.y) <= perception_radius
+                    && e.position.z.abs_diff(player_pos.z) <= perception_radius
             })
             .cloned()
             .collect();
@@ -1207,7 +1199,7 @@ impl<B: BotActions> CommandExecutor<B> {
         };
 
         Ok(BotResult {
-            success: true,
+            success: action_success,
             message: "Act completed".into(),
             data: Some(serde_json::to_value(&act_result).unwrap_or_default()),
         })
@@ -1280,12 +1272,26 @@ fn find_obstacle_block(
     target: BlockPos,
 ) -> Option<String> {
     // Walk the integer line from current toward target (XZ plane) and
-    // return the first non-air block found in the snapshot.
-    let dx = (target.x - current.x).signum();
-    let dz = (target.z - current.z).signum();
-    let steps = ((target.x - current.x).abs()).max((target.z - current.z).abs());
+    // return the first non-air block found in the snapshot. Use `abs_diff`
+    // for the distance and `cmp` for the direction sign so i32::MIN/MAX
+    // extremes don't overflow the old `(target.x - current.x)` subtraction
+    // (H15). The scan is capped: snapshots only carry nearby blocks, so
+    // scanning billions of steps for a pathological huge gap is pointless
+    // and would also risk overflow in the position arithmetic.
+    const MAX_SCAN_STEPS: u32 = 1024;
+    let dx = target.x.cmp(&current.x) as i32;
+    let dz = target.z.cmp(&current.z) as i32;
+    let steps = target
+        .x
+        .abs_diff(current.x)
+        .max(target.z.abs_diff(current.z))
+        .min(MAX_SCAN_STEPS);
     for i in 1..=steps {
-        let pos = BlockPos::new(current.x + dx * i, current.y, current.z + dz * i);
+        let pos = BlockPos::new(
+            current.x + dx * (i as i32),
+            current.y,
+            current.z + dz * (i as i32),
+        );
         if let Some(block) = snapshot.blocks.iter().find(|b| b.position == pos)
             && !block.block_type.is_empty()
             && block.block_type != "air"
@@ -1294,6 +1300,36 @@ fn find_obstacle_block(
         }
     }
     None
+}
+
+/// Filter `blocks` to those within `radius` (Chebyshev distance on each axis)
+/// of `player_pos`. Uses `abs_diff` so i32 extremes don't overflow the old
+/// `(a - b).abs()` subtraction (H15). Extracted as a pure helper so the
+/// perception-radius filtering is unit-testable (H14).
+fn filter_blocks_by_perception(
+    blocks: &[BlockEntry],
+    player_pos: BlockPos,
+    radius: u32,
+) -> Vec<BlockEntry> {
+    blocks
+        .iter()
+        .filter(|b| {
+            b.position.x.abs_diff(player_pos.x) <= radius
+                && b.position.y.abs_diff(player_pos.y) <= radius
+                && b.position.z.abs_diff(player_pos.z) <= radius
+        })
+        .cloned()
+        .collect()
+}
+
+/// JSON payload embedded in `take_from_container` / `put_into_container`
+/// results to honestly flag that `count` is currently ignored — the whole
+/// stack is moved via shift-click, and partial moves are deferred to a
+/// future release (H11). Extracted as a pure helper so the warning field
+/// is unit-testable (the success path needs a real azalea `ContainerHandle`
+/// that can't be constructed in unit tests).
+fn container_count_ignored_warning() -> serde_json::Value {
+    serde_json::json!({"warning": "count ignored, whole stack moved"})
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2369,6 +2405,209 @@ mod tests {
 
         assert_eq!(log.jump_calls.load(Ordering::SeqCst), 1);
         assert_eq!(log.use_item_calls.load(Ordering::SeqCst), 1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // H15 (Task 2): abs_diff numerical safety
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_find_obstacle_block_i32_min_no_overflow() {
+        // i32::MIN and i32::MAX differ by 4_294_967_295, which overflows the
+        // old `(target.x - current.x).abs()` subtraction in debug builds.
+        // abs_diff + cmp keep this panic-free, and the scan is capped so the
+        // loop terminates quickly even with an extreme gap. The snapshot is
+        // empty so the result is `None`; the point of this test is that the
+        // call does not panic.
+        let snapshot = crate::types::WorldSnapshot::default();
+        let current = BlockPos::new(i32::MAX, 0, 0);
+        let target = BlockPos::new(i32::MIN, 0, 0);
+        let _ = find_obstacle_block(&snapshot, current, target);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // H14 (Task 4): handle_act reads perception_radius from config
+    // ═══════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_handle_act_uses_config_perception_radius() {
+        // handle_act must read the perception radius from AppConfig instead
+        // of the old hardcoded `16`. With block_perception_radius=8, a block
+        // 12 blocks away (inside the old default of 16 but outside 8) must be
+        // excluded from nearby_blocks.
+        let (executor, sender, state, _log) = make_executor();
+        state.update_config(|c| c.block_perception_radius = 8);
+        let snap = crate::types::WorldSnapshot {
+            blocks: vec![BlockEntry {
+                position: BlockPos::new(12, 64, 0),
+                block_type: "stone".into(),
+                block_state: None,
+            }],
+            entities: vec![],
+            self_player: SelfPlayer {
+                uuid: "p".into(),
+                username: "Bot".into(),
+                position: BlockPos::new(0, 64, 0),
+                health: 20.0,
+                hunger: 20,
+                gamemode: GameMode::Survival,
+                held_item_slot: 0,
+                inventory: Vec::new(),
+            },
+            timestamp: 1,
+            chunk_summary: vec![],
+            commands_enabled: None,
+        };
+        state.update_snapshot(snap);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(
+            &sender,
+            BotCommand::Act(ActAction::Move {
+                target: BlockPos::new(0, 64, 0),
+            }),
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        let br = result.unwrap();
+        let data = br.data.expect("act must return data");
+        let nearby_blocks = data
+            .get("nearby_blocks")
+            .and_then(|v| v.as_array())
+            .expect("nearby_blocks array field");
+        assert!(
+            nearby_blocks.is_empty(),
+            "block at distance 12 must be excluded when perception_radius=8, got: {nearby_blocks:?}"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // H9 (Task 6): SmartMove returns success=false on pathfinding error
+    // ═══════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_smart_move_returns_success_false_on_pathfinding_err() {
+        // When pathfinding fails, SmartMove must report success=false
+        // (previously returned success=true even on failure).
+        let (executor, sender, state, log) = make_executor();
+        make_populated_snapshot(&state);
+        log.goto_succeeds.store(false, Ordering::SeqCst);
+        let handle = spawn_executor(executor);
+
+        let result =
+            send_and_await(&sender, BotCommand::SmartMove(BlockPos::new(10, 64, 10))).await;
+        assert!(
+            result.is_ok(),
+            "SmartMove returns Ok(BotResult), got: {:?}",
+            result
+        );
+        let br = result.unwrap();
+        assert!(
+            !br.success,
+            "success must be false on pathfinding failure, got: {:?}",
+            br
+        );
+        assert!(
+            br.message.contains("Pathfinding failed"),
+            "message must mention pathfinding failure, got: {}",
+            br.message
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // H10 (Task 7): collect_items reports `approached` not `collected`
+    // ═══════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_collect_items_returns_approached_field() {
+        // collect_items cannot verify pickup, so it must report `approached`
+        // (not `collected`). With a populated snapshot containing no item
+        // entities, approached=0.
+        let (executor, sender, state, _log) = make_executor();
+        make_populated_snapshot(&state);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::CollectItems(16)).await;
+        assert!(result.is_ok());
+        let br = result.unwrap();
+        let data = br.data.expect("collect_items must return data");
+        assert!(
+            data.get("approached").is_some(),
+            "data must contain `approached` field, got: {data}"
+        );
+        assert!(
+            data.get("collected").is_none(),
+            "data must NOT contain `collected` field, got: {data}"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // H11 (Task 8): container count warning field
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_container_warning_field_present() {
+        // The success path of take/put container can't be exercised here
+        // (it requires a real azalea ContainerHandle that can't be
+        // constructed in unit tests — see `simulate_container_open`). The
+        // warning payload itself is a pure helper, so we test it directly.
+        let data = container_count_ignored_warning();
+        assert_eq!(data["warning"], "count ignored, whole stack moved");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // H8 (Task 9): Act::Mine is fire-and-forget (success=false)
+    // ═══════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_act_mine_returns_success_false_with_warning() {
+        // Act::Mine only *starts* mining via start_mining and returns
+        // immediately; it cannot verify completion. It must report
+        // success=false with a warning that completion is unverified.
+        let (executor, sender, state, _log) = make_executor();
+        make_populated_snapshot(&state);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(
+            &sender,
+            BotCommand::Act(ActAction::Mine {
+                block_pos: BlockPos::new(5, 64, 0),
+            }),
+        )
+        .await;
+        assert!(result.is_ok());
+        let br = result.unwrap();
+        assert!(
+            !br.success,
+            "Act::Mine must report success=false (fire-and-forget), got: {:?}",
+            br
+        );
+        let data = br.data.expect("act must return data");
+        let action_result = data
+            .get("action_result")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            action_result.contains("fire-and-forget"),
+            "action_result must mention fire-and-forget, got: {action_result}"
+        );
+        let reason = data.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            reason.contains("completion unverified"),
+            "reason must warn completion is unverified, got: {reason}"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
     }
 
     // ═══════════════════════════════════════════════════════════════

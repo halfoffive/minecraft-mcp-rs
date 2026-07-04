@@ -38,6 +38,10 @@ pub struct MinecraftApp {
     /// Handle to the bot-connection OS thread (if running). Joined on Drop
     /// so the process exits cleanly when the window closes.
     bot_thread: Option<JoinHandle<()>>,
+    /// Handle to the MCP server OS thread. Joined on Drop after triggering
+    /// [`SharedState::trigger_shutdown`] so the stdio/HTTP transport exits
+    /// gracefully instead of being killed mid-request.
+    mcp_handle: Option<JoinHandle<()>>,
     /// Local edit buffers for the settings panel.  Initialised from
     /// [`SharedState`] config on first frame.
     edit_config: Option<EditConfig>,
@@ -93,24 +97,37 @@ impl From<&AppConfig> for EditConfig {
 
 impl EditConfig {
     /// Write the edited values back into [`SharedState`] config.
-    pub(crate) fn apply(&self, state: &SharedState) {
+    ///
+    /// Validates the resulting [`AppConfig`] before applying it; on
+    /// validation failure returns the error message and leaves the stored
+    /// config untouched so the user can correct the invalid field.
+    pub(crate) fn apply(&self, state: &SharedState) -> Result<(), String> {
+        // Build the candidate config from a clone of the current values, then
+        // validate before taking the write lock. The window between read and
+        // write is benign here because `apply` is the sole writer of config
+        // (invoked only from the UI thread on Connect click).
+        let mut new_config = state.read_config().clone();
+        new_config.mc_address = self.mc_address.clone();
+        new_config.mc_port = self.mc_port;
+        new_config.ai_username = self.ai_username.clone();
+        new_config.mcp_address = self.mcp_address.clone();
+        new_config.mcp_port = self.mcp_port;
+        new_config.task_name = self.task_name.clone();
+        new_config.chunk_scan_radius = self.chunk_scan_radius;
+        new_config.block_perception_radius = self.block_perception_radius;
+        new_config.snapshot_interval_ms = self.snapshot_interval_ms;
+        new_config.reconnect_initial_delay_ms = self.reconnect_initial_delay_ms;
+        new_config.reconnect_max_delay_ms = self.reconnect_max_delay_ms;
+        new_config.command_timeout_secs = self.command_timeout_secs;
+        new_config.mcp_token = self.mcp_token.clone();
+        new_config.mcp_transport = self.mcp_transport;
+        new_config.language = self.language;
+
+        new_config.validate()?;
         state.update_config(|cfg| {
-            cfg.mc_address = self.mc_address.clone();
-            cfg.mc_port = self.mc_port;
-            cfg.ai_username = self.ai_username.clone();
-            cfg.mcp_address = self.mcp_address.clone();
-            cfg.mcp_port = self.mcp_port;
-            cfg.task_name = self.task_name.clone();
-            cfg.chunk_scan_radius = self.chunk_scan_radius;
-            cfg.block_perception_radius = self.block_perception_radius;
-            cfg.snapshot_interval_ms = self.snapshot_interval_ms;
-            cfg.reconnect_initial_delay_ms = self.reconnect_initial_delay_ms;
-            cfg.reconnect_max_delay_ms = self.reconnect_max_delay_ms;
-            cfg.command_timeout_secs = self.command_timeout_secs;
-            cfg.mcp_token = self.mcp_token.clone();
-            cfg.mcp_transport = self.mcp_transport;
-            cfg.language = self.language;
+            *cfg = new_config;
         });
+        Ok(())
     }
 }
 
@@ -120,6 +137,7 @@ impl MinecraftApp {
         state: Arc<SharedState>,
         _sender: BotCommandSender,
         command_receiver: Arc<std::sync::Mutex<Option<BotCommandReceiver>>>,
+        mcp_handle: JoinHandle<()>,
     ) -> Self {
         // _sender is intentionally unused here — the MCP server thread holds
         // its own clone and is the sole consumer of the command channel. The
@@ -129,6 +147,7 @@ impl MinecraftApp {
             state,
             command_receiver,
             bot_thread: None,
+            mcp_handle: Some(mcp_handle),
             edit_config: None,
         }
     }
@@ -184,6 +203,12 @@ impl Drop for MinecraftApp {
         self.state.request_disconnect();
         self.state.set_online(false);
 
+        // Trigger MCP server graceful shutdown so the stdio/HTTP transport
+        // returns promptly. After this, `serve_http`'s `with_graceful_shutdown`
+        // future resolves and `serve_stdio`'s `tokio::select!` takes the
+        // shutdown branch — both should return in milliseconds.
+        self.state.trigger_shutdown();
+
         if let Some(handle) = self.bot_thread.take() {
             // Try to join with a 3-second timeout to avoid hanging the UI
             // thread. The bot thread runs its own tokio runtime; with
@@ -199,6 +224,24 @@ impl Drop for MinecraftApp {
             match rx.recv_timeout(std::time::Duration::from_secs(3)) {
                 Ok(()) => tracing::info!("bot thread joined cleanly"),
                 Err(_) => tracing::warn!("bot thread did not exit within 3s — abandoning join"),
+            }
+        }
+
+        if let Some(handle) = self.mcp_handle.take() {
+            // Same timeout pattern as the bot thread for consistency and
+            // safety. Graceful shutdown should return in milliseconds, but
+            // if a misbehaving MCP client holds a connection open (HTTP) or
+            // the rmcp transport doesn't observe the select branch promptly
+            // (stdio), we abandon the join after 3s rather than hanging the
+            // window close.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = handle.join();
+                let _ = tx.send(());
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+                Ok(()) => tracing::info!("mcp thread joined cleanly"),
+                Err(_) => tracing::warn!("mcp thread did not exit within 3s — abandoning join"),
             }
         }
     }
@@ -250,9 +293,15 @@ impl App for MinecraftApp {
                             let connect_clicked = settings::settings_panel(ui, &self.state, edit);
 
                             if connect_clicked {
-                                // Persist edits before connecting.
-                                edit.apply(&self.state);
-                                self.connect_bot();
+                                // Persist edits before connecting. If
+                                // validation fails, surface the error via
+                                // `last_error` (shown in the Status panel)
+                                // and skip connecting so the user can fix
+                                // the invalid field.
+                                match edit.apply(&self.state) {
+                                    Ok(()) => self.connect_bot(),
+                                    Err(e) => self.state.set_last_error(e),
+                                }
                             }
                         }
                     },

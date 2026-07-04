@@ -9,6 +9,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`SharedState::modify_snapshot<F: FnMut(&mut WorldSnapshot)>`** closure API
+  (based on `ArcSwap::rcu`) for atomic read-modify-write of the world snapshot.
+- **`SharedState::shutdown_token()` / `SharedState::trigger_shutdown()`** —
+  graceful shutdown signal for the MCP server (`serve_http` / `serve_stdio`);
+  triggered by `MinecraftApp::drop`.
+- **`BotState::tick_abort_handles: Arc<Mutex<Vec<AbortHandle>>>`** — tracks
+  `handle_tick` `spawn_local` tasks so `handle_disconnect` can abort them.
+- **`EditConfig::apply` now returns `Result<(), String>`**, invoking
+  `AppConfig::validate()` and refusing empty/invalid configs (setting
+  `last_error`).
+
+### Fixed
+
+- **H1:** `SharedState::modify_snapshot` adopted by `handle_death` /
+  `add_player_to_snapshot` / `handle_remove_player` / `handle_update_player`,
+  eliminating the snapshot lost-update race (all `TODO(race)` comments removed).
+- **H2:** `BotState::tick_abort_handles` aborts in-flight `handle_tick` tasks
+  on `handle_disconnect`, preventing ECS-teardown panics.
+- **H3:** `serve_http` uses `axum::serve(...).with_graceful_shutdown(...)`
+  for graceful shutdown.
+- **H4:** `serve_stdio` races `shutdown_token.cancelled()` against stdin EOF
+  via `tokio::select!` so shutdown returns immediately.
+- **H5:** MCP thread `JoinHandle` stored in `MinecraftApp`; `Drop` calls
+  `trigger_shutdown()` and joins the MCP thread (3s timeout, matching the bot
+  thread).
+- **H6:** `extract_bearer_token` matches the `Bearer ` scheme case-insensitively
+  (`eq_ignore_ascii_case`) per RFC 6750 §2.1; doc comment corrected.
+- **H7:** `default_mcp_token()` now generates a random UUID v4 (replacing the
+  hardcoded `"minecraft-mcp-rs"`); `EditConfig::apply` rejects empty tokens;
+  UI token input masked with `.password(true)`.
+- **H8:** `Act::Mine` now returns `success: false` + a `warning` and a message
+  flagging mining as fire-and-forget (completion unverified).
+- **H9:** `handle_smart_move`'s `Err(e)` branch returns `success: false`
+  instead of the misleading `success: true`.
+- **H10:** `handle_collect_items` returns `approached` (renamed from
+  `collected`) with message "approached N items, pickup unverified".
+- **H11:** `take_from_container` / `put_into_container` schema descriptions
+  clarify that `count` is currently ignored (whole stack moved); response JSON
+  now includes a `warning` field.
+- **H14:** `handle_act`'s `perception_radius` now reads
+  `AppConfig::block_perception_radius` instead of the hardcoded `16`.
+- **H15:** `find_obstacle_block` and 7 nearby-filter sites use
+  `i32::abs_diff` instead of `(a-b).abs()`, eliminating `i32::MIN`/`MAX`
+  overflow panic risk.
+- **H16:** `logging.rs` Mutex locks use `.unwrap_or_else(|e| e.into_inner())`
+  for poisoning recovery, consistent with `state.rs` / `channel.rs` /
+  `events.rs`.
+- **L1:** `handle_spawn` reordered to call `set_bot_ecs(...)` before
+  `set_online(true)`, ensuring `bot_ecs` is ready to write `AppExit::Success`
+  when disconnect fires.
+- **M11:** `handle_disconnect` calls `set_container_handle(None)` to clear
+  stale container handles on reconnect.
+- **M13:** Bearer token comparison now uses constant-time
+  `constant_time_token_eq` (byte-wise OR accumulator), closing the timing
+  side-channel.
+
+### Known Issues
+
+- **C1 (deferred):** `From<BotError> for ErrorData` is still dead code — MCP
+  tool handlers continue to return `String`, so clients cannot receive
+  structured error codes. Fixing requires re-signing all `#[tool]` handlers to
+  return `Result<CallToolResult, ErrorData>` (larger refactor, out of scope for
+  this branch). See `review-report.md` C1.
+- **H12 (deferred):** `RealBotClient::goto` still uses a 10Hz busy-poll loop
+  with a hardcoded 30s timeout decoupled from `AppConfig::command_timeout_secs`.
+  Fix requires azalea pathfinder completion-event integration or a wider
+  polling refactor, out of scope for this branch. See `review-report.md` H12.
+- **H13 (deferred):** Dirty-chunk full scans (98304 blocks/chunk) in
+  `build_snapshot_inner` still lack spatial indexing / Vec preallocation /
+  `&'static str` block-name caching; performance refactor out of scope for
+  this branch. See `review-report.md` H13.
+- **tick_abort_handles growth (deferred):** `tick_abort_handles` in
+  `BotState` grows unbounded over a single long session — tick tasks spawned
+  via `spawn_local` push an `AbortHandle` that is never reaped after the task
+  completes; the `Vec` is only drained on disconnect. At ~2 spawns/sec this
+  accumulates roughly 1–2 MB/hour. Suggested fix: migrate to a `JoinSet` or
+  periodically `retain(|h| !h.is_finished())`.
+
+### Added
+
 - **UI internationalization (i18n):** desktop UI now supports English and
   Simplified Chinese, switchable at runtime via a Language dropdown in the
   Settings panel (takes effect next frame, no reconnect needed). Translation

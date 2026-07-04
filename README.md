@@ -170,14 +170,14 @@ transport in the Settings panel:
 - **stdio** — the MCP server listens on stdin/stdout (default for Claude
   Desktop / Cursor).
 - **HTTP** — the MCP server binds to `127.0.0.1` only; set the port and
-  Bearer token (defaults to the project name `minecraft-mcp-rs`). The MCP
-  Config panel generates the matching JSON config for copying into your MCP
-  client.
+  Bearer token (a random UUID v4 is generated on each `AppConfig::default()`;
+  override it in the Settings panel). The MCP Config panel generates the
+  matching JSON config for copying into your MCP client.
 
 运行后会同时启动 MCP 服务器与 egui 桌面 UI。在“设置”面板中选择 MCP 传输方式：
 
 - **stdio** —— MCP 服务器监听标准输入 / 输出（Claude Desktop / Cursor 的默认方式）。
-- **HTTP** —— MCP 服务器仅绑定到 `127.0.0.1`；可在 UI 中设置端口与 Bearer Token（默认使用项目名称 `minecraft-mcp-rs`）。MCP 配置面板会生成对应的 JSON 配置，可复制到你的 MCP 客户端中。
+- **HTTP** —— MCP 服务器仅绑定到 `127.0.0.1`；可在 UI 中设置端口与 Bearer Token（每次 `AppConfig::default()` 时随机生成 UUID v4，可在设置面板中覆盖）。MCP 配置面板会生成对应的 JSON 配置，可复制到你的 MCP 客户端中。
 
 By default the bot tries to connect to `127.0.0.1:25565` as `AI_Bot`. Tweak
 settings in the UI panel or via environment before startup (see Configuration).
@@ -230,7 +230,7 @@ settings and spawn the bot connection on a dedicated background thread.
 | `mcp_transport` | `Http` | MCP transport: `Stdio` or `Http` / MCP 传输方式：`Stdio` 或 `Http` |
 | `mcp_address` | `127.0.0.1` | MCP HTTP bind address (loopback only) / MCP HTTP 绑定地址（仅本地回环） |
 | `mcp_port` | `3000` | MCP HTTP port / MCP HTTP 端口 |
-| `mcp_token` | `minecraft-mcp-rs` | Bearer token for HTTP transport / HTTP 传输的 Bearer Token |
+| `mcp_token` | random UUID v4 | Bearer token for HTTP transport (generated on each `AppConfig::default()`) / HTTP 传输的 Bearer Token（每次 `AppConfig::default()` 时随机生成） |
 | `language` | `En` | UI language: `En` or `ZhCn` / UI 语言：`En` 或 `ZhCn` |
 | `chunk_scan_radius` | `8` | Chunks to scan (1–16) / 扫描区块半径（1–16） |
 | `block_perception_radius` | `32` | Block awareness range (8–64) / 方块感知范围（8–64） |

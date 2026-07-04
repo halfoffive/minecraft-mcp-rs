@@ -72,7 +72,9 @@ pub async fn handle_act(
 pub const ACT_DESCRIPTION: &str = "Unified action tool for iterative mining/exploration loops. \
     Executes one action (move, smart_move, fly, mine, attack, collect_items) and returns the \
     action result plus nearby blocks, entities, and self info. Designed for models to call \
-    repeatedly: act → observe surroundings → decide next act.";
+    repeatedly: act → observe surroundings → decide next act. \
+    Note: the `mine` action is fire-and-forget — it starts mining but does not verify the block \
+    broke (completion is unverified; `success` is reported as `false` for `mine` with a warning).";
 
 /// Builder function returning the rmcp `Tool` descriptor for `act`.
 ///
