@@ -38,8 +38,20 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         | BotCommand::Teleport(pos)
         | BotCommand::BreakBlock(pos)
         | BotCommand::PlaceBlock(pos, _)
-        | BotCommand::UseItemOnBlock(pos, _)
         | BotCommand::OpenContainer(pos) => validate_position(pos),
+
+        // UseItemOnBlock additionally takes an optional hotbar slot (0-8).
+        BotCommand::UseItemOnBlock(pos, slot) => {
+            validate_position(pos)?;
+            if let Some(s) = slot
+                && *s > 8
+            {
+                return Err(BotError::InvalidParams(format!(
+                    "UseItemOnBlock hotbar slot must be 0-8, got {s}"
+                )));
+            }
+            Ok(())
+        }
 
         // Direction is verified by the type system — no runtime checks needed.
         BotCommand::WalkDirection(_, _) => Ok(()),
@@ -66,14 +78,48 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
             Ok(())
         }
 
-        // Slotted operations require a positive count.
-        BotCommand::DropItem(_, count)
-        | BotCommand::TakeFromContainer(_, count)
-        | BotCommand::PutIntoContainer(_, count) => {
+        // Slotted operations require a valid slot and a positive count.
+        // DropItem targets the player inventory (hotbar 0-8, main 9-35).
+        BotCommand::DropItem(slot, count) => {
+            if *slot > 35 {
+                return Err(BotError::InvalidParams(format!(
+                    "DropItem slot must be 0-35, got {slot}"
+                )));
+            }
             if *count == 0 {
-                return Err(BotError::InvalidParams(
-                    "Count must be greater than 0".into(),
-                ));
+                return Err(BotError::InvalidParams(format!(
+                    "DropItem count must be > 0, got {count}"
+                )));
+            }
+            Ok(())
+        }
+
+        // Container slots can go up to 50 (large chests).
+        BotCommand::TakeFromContainer(slot, count) => {
+            if *slot > 50 {
+                return Err(BotError::InvalidParams(format!(
+                    "TakeFromContainer slot must be 0-50, got {slot}"
+                )));
+            }
+            if *count == 0 {
+                return Err(BotError::InvalidParams(format!(
+                    "TakeFromContainer count must be > 0, got {count}"
+                )));
+            }
+            Ok(())
+        }
+
+        // PutIntoContainer mirrors TakeFromContainer's bounds.
+        BotCommand::PutIntoContainer(slot, count) => {
+            if *slot > 50 {
+                return Err(BotError::InvalidParams(format!(
+                    "PutIntoContainer slot must be 0-50, got {slot}"
+                )));
+            }
+            if *count == 0 {
+                return Err(BotError::InvalidParams(format!(
+                    "PutIntoContainer count must be > 0, got {count}"
+                )));
             }
             Ok(())
         }
@@ -128,7 +174,7 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
 
         // World view radius is capped at 32 chunks.
         BotCommand::QueryWorldView(radius) => {
-            if *radius == 0 {
+            if *radius == 0 || *radius > 32 {
                 return Err(BotError::InvalidParams(format!(
                     "QueryWorldView radius must be between 1 and 32, got {radius}"
                 )));
@@ -414,6 +460,28 @@ mod tests {
     }
 
     #[test]
+    fn test_use_item_on_block_valid_slot() {
+        // Hotbar slot 0-8 is valid.
+        for slot in 0..=8u8 {
+            let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), Some(slot));
+            assert!(
+                validate_command(&cmd).is_ok(),
+                "UseItemOnBlock slot {slot} should be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn test_use_item_on_block_invalid_slot() {
+        // Slot 9 is outside the hotbar range.
+        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), Some(9));
+        assert!(validate_command(&cmd).is_err());
+        // u8::MAX is far out of range.
+        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), Some(u8::MAX));
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
     fn test_open_container_valid() {
         let cmd = BotCommand::OpenContainer(BlockPos::new(10, 64, -10));
         assert!(validate_command(&cmd).is_ok());
@@ -612,6 +680,23 @@ mod tests {
     }
 
     #[test]
+    fn test_drop_item_valid_slot_boundary() {
+        // Player inventory spans hotbar 0-8 and main 9-35.
+        let cmd = BotCommand::DropItem(35, 1);
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_drop_item_slot_too_high() {
+        // Slot 36 is outside the player inventory range.
+        let cmd = BotCommand::DropItem(36, 1);
+        assert!(validate_command(&cmd).is_err());
+        // u8::MAX is far out of range.
+        let cmd = BotCommand::DropItem(u8::MAX, 1);
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
     fn test_take_from_container_valid() {
         let cmd = BotCommand::TakeFromContainer(0, 1);
         assert!(validate_command(&cmd).is_ok());
@@ -624,6 +709,22 @@ mod tests {
     }
 
     #[test]
+    fn test_take_from_container_valid_slot_boundary() {
+        // Large chests can use slots up to 50.
+        let cmd = BotCommand::TakeFromContainer(50, 1);
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_take_from_container_slot_too_high() {
+        // Slot 51 exceeds the container slot range.
+        let cmd = BotCommand::TakeFromContainer(51, 1);
+        assert!(validate_command(&cmd).is_err());
+        let cmd = BotCommand::TakeFromContainer(u8::MAX, 1);
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
     fn test_put_into_container_valid() {
         let cmd = BotCommand::PutIntoContainer(0, 64);
         assert!(validate_command(&cmd).is_ok());
@@ -632,6 +733,22 @@ mod tests {
     #[test]
     fn test_put_into_container_zero_count() {
         let cmd = BotCommand::PutIntoContainer(0, 0);
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_put_into_container_valid_slot_boundary() {
+        // Large chests can use slots up to 50.
+        let cmd = BotCommand::PutIntoContainer(50, 1);
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_put_into_container_slot_too_high() {
+        // Slot 51 exceeds the container slot range.
+        let cmd = BotCommand::PutIntoContainer(51, 1);
+        assert!(validate_command(&cmd).is_err());
+        let cmd = BotCommand::PutIntoContainer(u8::MAX, 1);
         assert!(validate_command(&cmd).is_err());
     }
 
@@ -755,6 +872,15 @@ mod tests {
     #[test]
     fn test_query_world_view_zero() {
         let cmd = BotCommand::QueryWorldView(0);
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_query_world_view_too_large() {
+        // Values > 32 are rejected to keep the world view bounded.
+        let cmd = BotCommand::QueryWorldView(33);
+        assert!(validate_command(&cmd).is_err());
+        let cmd = BotCommand::QueryWorldView(u8::MAX);
         assert!(validate_command(&cmd).is_err());
     }
 

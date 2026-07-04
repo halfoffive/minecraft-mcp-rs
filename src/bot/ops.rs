@@ -91,7 +91,7 @@ impl CompoundOpExecutor {
     /// 2. Query block type from the world snapshot.
     /// 3. If `use_best_tool`, select the best tool for the block.
     /// 4. If a specialised tool is required but not found, return [`BotError::ToolNotFound`].
-    /// 5. If the tool is not in the hotbar, switch to its slot.
+    /// 5. Equip the selected tool via the state machine's `EquipTool` step.
     /// 6. Walk to the block vicinity.
     /// 7. Verify arrival.
     /// 8. Start mining.
@@ -129,6 +129,7 @@ impl CompoundOpExecutor {
         let required_tool = best_tool_for_block(&block_type);
         let mut tool_type = ToolType::Hand;
         let mut material = MaterialTier::Wood;
+        let mut skip_equip = false;
 
         if use_best_tool && required_tool != ToolType::Hand {
             let inventory = self.query_inventory().await?;
@@ -145,12 +146,17 @@ impl CompoundOpExecutor {
             tool_type = selection.tool_type;
             material = selection.material.unwrap_or(MaterialTier::Wood);
 
-            // Step 5: Switch to tool slot if we have one
-            if let Some(slot) = selection.hotbar_slot {
-                trace!(slot, "switching to tool slot");
-                self.sender
-                    .send_command(BotCommand::SwitchHotbarSlot(slot))
-                    .await?;
+            // If the best tool is only in the main inventory (not hotbar),
+            // we can't equip it — fall back to mining with whatever is held.
+            // Skip the EquipTool state to avoid a guaranteed error.
+            if selection.needs_move_to_hotbar {
+                warn!(
+                    ?tool_type,
+                    "best tool is in main inventory, mining with current tool"
+                );
+                tool_type = ToolType::Hand;
+                material = MaterialTier::Wood;
+                skip_equip = true;
             }
         }
 
@@ -160,6 +166,12 @@ impl CompoundOpExecutor {
 
         // Step 6-10: Drive state machine
         state = op.advance(state, OperationEvent::Start);
+
+        // If the best tool was only in the main inventory, skip equipping
+        // and mine with whatever is currently held.
+        if skip_equip {
+            state = op.advance(state, OperationEvent::ToolEquipped);
+        }
 
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
             match op.current_action(&state) {
@@ -231,7 +243,13 @@ impl CompoundOpExecutor {
 
                     // Step 10: Verify block broken
                     let new_snapshot = self.state.read_snapshot();
-                    let still_there = new_snapshot.blocks.iter().any(|b| b.position == pos);
+                    // A post-mine snapshot may contain an "air" entry at this
+                    // position; treat that as "block gone" rather than "still
+                    // present" so successful mining isn't reported as failure.
+                    let still_there = new_snapshot
+                        .blocks
+                        .iter()
+                        .any(|b| b.position == pos && b.block_type != "air");
                     if still_there {
                         warn!(?pos, "block still present after mining time");
                         state = op.advance(
@@ -328,12 +346,12 @@ impl CompoundOpExecutor {
         }
 
         // Build state machine
-        let op = PlaceBlockOperation::new(pos, block_type.clone());
+        let op = PlaceBlockOperation::new(pos, block_type.clone(), ToolType::Hand);
         let mut state = OperationState::Idle;
 
         state = op.advance(state, OperationEvent::Start);
-        // EquippingTool has no current_action — item selection was handled above,
-        // so advance past it with ToolEquipped.
+        // EquippingTool is skipped — item selection was handled above
+        // via SwitchHotbarSlot, so advance past it with ToolEquipped.
         state = op.advance(state, OperationEvent::ToolEquipped);
 
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
@@ -511,10 +529,10 @@ impl CompoundOpExecutor {
 
         let (_material, slot) = found.unwrap_or((MaterialTier::Wood, 0));
 
-        // Step 2: Switch to the slot
-        self.sender
-            .send_command(BotCommand::SwitchHotbarSlot(slot))
-            .await?;
+        // Tool equipping is handled entirely by the state machine's EquipTool
+        // step; switching the hotbar slot manually here would both duplicate
+        // that and fail for tools in the main inventory (slots 9-35). `slot`
+        // is retained only for the result message below.
 
         // Step 3: Drive state machine
         let op = EquipToolOperation::new(tool_type);
@@ -689,11 +707,19 @@ mod tests {
                             data: None,
                         })
                     }
-                    BotCommand::EquipTool(tool) => Ok(BotResult {
-                        success: true,
-                        message: format!("equipped {:?}", tool),
-                        data: None,
-                    }),
+                    BotCommand::EquipTool(tool) => {
+                        // Simulate the bot finding and switching to the best
+                        // tool of the requested type in the inventory.
+                        if let Some((_, slot)) = find_tool_in_inventory(tool, &inventory) {
+                            snapshot.self_player.held_item_slot = slot;
+                            state.update_snapshot(snapshot.clone());
+                        }
+                        Ok(BotResult {
+                            success: true,
+                            message: format!("equipped {:?}", tool),
+                            data: None,
+                        })
+                    }
                     _ => Ok(BotResult {
                         success: true,
                         message: "ok".into(),
@@ -880,6 +906,102 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result, Err(BotError::MiningInterrupted { .. })));
+
+        responder.await.unwrap();
+    }
+
+    // ── execute_mine_block: air entry after mining counts as broken ────────
+
+    #[tokio::test]
+    async fn test_mine_block_air_entry_counts_as_broken() {
+        // Real servers replace a mined block with an "air" entry rather than
+        // removing it from the snapshot. The verification must treat "air" as
+        // "block gone" — otherwise every successful mine is reported as failure.
+        let pos = BlockPos::new(10, 64, 20);
+        let snapshot = make_snapshot_with_block(pos, "stone");
+        let inventory = vec![
+            None,
+            Some(ItemStack {
+                item_id: "iron_pickaxe".into(),
+                count: 1,
+            }),
+        ];
+        let (sender, mut receiver) = create_command_channel(10);
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        state.update_snapshot(snapshot.clone());
+        state.set_online(true);
+        let executor = CompoundOpExecutor::new(sender, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            while let Some(wrapped) = receiver.recv().await {
+                let result = match &wrapped.command {
+                    BotCommand::QueryInventory => Ok(BotResult {
+                        success: true,
+                        message: "inventory".into(),
+                        data: Some(inventory_json(&inventory)),
+                    }),
+                    BotCommand::MoveTo(target) => {
+                        let snap = (*state.read_snapshot()).clone();
+                        state.update_snapshot(WorldSnapshot {
+                            self_player: SelfPlayer {
+                                position: *target,
+                                ..snap.self_player.clone()
+                            },
+                            ..snap
+                        });
+                        Ok(BotResult {
+                            success: true,
+                            message: "moved".into(),
+                            data: None,
+                        })
+                    }
+                    BotCommand::EquipTool(tool) => {
+                        // Simulate the bot finding and switching to the best
+                        // tool of the requested type in the inventory.
+                        if let Some((_, slot)) = find_tool_in_inventory(tool, &inventory) {
+                            let mut snap = (*state.read_snapshot()).clone();
+                            snap.self_player.held_item_slot = slot;
+                            state.update_snapshot(snap);
+                        }
+                        Ok(BotResult {
+                            success: true,
+                            message: format!("equipped {:?}", tool),
+                            data: None,
+                        })
+                    }
+                    BotCommand::BreakBlock(bp) => {
+                        // Replace the block with an "air" entry, mirroring a
+                        // real server's post-mine snapshot.
+                        let mut snap = (*state.read_snapshot()).clone();
+                        for b in snap.blocks.iter_mut() {
+                            if b.position == *bp {
+                                b.block_type = "air".into();
+                            }
+                        }
+                        state.update_snapshot(snap);
+                        Ok(BotResult {
+                            success: true,
+                            message: "mining started".into(),
+                            data: None,
+                        })
+                    }
+                    _ => Ok(BotResult {
+                        success: true,
+                        message: "ok".into(),
+                        data: None,
+                    }),
+                };
+                let _ = wrapped.respond_to.send(result);
+            }
+        });
+
+        let result = executor.execute_mine_block(pos, true).await;
+        drop(executor);
+
+        assert!(result.is_ok(), "expected success, got: {:?}", result);
+        let bot_result = result.unwrap();
+        assert!(bot_result.success);
+        assert!(bot_result.message.contains("Mined stone"));
 
         responder.await.unwrap();
     }

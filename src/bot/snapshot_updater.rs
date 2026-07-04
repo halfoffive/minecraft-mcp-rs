@@ -55,17 +55,19 @@ impl SnapshotUpdater {
     /// Mark a single block position as dirty so that the next snapshot
     /// re-reads it from the world.
     pub fn mark_block_dirty(&self, pos: BlockPos) {
-        if let Ok(mut tracker) = self.dirty_tracker.lock() {
-            tracker.mark_block_dirty(pos);
-        }
+        self.dirty_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_block_dirty(pos);
     }
 
     /// Mark an entire chunk as dirty so that the next snapshot re-reads
     /// all blocks in that chunk.
     pub fn mark_chunk_dirty(&self, chunk: (i32, i32)) {
-        if let Ok(mut tracker) = self.dirty_tracker.lock() {
-            tracker.mark_chunk_dirty(chunk);
-        }
+        self.dirty_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_chunk_dirty(chunk);
     }
 
     // ── Throttling ──────────────────────────────────────────
@@ -129,7 +131,11 @@ async fn build_snapshot_inner(
     let self_player = SelfPlayer {
         uuid: profile.uuid.to_string(),
         username: profile.name,
-        position: BlockPos::new(position.x as i32, position.y as i32, position.z as i32),
+        position: BlockPos::new(
+            position.x.floor() as i32,
+            position.y.floor() as i32,
+            position.z.floor() as i32,
+        ),
         health: health.0,
         hunger: hunger.food as i32,
         gamemode: azalea_gamemode_to_ours(local_gamemode.current),
@@ -162,8 +168,40 @@ async fn build_snapshot_inner(
                 });
             }
         }
-        // Full-chunk scanning is too expensive per tick; dirty chunks
-        // are reflected in the chunk summary instead.
+        // Scan each dirty chunk in full so the blocks inside it are re-read
+        // from the world. SnapshotBuilder::build() removes every block whose
+        // chunk is in `dirty_chunks`, so without re-adding the surviving
+        // blocks here they would be permanently lost from the snapshot.
+        //
+        // Chunk dimensions for Minecraft 1.21 are 16×384×16: x and z span
+        // 16 blocks within the chunk, y spans the full build height
+        // (-64..320). Only non-air blocks are recorded to avoid bloating
+        // the snapshot with empty positions.
+        for &(chunk_x, chunk_z) in &dirty_chunks {
+            let base_x = chunk_x * 16;
+            let base_z = chunk_z * 16;
+            for dx in 0..16i32 {
+                for dy in -64..320i32 {
+                    for dz in 0..16i32 {
+                        let pos = BlockPos::new(base_x + dx, dy, base_z + dz);
+                        let az_pos = azalea::core::position::BlockPos::new(pos.x, pos.y, pos.z);
+                        if let Some(block_state) = world_guard.get_block_state(az_pos) {
+                            if block_state.is_air() {
+                                continue;
+                            }
+                            let block_name = block_state_to_name(block_state);
+                            if block_name != "air" {
+                                new_blocks.push(BlockEntry {
+                                    position: pos,
+                                    block_type: block_name,
+                                    block_state: None,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
         drop(world_guard);
     }
 

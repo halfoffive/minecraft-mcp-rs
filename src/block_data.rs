@@ -185,11 +185,21 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "glass_pane",
         "white_stained_glass",
         "white_stained_glass_pane",
-        "cobweb",
         "vine",
         "glow_lichen",
     ] {
         m.insert(block, ToolType::Shears);
+    }
+
+    // --- Sword blocks ---
+    // Swords are the fastest tool for cobweb in Java Edition (faster than shears).
+    m.insert("cobweb", ToolType::Sword);
+
+    // --- Hoe blocks ---
+    // Hoes are the fastest tool for hay bales, sculk, and moss blocks.
+    // (Leaves variants are already mapped to Shears above.)
+    for &block in &["hay_bale", "sculk", "moss_block"] {
+        m.insert(block, ToolType::Hoe);
     }
 
     m
@@ -271,6 +281,29 @@ pub static TOOL_NAMES: LazyLock<HashMap<(ToolType, MaterialTier), Vec<&'static s
         );
 
         m.insert((ToolType::Shears, MaterialTier::Iron), vec!["shears"]);
+
+        m.insert((ToolType::Sword, MaterialTier::Wood), vec!["wooden_sword"]);
+        m.insert((ToolType::Sword, MaterialTier::Stone), vec!["stone_sword"]);
+        m.insert((ToolType::Sword, MaterialTier::Iron), vec!["iron_sword"]);
+        m.insert((ToolType::Sword, MaterialTier::Gold), vec!["golden_sword"]);
+        m.insert(
+            (ToolType::Sword, MaterialTier::Diamond),
+            vec!["diamond_sword"],
+        );
+        m.insert(
+            (ToolType::Sword, MaterialTier::Netherite),
+            vec!["netherite_sword"],
+        );
+
+        m.insert((ToolType::Hoe, MaterialTier::Wood), vec!["wooden_hoe"]);
+        m.insert((ToolType::Hoe, MaterialTier::Stone), vec!["stone_hoe"]);
+        m.insert((ToolType::Hoe, MaterialTier::Iron), vec!["iron_hoe"]);
+        m.insert((ToolType::Hoe, MaterialTier::Gold), vec!["golden_hoe"]);
+        m.insert((ToolType::Hoe, MaterialTier::Diamond), vec!["diamond_hoe"]);
+        m.insert(
+            (ToolType::Hoe, MaterialTier::Netherite),
+            vec!["netherite_hoe"],
+        );
 
         m
     });
@@ -411,6 +444,8 @@ pub fn material_from_item_name(name: &str) -> Option<(ToolType, MaterialTier)> {
                 "pickaxe" => Some(ToolType::Pickaxe),
                 "axe" => Some(ToolType::Axe),
                 "shovel" => Some(ToolType::Shovel),
+                "sword" => Some(ToolType::Sword),
+                "hoe" => Some(ToolType::Hoe),
                 _ => None,
             };
             match (material, tool) {
@@ -510,6 +545,18 @@ mod tests {
         assert_eq!(best_tool_for_block("not_a_block"), ToolType::Hand);
     }
 
+    #[test]
+    fn test_best_tool_for_block_sword_and_hoe() {
+        // Sword is the fastest tool for cobweb in Java Edition.
+        assert_eq!(best_tool_for_block("cobweb"), ToolType::Sword);
+        // Hoe is the fastest tool for these blocks.
+        assert_eq!(best_tool_for_block("hay_bale"), ToolType::Hoe);
+        assert_eq!(best_tool_for_block("sculk"), ToolType::Hoe);
+        assert_eq!(best_tool_for_block("moss_block"), ToolType::Hoe);
+        // Leaves variants are mapped to Shears (for drops), not Hoe.
+        assert_eq!(best_tool_for_block("oak_leaves"), ToolType::Shears);
+    }
+
     // --- MATERIAL_TIER_SPEED ---
 
     #[test]
@@ -589,8 +636,40 @@ mod tests {
     #[test]
     fn test_material_from_item_unknown() {
         assert_eq!(material_from_item_name("unknown_item"), None);
-        assert_eq!(material_from_item_name("diamond_sword"), None);
         assert_eq!(material_from_item_name("stone"), None);
+        assert_eq!(material_from_item_name("diamond_hoe_altar"), None);
+    }
+
+    #[test]
+    fn test_material_from_item_sword() {
+        assert_eq!(
+            material_from_item_name("diamond_sword"),
+            Some((ToolType::Sword, MaterialTier::Diamond))
+        );
+        assert_eq!(
+            material_from_item_name("iron_sword"),
+            Some((ToolType::Sword, MaterialTier::Iron))
+        );
+        assert_eq!(
+            material_from_item_name("wooden_sword"),
+            Some((ToolType::Sword, MaterialTier::Wood))
+        );
+    }
+
+    #[test]
+    fn test_material_from_item_hoe() {
+        assert_eq!(
+            material_from_item_name("wooden_hoe"),
+            Some((ToolType::Hoe, MaterialTier::Wood))
+        );
+        assert_eq!(
+            material_from_item_name("netherite_hoe"),
+            Some((ToolType::Hoe, MaterialTier::Netherite))
+        );
+        assert_eq!(
+            material_from_item_name("diamond_hoe"),
+            Some((ToolType::Hoe, MaterialTier::Diamond))
+        );
     }
 
     // --- calculate_mine_time ---

@@ -129,15 +129,20 @@ impl BotActions for RealBotClient {
 
     async fn jump(&self) {
         self.client.set_jumping(true);
-        sleep(Duration::from_millis(100)).await;
+        // A full Minecraft jump takes ~300ms from lift-off to landing; the
+        // previous 100ms cut the jump short before the bot left the ground.
+        sleep(Duration::from_millis(300)).await;
         self.client.set_jumping(false);
     }
 
     fn teleport(&self, pos: &BlockPos) {
+        // Entity positions are continuous (block corners at integers); place
+        // the player at the block centre on the XZ plane so they don't end up
+        // straddling the north-west corner of the target block.
         let new_pos = azalea::entity::Position::new(azalea::Vec3 {
-            x: pos.x as f64,
+            x: pos.x as f64 + 0.5,
             y: pos.y as f64,
-            z: pos.z as f64,
+            z: pos.z as f64 + 0.5,
         });
         // Insert the new Position component on the player entity.
         // azalea 0.15.1 uses parking_lot::Mutex for ecs, so .lock() not .write().
@@ -162,8 +167,12 @@ impl BotActions for RealBotClient {
 
         // `set_selected_hotbar_slot` panics on slot > 8, and dropping from a
         // main-inventory slot (9-35) doesn't need selection, so only select
-        // for hotbar slots.
-        if slot <= 8 {
+        // for hotbar slots. Save the currently selected slot first so it can
+        // be restored after the drop (the selection here is a side effect of
+        // targeting a hotbar slot, not an intentional user-facing change).
+        let original_slot = self.client.selected_hotbar_slot();
+        let switched_hotbar = slot <= 8;
+        if switched_hotbar {
             self.client.set_selected_hotbar_slot(slot);
         }
 
@@ -173,8 +182,15 @@ impl BotActions for RealBotClient {
             slot as u16
         };
         let inventory = self.client.get_inventory();
-        for _ in 0..count.max(1) {
+        for _ in 0..count {
             inventory.click(ThrowClick::Single { slot: menu_slot });
+        }
+
+        // Restore the originally selected hotbar slot so the bot keeps holding
+        // whatever it was holding before the drop. `selected_hotbar_slot()`
+        // always returns 0..=8, so this never trips the >8 panic guard.
+        if switched_hotbar {
+            self.client.set_selected_hotbar_slot(original_slot);
         }
     }
 
@@ -637,6 +653,16 @@ impl<B: BotActions> CommandExecutor<B> {
 
     fn handle_drop_item(&self, slot: u8, count: u8) -> Result<BotResult, BotError> {
         trace!(slot, count, "DropItem");
+        // A count of 0 means "drop nothing" — return early without touching the
+        // inventory or hotbar selection. Previously `drop_item` clamped the
+        // loop bound to `count.max(1)`, which silently dropped a single item.
+        if count == 0 {
+            return Ok(BotResult {
+                success: true,
+                message: "Dropped 0 items".into(),
+                data: None,
+            });
+        }
         self.bot.drop_item(slot, count);
         Ok(BotResult {
             success: true,
@@ -1119,6 +1145,19 @@ impl<B: BotActions> CommandExecutor<B> {
                 Err(e) => ("failed".into(), Some(e.to_string())),
             },
             ActAction::Mine { block_pos } => match self.handle_break_block(block_pos) {
+                // TODO(bug): `handle_break_block` only *starts* mining via
+                // `Client::start_mining` and returns immediately — it does not
+                // wait for the block to actually break. The compound operation
+                // `CompoundOpExecutor::execute_mine_block` in `bot/ops.rs` waits
+                // for completion (walks to the block, selects the best tool,
+                // sleeps for the calculated mine time, and verifies the block
+                // broke), but it requires a `BotCommandSender` to construct,
+                // which `CommandExecutor` does not own (it holds the receiver,
+                // not a sender). Wiring it in here needs a cross-file change
+                // (passing a sender into the executor). Until then, the
+                // `Act::Mine` result honestly reports that mining was *started*
+                // (see `handle_break_block`'s "Started mining block at {pos}"
+                // message), not completed.
                 Ok(r) => (r.message, None),
                 Err(e) => ("failed".into(), Some(e.to_string())),
             },
@@ -1748,6 +1787,32 @@ mod tests {
         let drops = log.drop_item_calls.lock().unwrap();
         assert_eq!(drops.len(), 1);
         assert_eq!(drops[0], (2, 5));
+    }
+
+    #[tokio::test]
+    async fn test_drop_item_count_zero_is_noop() {
+        // A count of 0 must drop nothing: the bot action is never invoked and
+        // the result reports "Dropped 0 items". Previously `drop_item` clamped
+        // the loop to `count.max(1)` and silently dropped one item.
+        let (executor, sender, _state, log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::DropItem(2, 0)).await;
+        assert!(result.is_ok());
+        let br = result.unwrap();
+        assert!(br.success);
+        assert_eq!(br.message, "Dropped 0 items");
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        // The bot's drop_item must NOT have been called.
+        let drops = log.drop_item_calls.lock().unwrap();
+        assert!(
+            drops.is_empty(),
+            "expected no drop_item calls, got {:?}",
+            drops
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════

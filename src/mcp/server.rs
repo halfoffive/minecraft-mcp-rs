@@ -333,7 +333,7 @@ impl McpBotServer {
         &self,
         Parameters(SendChatInput { message }): Parameters<SendChatInput>,
     ) -> String {
-        crate::mcp::tools_chat::handle_send_chat(&self.sender, message).await
+        crate::mcp::tools_chat::handle_send_chat(&self.state, &self.sender, message).await
     }
 
     #[tool(
@@ -344,7 +344,7 @@ impl McpBotServer {
         &self,
         Parameters(ExecuteCommandInput { command }): Parameters<ExecuteCommandInput>,
     ) -> String {
-        crate::mcp::tools_chat::handle_execute_command(&self.sender, command).await
+        crate::mcp::tools_chat::handle_execute_command(&self.state, &self.sender, command).await
     }
 
     #[tool(
@@ -355,7 +355,7 @@ impl McpBotServer {
         &self,
         Parameters(SetGameModeInput { mode }): Parameters<SetGameModeInput>,
     ) -> String {
-        crate::mcp::tools_chat::handle_set_game_mode(&self.sender, mode).await
+        crate::mcp::tools_chat::handle_set_game_mode(&self.state, &self.sender, mode).await
     }
 
     // ── Unified action tool ──────────────────────────────────

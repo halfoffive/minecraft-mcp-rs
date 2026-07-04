@@ -97,15 +97,18 @@ pub fn select_tool_for_block(block_type: &str, inventory: &[Option<ItemStack>]) 
         };
     }
 
-    // Search main inventory (slots 9-35)
+    // Search main inventory (slots 9-35).
+    // A tool found here can't be switched to directly — SwitchHotbarSlot only
+    // accepts hotbar indices (0-8) — so we surface the tool type/material but
+    // leave `hotbar_slot` as None. The caller will mine with whatever is
+    // currently held (or Hand) rather than sending an invalid slot.
     if inventory.len() > 9 {
         let main_slice = &inventory[9..inventory.len().min(36)];
-        if let Some((material, slot)) = find_tool_in_inventory(&required_tool, main_slice) {
-            // slot is relative to main_slice, so add 9 to get absolute slot
+        if let Some((material, _slot)) = find_tool_in_inventory(&required_tool, main_slice) {
             return ToolSelection {
                 tool_type: required_tool,
                 material: Some(material),
-                hotbar_slot: Some(slot + 9),
+                hotbar_slot: None,
                 needs_move_to_hotbar: true,
             };
         }
@@ -363,7 +366,8 @@ mod tests {
         let sel = select_tool_for_block("stone", &inv);
         assert_eq!(sel.tool_type, ToolType::Pickaxe);
         assert_eq!(sel.material, Some(MaterialTier::Iron));
-        assert_eq!(sel.hotbar_slot, Some(15));
+        // Main-inventory tools can't be switched to directly, so no hotbar slot.
+        assert_eq!(sel.hotbar_slot, None);
         assert!(sel.needs_move_to_hotbar);
     }
 
@@ -417,7 +421,7 @@ mod tests {
         let sel = select_tool_for_block("stone", &inv);
         assert_eq!(sel.tool_type, ToolType::Pickaxe);
         assert_eq!(sel.material, Some(MaterialTier::Iron));
-        assert_eq!(sel.hotbar_slot, Some(25));
+        assert_eq!(sel.hotbar_slot, None);
         assert!(sel.needs_move_to_hotbar);
     }
 
@@ -505,7 +509,8 @@ mod tests {
             count: 1,
         });
         let sel = select_tool_for_block("oak_log", &inv);
-        assert_eq!(sel.hotbar_slot, Some(9));
+        // Tool at first main-inventory slot (9) — can't be selected directly.
+        assert_eq!(sel.hotbar_slot, None);
         assert!(sel.needs_move_to_hotbar);
     }
 }
