@@ -1034,7 +1034,7 @@ impl<B: BotActions> CommandExecutor<B> {
 
         if gamemode != GameMode::Creative {
             return Ok(BotResult {
-                success: true,
+                success: false,
                 message: format!("FlyTo {target}: not in creative mode"),
                 data: Some(serde_json::json!({
                     "reached": false,

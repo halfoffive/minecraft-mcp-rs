@@ -258,7 +258,7 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Walks toward and picks up nearby dropped item entities within radius. Returns count collected.",
+        description = "Walks toward nearby dropped item entities within radius. Returns count approached (pickup unverified).",
         annotations(destructive_hint = true)
     )]
     async fn collect_items(&self, Parameters(input): Parameters<CollectItemsInput>) -> String {
@@ -475,20 +475,22 @@ fn is_bearer_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
 /// differences over the longer slice so the comparison runs in time bounded by
 /// the longer input regardless of where (or whether) the tokens differ. The
 /// length difference is folded into the accumulator so different-length tokens
-/// always fail. (Token lengths are far below the `u8` wrap-around point, so the
-/// length XOR is safe.)
+/// always fail. The accumulator is `u32` so the length XOR (also accumulated as
+/// `u32`) cannot wrap around — a previous `u8` cast would truncate to 0 when
+/// the length difference was a multiple of 256, allowing a theoretical
+/// length-collision attack.
 fn constant_time_token_eq(a: &str, b: &str) -> bool {
     let a = a.as_bytes();
     let b = b.as_bytes();
-    let mut diff: u8 = 0;
+    let mut diff: u32 = 0;
     let max_len = a.len().max(b.len());
     for i in 0..max_len {
-        let av = a.get(i).copied().unwrap_or(0);
-        let bv = b.get(i).copied().unwrap_or(0);
+        let av = a.get(i).copied().unwrap_or(0) as u32;
+        let bv = b.get(i).copied().unwrap_or(0) as u32;
         diff |= av ^ bv;
     }
-    // Also fold length difference into diff so different-length tokens fail.
-    diff |= (a.len() as u8) ^ (b.len() as u8);
+    // Fold length difference (usize, no wraparound) into diff.
+    diff |= (a.len() as u32) ^ (b.len() as u32);
     diff == 0
 }
 
@@ -1036,5 +1038,22 @@ mod tests {
         let mut headers_empty = HeaderMap::new();
         headers_empty.insert("Authorization", "Bearer ".parse().unwrap());
         assert!(!is_bearer_authorized(&headers_empty, expected));
+    }
+
+    /// Regression: length-difference wraparound must not mask a mismatch.
+    ///
+    /// The previous implementation cast `a.len() ^ b.len()` to `u8`, so a
+    /// length delta of 256 (or any multiple of 256) truncated to 0. Combined
+    /// with the `unwrap_or(0)` zero-padding of the shorter slice, two
+    /// different-length tokens whose extra bytes were all `\0` would compare
+    /// equal. The `u32` accumulator no longer truncates, so this must fail.
+    #[test]
+    fn test_constant_time_token_eq_length_wraparound_safe() {
+        let a = "x".repeat(300);
+        let b = "x".repeat(300) + &"\0".repeat(256);
+        // Same prefix, length delta of 256 — must NOT be treated as equal.
+        assert!(!constant_time_token_eq(&a, &b));
+        // Sanity: identical tokens still compare equal.
+        assert!(constant_time_token_eq(&a, &a));
     }
 }

@@ -241,14 +241,21 @@ fn handle_disconnect(bot: Client, state: &BotState) {
     // (which would panic when touching the ECS after disconnect). The
     // ReceiverLease guard drops and returns the receiver to the slot, ready
     // for the next Spawn.
-    let aborted = {
+    //
+    // Take the handle out of the mutex first and drop the lock before
+    // calling `abort()` — `JoinHandle::abort` may park/schedule and must
+    // not be called while holding the `executor_handle` mutex (the aborted
+    // task's cleanup path could otherwise try to re-acquire it). Mirrors
+    // `handle_spawn`'s symmetric take-then-abort pattern.
+    let handle_to_abort = {
         let mut handle_guard = state
             .executor_handle
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        handle_guard.take().is_some()
+        handle_guard.take()
     };
-    if aborted {
+    if let Some(handle) = handle_to_abort {
+        handle.abort();
         info!("aborted command executor on disconnect");
     }
 

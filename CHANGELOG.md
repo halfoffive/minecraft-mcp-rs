@@ -80,6 +80,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `build_snapshot_inner` still lack spatial indexing / Vec preallocation /
   `&'static str` block-name caching; performance refactor out of scope for
   this branch. See `review-report.md` H13.
+- **tick_abort_handles growth (deferred):** `tick_abort_handles` in
+  `BotState` grows unbounded over a single long session — tick tasks spawned
+  via `spawn_local` push an `AbortHandle` that is never reaped after the task
+  completes; the `Vec` is only drained on disconnect. At ~2 spawns/sec this
+  accumulates roughly 1–2 MB/hour. Suggested fix: migrate to a `JoinSet` or
+  periodically `retain(|h| !h.is_finished())`.
 
 ### Added
 
