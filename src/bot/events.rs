@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use azalea::ecs::component::Component;
+use azalea::pathfinder::PathfinderClientExt;
 use azalea::prelude::AppExit;
 use azalea::{Client, Event};
 use tracing::{info, trace, warn};
@@ -69,6 +70,9 @@ pub struct BotState {
     /// connection drops; the leased receiver is returned to
     /// [`BotState::command_receiver`] by the `ReceiverLease` drop guard.
     pub executor_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Tick-local snapshot tasks tracked so their handles can be reclaimed
+    /// instead of leaking unboundedly.
+    pub tick_tasks: Arc<Mutex<tokio::task::JoinSet<()>>>,
     /// Optional egui context for requesting UI repaints.
     pub egui_ctx: Option<egui::Context>,
     /// Tracks which blocks/chunks changed since the last snapshot.
@@ -105,6 +109,7 @@ impl Default for BotState {
             shared_state,
             command_receiver,
             executor_handle: Arc::new(Mutex::new(None)),
+            tick_tasks: Arc::new(Mutex::new(tokio::task::JoinSet::new())),
             egui_ctx,
             dirty_tracker: Arc::new(Mutex::new(DirtyTracker::new())),
             last_snapshot_time: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(3600))),
@@ -127,7 +132,7 @@ pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::R
             handle_spawn(bot, &state);
         }
         Event::Disconnect(_) => {
-            handle_disconnect(bot, &state);
+            handle_disconnect(bot, &state).await;
         }
         Event::Tick => {
             handle_tick(bot, state).await;
@@ -222,7 +227,19 @@ fn handle_spawn(bot: Client, state: &BotState) {
     trace!("bot spawned, set online=true");
 }
 
-fn handle_disconnect(bot: Client, state: &BotState) {
+/// Abort any in-flight tick snapshot tasks and drop their handles.
+///
+/// The `JoinSet` is replaced with an empty one so the next connection starts
+/// fresh. This helper is split out so it can be exercised in unit tests.
+async fn abort_and_clear_tick_tasks(tick_tasks: &Mutex<tokio::task::JoinSet<()>>) {
+    let mut set = std::mem::take(&mut *tick_tasks.lock().unwrap_or_else(|e| e.into_inner()));
+    if !set.is_empty() {
+        set.abort_all();
+        while set.join_next().await.is_some() {}
+    }
+}
+
+async fn handle_disconnect(bot: Client, state: &BotState) {
     state.shared_state.set_online(false);
 
     // Clear the ECS handle — the bot is already disconnecting, so
@@ -244,6 +261,11 @@ fn handle_disconnect(bot: Client, state: &BotState) {
         info!("aborted command executor on disconnect");
     }
 
+    // Abort in-flight tick snapshot tasks and reclaim their handles. This
+    // prevents the per-tick `spawn_local` handle list from growing forever
+    // across reconnects.
+    abort_and_clear_tick_tasks(&state.tick_tasks).await;
+
     // Tell azalea to end the client so ClientBuilder::start returns and the
     // connection loop can retry. Without this the bot thread may hang waiting
     // for an ECS that's already shutting down. In azalea 0.15.1 there is no
@@ -256,6 +278,12 @@ fn handle_disconnect(bot: Client, state: &BotState) {
 }
 
 async fn handle_tick(bot: Client, state: BotState) {
+    // Wake any waiter in `RealBotClient::goto` when the pathfinder has
+    // reached its target. `notify_waiters` is cheap when no one is waiting.
+    if bot.is_goto_target_reached() {
+        state.shared_state.notify_goto_reached();
+    }
+
     // Build a SnapshotUpdater from the BotState's shared fields and delegate
     // the throttle check + snapshot build to it. This avoids duplicating the
     // snapshot logic that already lives in snapshot_updater.rs.
@@ -266,7 +294,17 @@ async fn handle_tick(bot: Client, state: BotState) {
         state.snapshot_interval_ms,
     );
     let egui_ctx = state.egui_ctx.clone();
-    tokio::task::spawn_local(async move {
+
+    // Reclaim any snapshot tasks that have already finished before adding a
+    // new one. This prevents unbounded growth of `spawn_local` handles.
+    let mut tick_tasks = state.tick_tasks.lock().unwrap_or_else(|e| e.into_inner());
+    while let Some(res) = tick_tasks.try_join_next() {
+        if let Err(e) = res {
+            warn!("tick snapshot task finished with error: {}", e);
+        }
+    }
+
+    tick_tasks.spawn_local(async move {
         if updater.update_from_tick(&bot).await.is_some()
             && let Some(ctx) = &egui_ctx
         {
@@ -411,6 +449,14 @@ mod tests {
         let cloned = state.clone();
         assert!(Arc::ptr_eq(&state.shared_state, &cloned.shared_state));
         assert!(Arc::ptr_eq(&state.dirty_tracker, &cloned.dirty_tracker));
+        assert!(Arc::ptr_eq(&state.tick_tasks, &cloned.tick_tasks));
+    }
+
+    #[test]
+    fn test_bot_state_default_has_tick_tasks() {
+        let state = BotState::default();
+        let tick_tasks = state.tick_tasks.lock().unwrap();
+        assert!(tick_tasks.is_empty());
     }
 
     // -- Event helpers (no Client needed) ------------------------------------
@@ -572,6 +618,66 @@ mod tests {
             last.elapsed() >= Duration::from_millis(state.snapshot_interval_ms)
         };
         assert!(should_update);
+    }
+
+    // -- Tick task lifecycle -------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_tick_tasks_drain_completed() {
+        let state = BotState::default();
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // Simulate a few prior tick tasks that finish immediately.
+                {
+                    let mut set = state.tick_tasks.lock().unwrap_or_else(|e| e.into_inner());
+                    set.spawn_local(async {});
+                    set.spawn_local(async {});
+                    assert_eq!(set.len(), 2);
+                }
+
+                // Let the LocalSet run the spawned tasks to completion before
+                // draining. `try_join_next` only reclaims tasks that have
+                // already finished.
+                tokio::task::yield_now().await;
+
+                // Drain completed tasks the same way handle_tick does.
+                {
+                    let mut set = state.tick_tasks.lock().unwrap_or_else(|e| e.into_inner());
+                    while let Some(res) = set.try_join_next() {
+                        if let Err(e) = res {
+                            warn!("test tick task error: {}", e);
+                        }
+                    }
+                    assert!(set.is_empty());
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_disconnect_aborts_tick_tasks() {
+        let state = BotState::default();
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // Spawn a tick task that would run forever if not aborted.
+                {
+                    let mut set = state.tick_tasks.lock().unwrap_or_else(|e| e.into_inner());
+                    set.spawn_local(async {
+                        loop {
+                            tokio::task::yield_now().await;
+                        }
+                    });
+                    assert_eq!(set.len(), 1);
+                }
+
+                abort_and_clear_tick_tasks(&state.tick_tasks).await;
+
+                let set = state.tick_tasks.lock().unwrap_or_else(|e| e.into_inner());
+                assert!(set.is_empty());
+            })
+            .await;
     }
 
     // -- Utility -------------------------------------------------------------

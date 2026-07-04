@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
+use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::{ActAction, BotCommand};
 
@@ -52,17 +53,18 @@ pub async fn handle_act(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: ActInput,
-) -> String {
+) -> Result<String, BotError> {
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::Act(input.action);
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -265,7 +267,7 @@ mod tests {
                 target: BlockPos::new(1, 64, 2),
             },
         };
-        let result = handle_act(&state, &sender, input).await;
+        let result = handle_act(&state, &sender, input).await.unwrap();
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
         assert!(
             json.get("success")
@@ -306,7 +308,7 @@ mod tests {
                 block_pos: BlockPos::new(5, 60, -7),
             },
         };
-        let result = handle_act(&state, &sender, input).await;
+        let result = handle_act(&state, &sender, input).await.unwrap();
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
         assert!(
             json.get("success")
@@ -327,7 +329,7 @@ mod tests {
             },
         };
         let result = handle_act(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     // ── act: echo channel round-trip ────────────────────────────────────────
@@ -339,7 +341,7 @@ mod tests {
         let input = ActInput {
             action: ActAction::CollectItems { radius: 8 },
         };
-        let result = handle_act(&state, &sender, input).await;
+        let result = handle_act(&state, &sender, input).await.unwrap();
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
         assert!(
             json.get("success")

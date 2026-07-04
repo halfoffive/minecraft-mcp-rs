@@ -98,20 +98,21 @@ impl BotActions for RealBotClient {
         let az_pos = azalea::BlockPos::new(pos.x, pos.y, pos.z);
         let goal = BlockPosGoal(az_pos);
 
+        // Honour the user-configured command timeout instead of hardcoding 30s.
+        let timeout_secs = self.state.read_config().command_timeout_secs;
+        let timeout_dur = Duration::from_secs(timeout_secs);
+        let notify = self.state.goto_notify();
+
         self.client.goto(goal).await;
 
-        // Wait up to 30s for pathfinding to complete.
-        let result = timeout(Duration::from_secs(30), async {
-            loop {
-                if self.client.is_goto_target_reached() {
-                    return;
-                }
-                sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await;
+        // Fast path: target may already be reached before we start waiting.
+        if self.client.is_goto_target_reached() {
+            return Ok(());
+        }
 
-        match result {
+        // Wait for the tick handler to signal that the pathfinder has reached
+        // the goal, or time out and abort pathfinding.
+        match timeout(timeout_dur, notify.notified()).await {
             Ok(()) => Ok(()),
             Err(_) => {
                 self.client.stop_pathfinding();
@@ -121,7 +122,7 @@ impl BotActions for RealBotClient {
                         y: pos.y,
                         z: pos.z,
                     },
-                    reason: "pathfinding timed out after 30s".into(),
+                    reason: format!("pathfinding timed out after {timeout_secs}s"),
                 })
             }
         }

@@ -95,6 +95,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP tool errors are now standard MCP errors:** all `#[tool]` handlers and
+  their underlying functions return `Result<T, BotError>`, so the existing
+  `From<BotError> for ErrorData` conversion is no longer dead code. Clients now
+  receive proper JSON-RPC error objects (`code`/`message`/`data`) instead of
+  `{"success":false,"error":"..."}` payloads.
+- **`goto` no longer busy-loops:** `BotActions::goto` waits event-driven on a
+  `tokio::sync::Notify` instead of polling `is_goto_target_reached()` every
+  100ms, and uses `AppConfig::command_timeout_secs` instead of a hard-coded
+  30s timeout.
+- **Dirty chunk updates no longer scan the whole block list:** `DirtyTracker`
+  and `SnapshotBuilder` now maintain a chunk → block positions spatial index,
+  so only blocks inside affected chunks are examined when rebuilding the world
+  snapshot.
+- **Tick task handle leak fixed:** `BotState` tracks per-tick snapshot tasks in
+  a `tokio::task::JoinSet`, reclaims completed handles on each tick, and aborts
+  + clears them on disconnect, preventing ~1-2 MB/hour growth in long sessions.
 - **CI build failure:** `patches/rmcp/` and `patches/rsa/` are now tracked in
   git and included in the repository. Previously they were ignored, causing
   GitHub Actions `cargo build --release --locked` to fail with

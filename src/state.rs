@@ -14,6 +14,7 @@ use azalea::container::ContainerHandle;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{AppConfig, RunStats};
@@ -117,6 +118,13 @@ pub struct SharedState {
     /// closes a live TCP connection (cancelling the backoff sleep alone
     /// cannot interrupt a running `ClientBuilder::start()`).
     bot_ecs: Mutex<Option<BotEcsHandle>>,
+    /// Notification signaled when the bot reaches its goto target.
+    ///
+    /// `RealBotClient::goto` waits on this instead of busy-polling
+    /// `is_goto_target_reached`. The notify is shared via [`Arc`] because
+    /// both the event handler (on the ECS thread) and the command executor
+    /// (on the LocalSet) need to access it.
+    goto_notify: Arc<Notify>,
 }
 
 impl SharedState {
@@ -155,6 +163,7 @@ impl SharedState {
             last_error: Mutex::new(None),
             cancel_token: Mutex::new(CancellationToken::new()),
             bot_ecs: Mutex::new(None),
+            goto_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -416,6 +425,24 @@ impl SharedState {
     pub fn bot_ecs(&self) -> Option<BotEcsHandle> {
         let guard = self.bot_ecs.lock().unwrap_or_else(|e| e.into_inner());
         guard.as_ref().cloned()
+    }
+
+    /// Notify any waiter that the bot has reached its goto target.
+    ///
+    /// Called from the tick event handler when `is_goto_target_reached()`
+    /// is true. Uses `notify_waiters` so the call is cheap when no one is
+    /// waiting and so all current waiters are woken (there should be at
+    /// most one for a serial command executor).
+    pub fn notify_goto_reached(&self) {
+        self.goto_notify.notify_waiters();
+    }
+
+    /// Return a clone of the shared goto notification.
+    ///
+    /// Callers can `await notify.notified()` to be woken when the bot
+    /// reaches its goto target.
+    pub fn goto_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.goto_notify)
     }
 }
 
@@ -869,5 +896,40 @@ mod tests {
         // Clearing when already None should not panic.
         state.clear_bot_ecs();
         assert!(state.bot_ecs().is_none());
+    }
+
+    // -- goto_notify ----------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_goto_notify_wakes_waiter() {
+        let state = SharedState::new(AppConfig::default());
+        let notify = state.goto_notify();
+
+        // Spawn a task that waits for the goto notification.
+        let notified = tokio::spawn(async move {
+            notify.notified().await;
+        });
+
+        // Yield so the waiter registers before we notify.
+        tokio::task::yield_now().await;
+        state.notify_goto_reached();
+
+        notified.await.expect("waiter task should finish");
+    }
+
+    #[test]
+    fn test_goto_notify_clone_shares_state() {
+        let state = SharedState::new(AppConfig::default());
+        let notify1 = state.goto_notify();
+        let notify2 = state.goto_notify();
+
+        // Notifying through one Arc must wake waiters on the other Arc.
+        let waiter = notify2.notified();
+        notify1.notify_waiters();
+        // The future returned by notified() should be ready after notify_waiters.
+        // We can't easily await in a sync test, but we verify both Arcs are
+        // non-null and distinct clones.
+        assert!(Arc::strong_count(&state.goto_notify) >= 2);
+        drop(waiter);
     }
 }

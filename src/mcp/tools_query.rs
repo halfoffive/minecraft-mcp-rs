@@ -10,12 +10,9 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::GameMode;
-
-/// JSON error returned when the bot is offline and a query tool is called
-/// (other than `is_connected`).
-const OFFLINE_ERROR: &str = r#"{"error":"Bot is currently offline"}"#;
 
 // ---------------------------------------------------------------------------
 // Public query functions — called from the #[tool] methods in server.rs
@@ -26,13 +23,13 @@ const OFFLINE_ERROR: &str = r#"{"error":"Bot is currently offline"}"#;
 ///
 /// Returns the serialized [`crate::types::SelfPlayer`] as a JSON string,
 /// or an offline error.
-pub fn get_self_info(state: &Arc<SharedState>) -> String {
+pub fn get_self_info(state: &Arc<SharedState>) -> Result<String, BotError> {
     if !state.is_online() {
-        return OFFLINE_ERROR.to_string();
+        return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
     let snapshot = state.read_snapshot();
     serde_json::to_string(&snapshot.self_player)
-        .unwrap_or_else(|e| json!({"error": format!("Serialization error: {e}")}).to_string())
+        .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
 }
 
 /// Get the bot's full player inventory.
@@ -41,16 +38,16 @@ pub fn get_self_info(state: &Arc<SharedState>) -> String {
 /// omitted), plus the currently selected hotbar slot. Data is read from the
 /// latest [`WorldSnapshot`](crate::types::WorldSnapshot) written by the
 /// snapshot updater.
-pub fn get_inventory(state: &Arc<SharedState>) -> String {
+pub fn get_inventory(state: &Arc<SharedState>) -> Result<String, BotError> {
     if !state.is_online() {
-        return OFFLINE_ERROR.to_string();
+        return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
     let snapshot = state.read_snapshot();
-    json!({
+    Ok(json!({
         "inventory": snapshot.self_player.inventory,
         "held_item_slot": snapshot.self_player.held_item_slot,
     })
-    .to_string()
+    .to_string())
 }
 
 /// Get blocks near the bot within the given Chebyshev (square) radius.
@@ -62,9 +59,9 @@ pub fn get_nearby_blocks(
     state: &Arc<SharedState>,
     radius: u32,
     filter_type: Option<String>,
-) -> String {
+) -> Result<String, BotError> {
     if !state.is_online() {
-        return OFFLINE_ERROR.to_string();
+        return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
     let snapshot = state.read_snapshot();
     let center = snapshot.self_player.position;
@@ -85,13 +82,13 @@ pub fn get_nearby_blocks(
         .collect();
 
     serde_json::to_string(&blocks)
-        .unwrap_or_else(|e| json!({"error": format!("Serialization error: {e}")}).to_string())
+        .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
 }
 
 /// Get entities near the bot within the given Chebyshev (square) radius.
-pub fn get_nearby_entities(state: &Arc<SharedState>, radius: u32) -> String {
+pub fn get_nearby_entities(state: &Arc<SharedState>, radius: u32) -> Result<String, BotError> {
     if !state.is_online() {
-        return OFFLINE_ERROR.to_string();
+        return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
     let snapshot = state.read_snapshot();
     let center = snapshot.self_player.position;
@@ -108,26 +105,26 @@ pub fn get_nearby_entities(state: &Arc<SharedState>, radius: u32) -> String {
         .collect();
 
     serde_json::to_string(&entities)
-        .unwrap_or_else(|e| json!({"error": format!("Serialization error: {e}")}).to_string())
+        .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
 }
 
 /// Get a summary of chunks currently loaded around the bot.
 ///
 /// Returns a JSON array of `(chunk_x, chunk_z)` tuples.
-pub fn get_chunk_summary(state: &Arc<SharedState>) -> String {
+pub fn get_chunk_summary(state: &Arc<SharedState>) -> Result<String, BotError> {
     if !state.is_online() {
-        return OFFLINE_ERROR.to_string();
+        return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
     let snapshot = state.read_snapshot();
     serde_json::to_string(&snapshot.chunk_summary)
-        .unwrap_or_else(|e| json!({"error": format!("Serialization error: {e}")}).to_string())
+        .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
 }
 
 /// Check whether the bot is currently connected to a Minecraft server.
 ///
 /// Returns `{"connected":true}` or `{"connected":false}`.
-pub fn is_connected(state: &Arc<SharedState>) -> String {
-    json!({"connected": state.is_online()}).to_string()
+pub fn is_connected(state: &Arc<SharedState>) -> Result<String, BotError> {
+    Ok(json!({"connected": state.is_online()}).to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -150,16 +147,16 @@ fn gamemode_to_str(mode: GameMode) -> &'static str {
 /// level is 0, and `null` if unknown (the snapshot has not yet been populated
 /// by a `QueryServerInfo` round-trip). `gamemode` is one of
 /// `survival|creative|adventure|spectator`.
-pub fn get_server_info(state: &Arc<SharedState>) -> String {
+pub fn get_server_info(state: &Arc<SharedState>) -> Result<String, BotError> {
     if !state.is_online() {
-        return OFFLINE_ERROR.to_string();
+        return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
     let snapshot = state.read_snapshot();
-    json!({
+    Ok(json!({
         "commands_enabled": snapshot.commands_enabled,
         "gamemode": gamemode_to_str(snapshot.self_player.gamemode),
     })
-    .to_string()
+    .to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -204,22 +201,25 @@ impl rmcp::schemars::JsonSchema for GetWorldViewInput {
 /// Validates `radius` is in `1..=32`, checks online status, renders the
 /// snapshot via [`crate::mcp::render::render_topdown`], base64-encodes the
 /// PNG bytes, and wraps them in `Content::Image` with `mime_type: "image/png"`.
-/// On error, returns `Content::Text` carrying a JSON error string so the
-/// caller still receives a meaningful payload.
-pub fn get_world_view(state: &Arc<SharedState>, radius: u8) -> rmcp::model::Content {
+/// On error, returns a [`BotError`] so rmcp can convert it to a standard MCP
+/// error response.
+pub fn get_world_view(
+    state: &Arc<SharedState>,
+    radius: u8,
+) -> Result<rmcp::model::Content, BotError> {
     if !(1..=32).contains(&radius) {
-        return rmcp::model::Content::text(format!(
-            r#"{{"success":false,"error":"radius must be 1-32, got {radius}}}"#
-        ));
+        return Err(BotError::InvalidParams(format!(
+            "radius must be 1-32, got {radius}"
+        )));
     }
     if !state.is_online() {
-        return rmcp::model::Content::text(OFFLINE_ERROR);
+        return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
 
     let snapshot = state.read_snapshot();
     let png_bytes = crate::mcp::render::render_topdown(&snapshot, radius);
     let encoded = crate::mcp::render::base64_encode(&png_bytes);
-    rmcp::model::Content::image(encoded, "image/png")
+    Ok(rmcp::model::Content::image(encoded, "image/png"))
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn test_get_self_info_online() {
         let state = state_with_snapshot();
-        let result = get_self_info(&state);
+        let result = get_self_info(&state).unwrap();
         assert!(result.contains("TestBot"));
         assert!(result.contains("player-uuid"));
         assert!(result.contains("18.0")); // health
@@ -328,7 +328,7 @@ mod tests {
     fn test_get_self_info_offline() {
         let state = offline_state();
         let result = get_self_info(&state);
-        assert_eq!(result, OFFLINE_ERROR);
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     // -- get_inventory ---------------------------------------------------------
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn test_get_inventory_online() {
         let state = state_with_snapshot();
-        let result = get_inventory(&state);
+        let result = get_inventory(&state).unwrap();
         assert!(result.contains("held_item_slot"));
         assert!(result.contains('3'));
         assert!(result.contains("inventory"));
@@ -355,7 +355,7 @@ mod tests {
     fn test_get_inventory_offline() {
         let state = offline_state();
         let result = get_inventory(&state);
-        assert_eq!(result, OFFLINE_ERROR);
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     // -- get_nearby_blocks -----------------------------------------------------
@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn test_get_nearby_blocks_radius_1() {
         let state = state_with_snapshot();
-        let result = get_nearby_blocks(&state, 1, None);
+        let result = get_nearby_blocks(&state, 1, None).unwrap();
         // Within radius 1 of (0,64,0): stone at (0,64,0), dirt at (0,65,0)
         assert!(result.contains("stone"));
         assert!(result.contains("dirt"));
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn test_get_nearby_blocks_filter() {
         let state = state_with_snapshot();
-        let result = get_nearby_blocks(&state, 1, Some("stone".into()));
+        let result = get_nearby_blocks(&state, 1, Some("stone".into())).unwrap();
         assert!(result.contains("stone"));
         assert!(!result.contains("dirt"));
     }
@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn test_get_nearby_blocks_empty_filter_acts_as_none() {
         let state = state_with_snapshot();
-        let result = get_nearby_blocks(&state, 1, Some("".into()));
+        let result = get_nearby_blocks(&state, 1, Some("".into())).unwrap();
         assert!(result.contains("stone"));
         assert!(result.contains("dirt"));
     }
@@ -391,7 +391,7 @@ mod tests {
     fn test_get_nearby_blocks_offline() {
         let state = offline_state();
         let result = get_nearby_blocks(&state, 5, None);
-        assert_eq!(result, OFFLINE_ERROR);
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     // -- get_nearby_entities ---------------------------------------------------
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn test_get_nearby_entities_radius_1() {
         let state = state_with_snapshot();
-        let result = get_nearby_entities(&state, 1);
+        let result = get_nearby_entities(&state, 1).unwrap();
         assert!(result.contains("zombie"));
         assert!(!result.contains("creeper")); // creeper at (100,64,0) is far
     }
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn test_get_nearby_entities_large_radius() {
         let state = state_with_snapshot();
-        let result = get_nearby_entities(&state, 200);
+        let result = get_nearby_entities(&state, 200).unwrap();
         assert!(result.contains("zombie"));
         assert!(result.contains("creeper"));
     }
@@ -416,7 +416,7 @@ mod tests {
     fn test_get_nearby_entities_offline() {
         let state = offline_state();
         let result = get_nearby_entities(&state, 10);
-        assert_eq!(result, OFFLINE_ERROR);
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     // -- get_chunk_summary -----------------------------------------------------
@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn test_get_chunk_summary_online() {
         let state = state_with_snapshot();
-        let result = get_chunk_summary(&state);
+        let result = get_chunk_summary(&state).unwrap();
         assert!(result.contains("[0,0]"));
         assert!(result.contains("[-1,0]"));
     }
@@ -433,7 +433,7 @@ mod tests {
     fn test_get_chunk_summary_offline() {
         let state = offline_state();
         let result = get_chunk_summary(&state);
-        assert_eq!(result, OFFLINE_ERROR);
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     // -- is_connected ----------------------------------------------------------
@@ -441,14 +441,14 @@ mod tests {
     #[test]
     fn test_is_connected_online() {
         let state = state_with_snapshot();
-        let result = is_connected(&state);
+        let result = is_connected(&state).unwrap();
         assert_eq!(result, r#"{"connected":true}"#);
     }
 
     #[test]
     fn test_is_connected_offline() {
         let state = offline_state();
-        let result = is_connected(&state);
+        let result = is_connected(&state).unwrap();
         assert_eq!(result, r#"{"connected":false}"#);
     }
 
@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn test_get_server_info_online() {
         let state = state_with_snapshot();
-        let result = get_server_info(&state);
+        let result = get_server_info(&state).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
         // The default snapshot in state_with_snapshot() does not set
         // commands_enabled, so it should be null.
@@ -479,7 +479,7 @@ mod tests {
         };
         state.update_snapshot(snap);
 
-        let result = get_server_info(&Arc::new(state));
+        let result = get_server_info(&Arc::new(state)).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
         assert_eq!(parsed["commands_enabled"], true);
         assert_eq!(parsed["gamemode"], "creative");
@@ -489,7 +489,7 @@ mod tests {
     fn test_get_server_info_offline() {
         let state = offline_state();
         let result = get_server_info(&state);
-        assert_eq!(result, OFFLINE_ERROR);
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     // -- get_world_view --------------------------------------------------------
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn test_get_world_view_online_returns_image() {
         let state = state_with_snapshot();
-        let content = get_world_view(&state, 4);
+        let content = get_world_view(&state, 4).unwrap();
         let raw = content.raw;
         match raw {
             rmcp::model::RawContent::Image(img) => {
@@ -519,47 +519,24 @@ mod tests {
     }
 
     #[test]
-    fn test_get_world_view_offline_returns_text_error() {
+    fn test_get_world_view_offline_returns_error() {
         let state = offline_state();
-        let content = get_world_view(&state, 4);
-        match content.raw {
-            rmcp::model::RawContent::Text(text) => {
-                assert!(text.text.contains("offline"), "got: {}", text.text);
-            }
-            other => panic!("expected Text content when offline, got: {other:?}"),
-        }
+        let result = get_world_view(&state, 4);
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[test]
     fn test_get_world_view_invalid_radius_zero() {
         let state = state_with_snapshot();
-        let content = get_world_view(&state, 0);
-        match content.raw {
-            rmcp::model::RawContent::Text(text) => {
-                assert!(
-                    text.text.contains("radius must be 1-32"),
-                    "got: {}",
-                    text.text
-                );
-            }
-            other => panic!("expected Text error for radius=0, got: {other:?}"),
-        }
+        let result = get_world_view(&state, 0);
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
     }
 
     #[test]
     fn test_get_world_view_invalid_radius_too_large() {
         let state = state_with_snapshot();
-        let content = get_world_view(&state, 33);
-        match content.raw {
-            rmcp::model::RawContent::Text(text) => {
-                assert!(
-                    text.text.contains("radius must be 1-32"),
-                    "got: {}",
-                    text.text
-                );
-            }
-            other => panic!("expected Text error for radius=33, got: {other:?}"),
-        }
+        let result = get_world_view(&state, 33);
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
     }
 
     #[test]
@@ -567,7 +544,7 @@ mod tests {
         let state = state_with_snapshot();
         // radius = 1 and radius = 32 should both succeed.
         for radius in [1u8, 32] {
-            let content = get_world_view(&state, radius);
+            let content = get_world_view(&state, radius).unwrap();
             assert!(
                 matches!(content.raw, rmcp::model::RawContent::Image(_)),
                 "radius {radius} should produce image content"

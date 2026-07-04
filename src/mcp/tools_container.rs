@@ -17,6 +17,7 @@ use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
 use crate::command_validate::validate_block_pos;
+use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::{BlockPos, BotCommand};
 
@@ -29,21 +30,20 @@ fn schema_from_json(v: Value) -> rmcp::schemars::Schema {
 
 // ── Container state helpers ─────────────────────────────────────────────────
 
-/// Ensure a container is currently open, returning an error JSON string otherwise.
-fn check_container_open(state: &SharedState) -> Result<(), String> {
+/// Ensure a container is currently open, returning a [`BotError`] otherwise.
+fn check_container_open(state: &SharedState) -> Result<(), BotError> {
     if !state.has_container_open() {
-        return Err(r#"{"success":false,"error":"No container is currently open"}"#.to_string());
+        return Err(BotError::InvalidParams(
+            "No container is currently open".to_string(),
+        ));
     }
     Ok(())
 }
 
-/// Ensure no container is currently open, returning an error JSON string otherwise.
-fn check_container_not_open(state: &SharedState) -> Result<(), String> {
+/// Ensure no container is currently open, returning a [`BotError`] otherwise.
+fn check_container_not_open(state: &SharedState) -> Result<(), BotError> {
     if state.has_container_open() {
-        return Err(
-            r#"{"success":false,"error":"A container is already open — close it first"}"#
-                .to_string(),
-        );
+        return Err(BotError::ContainerAlreadyOpen);
     }
     Ok(())
 }
@@ -94,25 +94,24 @@ pub async fn handle_open_container(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: OpenContainerInput,
-) -> String {
+) -> Result<String, BotError> {
     if let Err(e) = validate_block_pos(&BlockPos::new(input.x, input.y, input.z)) {
-        return format!(r#"{{"success":false,"error":"{e}"}}"#);
+        return Err(BotError::InvalidParams(e));
     }
 
-    if let Err(e) = check_container_not_open(state) {
-        return e;
-    }
+    check_container_not_open(state)?;
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::OpenContainer(BlockPos::new(input.x, input.y, input.z));
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -160,26 +159,27 @@ pub async fn handle_take_from_container(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: TakeFromContainerInput,
-) -> String {
-    if let Err(e) = check_container_open(state) {
-        return e;
-    }
+) -> Result<String, BotError> {
+    check_container_open(state)?;
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let count = input.count.unwrap_or(1);
     if count == 0 {
-        return r#"{"success":false,"error":"Count must be greater than 0"}"#.to_string();
+        return Err(BotError::InvalidParams(
+            "Count must be greater than 0".to_string(),
+        ));
     }
 
     let cmd = BotCommand::TakeFromContainer(input.slot, count);
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -227,26 +227,27 @@ pub async fn handle_put_into_container(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: PutIntoContainerInput,
-) -> String {
-    if let Err(e) = check_container_open(state) {
-        return e;
-    }
+) -> Result<String, BotError> {
+    check_container_open(state)?;
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let count = input.count.unwrap_or(1);
     if count == 0 {
-        return r#"{"success":false,"error":"Count must be greater than 0"}"#.to_string();
+        return Err(BotError::InvalidParams(
+            "Count must be greater than 0".to_string(),
+        ));
     }
 
     let cmd = BotCommand::PutIntoContainer(input.slot, count);
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -278,21 +279,20 @@ pub async fn handle_close_container(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     _input: CloseContainerInput,
-) -> String {
-    if let Err(e) = check_container_open(state) {
-        return e;
-    }
+) -> Result<String, BotError> {
+    check_container_open(state)?;
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::CloseContainer;
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -334,7 +334,7 @@ mod tests {
         let (state, sender) = setup();
         let input = OpenContainerInput { x: 0, y: 64, z: 0 };
         let result = handle_open_container(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -347,7 +347,8 @@ mod tests {
             z: 0,
         };
         let result = handle_open_container(&state, &sender, input).await;
-        assert!(result.contains("out of bounds") || result.contains("out of range"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("out of bounds") || msg.contains("out of range")));
     }
 
     // ── take_from_container ─────────────────────────────────────
@@ -361,7 +362,8 @@ mod tests {
             count: Some(1),
         };
         let result = handle_take_from_container(&state, &sender, input).await;
-        assert!(result.contains("No container is currently open"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("No container is currently open")));
     }
 
     #[tokio::test]
@@ -374,7 +376,8 @@ mod tests {
             count: Some(0),
         };
         let result = handle_take_from_container(&state, &sender, input).await;
-        assert!(result.contains("No container is currently open"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("No container is currently open")));
     }
 
     #[tokio::test]
@@ -386,7 +389,8 @@ mod tests {
             count: None,
         };
         let result = handle_take_from_container(&state, &sender, input).await;
-        assert!(result.contains("No container is currently open"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("No container is currently open")));
     }
 
     // ── put_into_container ──────────────────────────────────────
@@ -399,7 +403,8 @@ mod tests {
             count: Some(1),
         };
         let result = handle_put_into_container(&state, &sender, input).await;
-        assert!(result.contains("No container is currently open"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("No container is currently open")));
     }
 
     // ── close_container ─────────────────────────────────────────
@@ -410,7 +415,8 @@ mod tests {
         make_online(&state);
         let input = CloseContainerInput {};
         let result = handle_close_container(&state, &sender, input).await;
-        assert!(result.contains("No container is currently open"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("No container is currently open")));
     }
 
     // ── Schema tests ────────────────────────────────────────────

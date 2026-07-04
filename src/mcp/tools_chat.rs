@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::channel::BotCommandSender;
+use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::{BotCommand, GameMode};
 
@@ -127,19 +128,21 @@ pub async fn handle_send_chat(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     message: String,
-) -> String {
+) -> Result<String, BotError> {
     if !state.is_online() {
-        return "Error: Bot is offline".to_string();
+        return Err(BotError::Offline("Bot is offline".to_string()));
     }
 
     if message.trim().is_empty() {
-        return "Error: Message cannot be empty".to_string();
+        return Err(BotError::InvalidParams(
+            "Message cannot be empty".to_string(),
+        ));
     }
 
     let cmd = BotCommand::SendChat(message);
     match sender.send_command(cmd).await {
-        Ok(result) => result.message,
-        Err(e) => format!("Error: {}", e),
+        Ok(result) => Ok(result.message),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -152,13 +155,15 @@ pub async fn handle_execute_command(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     command: String,
-) -> String {
+) -> Result<String, BotError> {
     if !state.is_online() {
-        return "Error: Bot is offline".to_string();
+        return Err(BotError::Offline("Bot is offline".to_string()));
     }
 
     if command.trim().is_empty() {
-        return "Error: Command cannot be empty".to_string();
+        return Err(BotError::InvalidParams(
+            "Command cannot be empty".to_string(),
+        ));
     }
 
     // Auto-prepend `/` if the user omitted it.
@@ -170,8 +175,8 @@ pub async fn handle_execute_command(
 
     let cmd = BotCommand::ExecuteCommand(cmd_str);
     match sender.send_command(cmd).await {
-        Ok(result) => result.message,
-        Err(e) => format!("Error: {}", e),
+        Ok(result) => Ok(result.message),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -184,9 +189,9 @@ pub async fn handle_set_game_mode(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     mode: String,
-) -> String {
+) -> Result<String, BotError> {
     if !state.is_online() {
-        return "Error: Bot is offline".to_string();
+        return Err(BotError::Offline("Bot is offline".to_string()));
     }
 
     let game_mode = match mode.to_lowercase().as_str() {
@@ -195,16 +200,16 @@ pub async fn handle_set_game_mode(
         "adventure" => GameMode::Adventure,
         "spectator" => GameMode::Spectator,
         _ => {
-            return format!(
-                "Error: Invalid game mode '{mode}'. Must be one of: survival, creative, adventure, spectator"
-            );
+            return Err(BotError::InvalidParams(format!(
+                "Invalid game mode '{mode}'. Must be one of: survival, creative, adventure, spectator"
+            )));
         }
     };
 
     let cmd = BotCommand::SetGameMode(game_mode);
     match sender.send_command(cmd).await {
-        Ok(result) => result.message,
-        Err(e) => format!("Error: {}", e),
+        Ok(result) => Ok(result.message),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -215,11 +220,10 @@ pub async fn handle_set_game_mode(
 /// Return recent chat messages (up to 10) as a JSON array.
 ///
 /// Each entry is an object `{"sender":"...","message":"..."}`. Returns an
-/// empty JSON array (`"[]"`) when the bot is not connected to a server so the
-/// return type is always a JSON array.
-pub fn get_chat_history(state: &Arc<SharedState>) -> String {
+/// error when the bot is not connected to a server.
+pub fn get_chat_history(state: &Arc<SharedState>) -> Result<String, BotError> {
     if !state.is_online() {
-        return "[]".to_string();
+        return Err(BotError::Offline("Bot is offline".to_string()));
     }
 
     let messages = state.get_chat_messages();
@@ -234,7 +238,7 @@ pub fn get_chat_history(state: &Arc<SharedState>) -> String {
         .collect();
 
     serde_json::to_string(&entries)
-        .unwrap_or_else(|e| json!({"error": format!("Serialization error: {e}")}).to_string())
+        .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +287,10 @@ mod tests {
         let (sender, _rx) = make_echo_channel();
         let state = make_state(true);
         let result = handle_send_chat(&state, &sender, "hello".into()).await;
-        assert!(!result.contains("Error"), "unexpected error: {result}");
+        assert!(
+            !result.as_ref().unwrap().contains("Error"),
+            "unexpected error: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -291,8 +298,10 @@ mod tests {
         let (sender, _rx) = make_echo_channel();
         let state = make_state(true);
         let result = handle_send_chat(&state, &sender, "".into()).await;
-        assert!(result.contains("Error"), "empty should be rejected");
-        assert!(result.contains("empty"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("empty")),
+            "empty should be rejected"
+        );
     }
 
     #[tokio::test]
@@ -300,7 +309,10 @@ mod tests {
         let (sender, _rx) = make_echo_channel();
         let state = make_state(true);
         let result = handle_send_chat(&state, &sender, "   ".into()).await;
-        assert!(result.contains("Error"), "whitespace should be rejected");
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("empty")),
+            "whitespace should be rejected"
+        );
     }
 
     #[tokio::test]
@@ -308,8 +320,7 @@ mod tests {
         let (sender, _rx) = make_echo_channel();
         let state = make_state(false);
         let result = handle_send_chat(&state, &sender, "hello".into()).await;
-        assert!(result.contains("Error"));
-        assert!(result.contains("offline"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     // -- execute_command ------------------------------------------------------
@@ -346,7 +357,7 @@ mod tests {
         let (sender, _rx) = make_echo_channel();
         let state = make_state(true);
         let result = handle_execute_command(&state, &sender, "".into()).await;
-        assert!(result.contains("Error"));
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
     }
 
     #[tokio::test]
@@ -354,8 +365,7 @@ mod tests {
         let (sender, _rx) = make_echo_channel();
         let state = make_state(false);
         let result = handle_execute_command(&state, &sender, "gamemode creative".into()).await;
-        assert!(result.contains("Error"));
-        assert!(result.contains("offline"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     // -- set_game_mode --------------------------------------------------------
@@ -365,7 +375,10 @@ mod tests {
         let (sender, mut rx) = make_echo_channel();
         let state = make_state(true);
         let result = handle_set_game_mode(&state, &sender, "survival".into()).await;
-        assert!(!result.contains("Error"), "unexpected error: {result}");
+        assert!(
+            !result.as_ref().unwrap().contains("Error"),
+            "unexpected error: {result:?}"
+        );
 
         let sent = rx.recv().await.expect("should receive command");
         assert!(sent.contains("SetGameMode(Survival)"));
@@ -416,9 +429,8 @@ mod tests {
         let (sender, _rx) = make_echo_channel();
         let state = make_state(true);
         let result = handle_set_game_mode(&state, &sender, "invalid".into()).await;
-        assert!(result.contains("Error"));
-        assert!(result.contains("Invalid game mode"));
-        assert!(result.contains("invalid"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("Invalid game mode") && msg.contains("invalid")));
     }
 
     #[tokio::test]
@@ -426,7 +438,7 @@ mod tests {
         let (sender, _rx) = make_echo_channel();
         let state = make_state(true);
         let result = handle_set_game_mode(&state, &sender, "".into()).await;
-        assert!(result.contains("Error"));
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
     }
 
     #[tokio::test]
@@ -434,8 +446,7 @@ mod tests {
         let (sender, _rx) = make_echo_channel();
         let state = make_state(false);
         let result = handle_set_game_mode(&state, &sender, "creative".into()).await;
-        assert!(result.contains("Error"));
-        assert!(result.contains("offline"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     // -- get_chat_history -----------------------------------------------------
@@ -452,7 +463,7 @@ mod tests {
         state.add_chat_message("Alice".into(), "Hello".into());
         state.add_chat_message("Bob".into(), "Hi there".into());
 
-        let result = get_chat_history(&state);
+        let result = get_chat_history(&state).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
         let arr = parsed
             .as_array()
@@ -467,17 +478,15 @@ mod tests {
     #[test]
     fn test_get_chat_history_online_empty() {
         let state = make_state(true);
-        let result = get_chat_history(&state);
+        let result = get_chat_history(&state).unwrap();
         assert_eq!(result, "[]");
     }
 
     #[test]
     fn test_get_chat_history_offline() {
         let state = make_state(false);
-        // Even if messages exist, offline returns an empty JSON array so the
-        // return type is always a JSON array.
         state.add_chat_message("Alice".into(), "Hello".into());
         let result = get_chat_history(&state);
-        assert_eq!(result, "[]");
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 }
