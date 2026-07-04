@@ -45,10 +45,16 @@ mod tests {
 
     impl Write for CapturingWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.buffer.lock().unwrap().write(buf)
+            self.buffer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .write(buf)
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            self.buffer.lock().unwrap().flush()
+            self.buffer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .flush()
         }
     }
 
@@ -71,7 +77,7 @@ mod tests {
             tracing::info!("logging module test message");
         });
 
-        let output = buffer.lock().unwrap();
+        let output = buffer.lock().unwrap_or_else(|e| e.into_inner());
         let output_str = String::from_utf8(output.clone()).expect("Tracing output is valid UTF-8");
         assert!(
             output_str.contains("logging module test message"),

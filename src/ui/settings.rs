@@ -77,6 +77,7 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
             ui.label(i18n::tr(TextKey::Token));
             ui.add(
                 TextEdit::singleline(&mut edit.mcp_token)
+                    .password(true)
                     .hint_text(i18n::tr(TextKey::TokenHint))
                     .desired_width(180.0),
             );

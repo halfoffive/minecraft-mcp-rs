@@ -71,7 +71,8 @@ pub struct AppConfig {
     /// Timeout for bot commands in seconds (default: 30).
     pub command_timeout_secs: u64,
     /// Authentication token presented by MCP clients over HTTP
-    /// (default: `"minecraft-mcp-rs"`).
+    /// (default: a random UUID v4 generated per fresh [`AppConfig::default()`]
+    /// / missing-field deserialization; override via the settings panel).
     #[serde(default = "default_mcp_token")]
     pub mcp_token: String,
     /// Transport the MCP server uses to communicate with clients
@@ -85,7 +86,10 @@ pub struct AppConfig {
 
 /// Serde default for [`AppConfig::mcp_token`].
 fn default_mcp_token() -> String {
-    "minecraft-mcp-rs".to_string()
+    // Generate a random token using UUID v4. This ensures each fresh install
+    // gets a unique token rather than a hardcoded default that attackers could
+    // exploit. The user can still override it via the settings panel.
+    uuid::Uuid::new_v4().to_string()
 }
 
 impl Default for AppConfig {
@@ -211,13 +215,45 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = AppConfig::default();
-        assert_eq!(config.mcp_token, "minecraft-mcp-rs");
+        // Token is now randomly generated (see `test_default_token_is_random`
+        // and `test_default_token_not_hardcoded_value`); only assert that it
+        // is non-empty here.
+        assert!(!config.mcp_token.is_empty());
         assert_eq!(config.mcp_transport, McpTransport::Http);
     }
 
     #[test]
     fn test_mcp_transport_default_is_http() {
         assert_eq!(McpTransport::default(), McpTransport::Http);
+    }
+
+    #[test]
+    fn test_default_token_is_random() {
+        // Two consecutive calls must yield different tokens, proving the
+        // default is randomly generated rather than a hardcoded constant.
+        // Each token must also be reasonably long (>= 16 chars) so it cannot
+        // be brute-forced trivially.
+        let a = default_mcp_token();
+        let b = default_mcp_token();
+        assert_ne!(a, b, "default token must be random, got {a} twice");
+        assert!(
+            a.len() >= 16,
+            "default token too short ({} chars): {a}",
+            a.len()
+        );
+        assert!(
+            b.len() >= 16,
+            "default token too short ({} chars): {b}",
+            b.len()
+        );
+    }
+
+    #[test]
+    fn test_default_token_not_hardcoded_value() {
+        // The historical hardcoded value must never come back — it is a
+        // known weak credential attackers could exploit.
+        assert_ne!(default_mcp_token(), "minecraft-mcp-rs");
+        assert_ne!(AppConfig::default().mcp_token, "minecraft-mcp-rs");
     }
 
     // -- Language field -----------------------------------------------------

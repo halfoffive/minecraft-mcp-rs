@@ -336,9 +336,9 @@ impl rmcp::schemars::JsonSchema for CollectItemsInput {
 /// Handle `collect_items` MCP tool.
 ///
 /// Validates `radius` is in `1..=64`, checks online status, then sends
-/// [`BotCommand::CollectItems`]. The bot walks toward dropped item entities
-/// within the radius; items are picked up automatically when the bot gets
-/// close enough.
+/// [`BotCommand::CollectItems`]. The bot moves toward dropped item entities
+/// within the radius; pickup is unverified (the `approached` count is
+/// returned, not a confirmed `collected` count).
 pub async fn handle_collect_items(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,

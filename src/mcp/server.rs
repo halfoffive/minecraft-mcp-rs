@@ -394,9 +394,15 @@ impl ServerHandler for McpBotServer {
 
 /// Start the MCP server on stdio transport.
 ///
-/// This function blocks until the transport is closed. All logging goes to
-/// stderr; stdout is reserved for MCP JSON-RPC messages.
+/// This function blocks until the transport is closed **or** the
+/// [`SharedState::shutdown_token`] is cancelled (e.g. on window close). All
+/// logging goes to stderr; stdout is reserved for MCP JSON-RPC messages.
 pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
+    // Clone the shutdown token before moving `state` into the server so we
+    // can race it against the transport's `waiting()` future. `state` is
+    // still consumed by `McpBotServer::new` below — only the cheap token
+    // clone escapes.
+    let shutdown = state.shutdown_token();
     let server = McpBotServer::new(state, sender);
     let (stdin, stdout) = stdio();
 
@@ -405,9 +411,19 @@ pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
     match server.serve((stdin, stdout)).await {
         Ok(running) => {
             info!("MCP server initialized, waiting for transport to close");
-            // Wait until the transport is closed or the service is cancelled.
-            let _ = running.waiting().await;
-            info!("MCP server transport closed cleanly");
+            // Race the transport close against the shutdown token so window
+            // close interrupts an idle stdio loop instead of waiting for
+            // stdin EOF (which may never arrive if the MCP client is still
+            // connected).
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {
+                    info!("MCP stdio server shutting down (shutdown token cancelled)");
+                }
+                _ = running.waiting() => {
+                    info!("MCP server transport closed cleanly");
+                }
+            }
         }
         Err(e) => {
             error!(error = %e, "MCP server failed");
@@ -421,23 +437,59 @@ pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
 
 /// Extract the Bearer token from an `Authorization` header value.
 ///
-/// Returns `Some(token)` only when the header starts with `Bearer ` (case-sensitive
-/// per RFC 6750). The returned token is trimmed of surrounding whitespace.
+/// Returns `Some(token)` only when the header starts with the `Bearer `
+/// scheme. Per RFC 6750 §2.1 the token68 scheme name is case-insensitive,
+/// so the prefix is matched case-insensitively. The returned token is
+/// trimmed of surrounding whitespace.
 fn extract_bearer_token(header: &str) -> Option<&str> {
-    header.strip_prefix("Bearer ").map(str::trim)
+    // RFC 6750 §2.1: token68 scheme name is case-insensitive.
+    // Match "Bearer " prefix case-insensitively, then return the rest as the token.
+    // `get(..7)` returns None when the slice would split a UTF-8 code point, which
+    // also correctly rejects non-ASCII prefixes without panicking.
+    let prefix = header.get(..7)?;
+    if prefix.eq_ignore_ascii_case("Bearer ") {
+        Some(header[7..].trim())
+    } else {
+        None
+    }
 }
 
 /// Check whether the request's `Authorization` header carries the expected
 /// Bearer token.
 ///
 /// Reads the expected token from `state.config().mcp_token` on every request so
-/// configuration changes take effect immediately.
+/// configuration changes take effect immediately. Token comparison uses a
+/// constant-time comparison (see [`constant_time_token_eq`]) to avoid timing
+/// side-channels on the authentication check.
 fn is_bearer_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
     headers
         .get("Authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(extract_bearer_token)
-        .is_some_and(|token| token == expected_token)
+        .is_some_and(|token| constant_time_token_eq(token, expected_token))
+}
+
+/// Compare two bearer tokens in constant time to avoid timing side-channels.
+///
+/// Does not early-return on length mismatch; instead it accumulates byte
+/// differences over the longer slice so the comparison runs in time bounded by
+/// the longer input regardless of where (or whether) the tokens differ. The
+/// length difference is folded into the accumulator so different-length tokens
+/// always fail. (Token lengths are far below the `u8` wrap-around point, so the
+/// length XOR is safe.)
+fn constant_time_token_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let mut diff: u8 = 0;
+    let max_len = a.len().max(b.len());
+    for i in 0..max_len {
+        let av = a.get(i).copied().unwrap_or(0);
+        let bv = b.get(i).copied().unwrap_or(0);
+        diff |= av ^ bv;
+    }
+    // Also fold length difference into diff so different-length tokens fail.
+    diff |= (a.len() as u8) ^ (b.len() as u8);
+    diff == 0
 }
 
 /// Axum middleware that enforces the configured Bearer token.
@@ -464,6 +516,10 @@ async fn bearer_auth_middleware(
 /// authentication read live from [`SharedState::read_config`]. Runs until the
 /// process exits or the axum server encounters an unrecoverable error.
 pub async fn serve_http(state: Arc<SharedState>, sender: BotCommandSender, addr: SocketAddr) {
+    // Clone the shutdown token before `state` is moved into the router below
+    // so we can hand it to `with_graceful_shutdown`.
+    let shutdown = state.shutdown_token();
+
     // The streamable HTTP service creates a fresh McpBotServer per session,
     // so capture cheap clones of state and sender in the factory closure.
     let state_for_factory = Arc::clone(&state);
@@ -496,7 +552,16 @@ pub async fn serve_http(state: Arc<SharedState>, sender: BotCommandSender, addr:
 
     info!("MCP server starting on HTTP at {addr}");
 
-    if let Err(e) = axum::serve(listener, app).await {
+    // Graceful shutdown: cancel the listener's accept loop when the
+    // application's shutdown token fires (window close). `with_graceful_shutdown`
+    // stops accepting new connections and drains in-flight requests before
+    // returning, so the MCP HTTP server thread can join promptly on Drop.
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown.cancelled().await;
+        })
+        .await
+    {
         error!(error = %e, "MCP HTTP server error");
     }
 }
@@ -886,9 +951,25 @@ mod tests {
 
     #[test]
     fn test_extract_bearer_token_rejects_missing_prefix() {
+        // Inputs that truly lack the `Bearer ` scheme prefix must be rejected.
         assert_eq!(extract_bearer_token("secret"), None);
         assert_eq!(extract_bearer_token("Basic secret"), None);
-        assert_eq!(extract_bearer_token("bearer secret"), None);
+    }
+
+    #[test]
+    fn test_extract_bearer_token_accepts_lowercase_scheme() {
+        // RFC 6750 §2.1: the scheme name is case-insensitive.
+        assert_eq!(extract_bearer_token("bearer secret"), Some("secret"));
+    }
+
+    #[test]
+    fn test_extract_bearer_token_accepts_uppercase_scheme() {
+        assert_eq!(extract_bearer_token("BEARER secret"), Some("secret"));
+    }
+
+    #[test]
+    fn test_extract_bearer_token_accepts_mixed_case_scheme() {
+        assert_eq!(extract_bearer_token("BeArEr secret"), Some("secret"));
     }
 
     #[test]
@@ -921,5 +1002,39 @@ mod tests {
 
         let headers = HeaderMap::new();
         assert!(!is_bearer_authorized(&headers, &expected));
+    }
+
+    #[test]
+    fn test_is_bearer_authorized_constant_time_shape() {
+        // Exercises the constant-time comparison through the public helper:
+        // correct token passes; wrong token, different-length token, and an
+        // empty token all fail.
+        let expected = "expected-secret-token";
+
+        // Correct token passes.
+        let mut headers_ok = HeaderMap::new();
+        headers_ok.insert(
+            "Authorization",
+            format!("Bearer {expected}").parse().unwrap(),
+        );
+        assert!(is_bearer_authorized(&headers_ok, expected));
+
+        // Wrong token (same length) fails.
+        let mut headers_wrong = HeaderMap::new();
+        headers_wrong.insert(
+            "Authorization",
+            "Bearer xxxxxxxxxxxxxxxxxxxxx".parse().unwrap(),
+        );
+        assert!(!is_bearer_authorized(&headers_wrong, expected));
+
+        // Different-length token fails.
+        let mut headers_short = HeaderMap::new();
+        headers_short.insert("Authorization", "Bearer short".parse().unwrap());
+        assert!(!is_bearer_authorized(&headers_short, expected));
+
+        // Empty token (extracts to "") fails.
+        let mut headers_empty = HeaderMap::new();
+        headers_empty.insert("Authorization", "Bearer ".parse().unwrap());
+        assert!(!is_bearer_authorized(&headers_empty, expected));
     }
 }
