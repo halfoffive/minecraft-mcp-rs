@@ -27,6 +27,7 @@ use tokio::net::TcpListener;
 use tracing::{error, info};
 
 use crate::channel::BotCommandSender;
+use crate::error::BotError;
 use crate::mcp::tools_act::ActInput;
 use crate::mcp::tools_block::{BreakBlockInput, PlaceBlockInput, UseItemOnBlockInput};
 use crate::mcp::tools_chat::{ExecuteCommandInput, SendChatInput, SetGameModeInput};
@@ -82,7 +83,7 @@ impl McpBotServer {
         description = "Get information about the bot's own player",
         annotations(read_only_hint = true)
     )]
-    async fn get_self_info(&self) -> String {
+    async fn get_self_info(&self) -> Result<String, BotError> {
         crate::mcp::tools_query::get_self_info(&self.state)
     }
 
@@ -90,7 +91,7 @@ impl McpBotServer {
         description = "Get the bot's inventory contents",
         annotations(read_only_hint = true)
     )]
-    async fn get_inventory(&self) -> String {
+    async fn get_inventory(&self) -> Result<String, BotError> {
         crate::mcp::tools_query::get_inventory(&self.state)
     }
 
@@ -98,7 +99,7 @@ impl McpBotServer {
         description = "Get blocks near the bot's position (radius=10, no filter)",
         annotations(read_only_hint = true)
     )]
-    async fn get_nearby_blocks(&self) -> String {
+    async fn get_nearby_blocks(&self) -> Result<String, BotError> {
         crate::mcp::tools_query::get_nearby_blocks(&self.state, 10, None)
     }
 
@@ -106,7 +107,7 @@ impl McpBotServer {
         description = "Get entities near the bot's position (radius=10)",
         annotations(read_only_hint = true)
     )]
-    async fn get_nearby_entities(&self) -> String {
+    async fn get_nearby_entities(&self) -> Result<String, BotError> {
         crate::mcp::tools_query::get_nearby_entities(&self.state, 10)
     }
 
@@ -114,7 +115,7 @@ impl McpBotServer {
         description = "Get a summary of loaded chunks",
         annotations(read_only_hint = true)
     )]
-    async fn get_chunk_summary(&self) -> String {
+    async fn get_chunk_summary(&self) -> Result<String, BotError> {
         crate::mcp::tools_query::get_chunk_summary(&self.state)
     }
 
@@ -122,7 +123,7 @@ impl McpBotServer {
         description = "Check if the bot is connected to a Minecraft server",
         annotations(read_only_hint = true)
     )]
-    async fn is_connected(&self) -> String {
+    async fn is_connected(&self) -> Result<String, BotError> {
         crate::mcp::tools_query::is_connected(&self.state)
     }
 
@@ -130,7 +131,7 @@ impl McpBotServer {
         description = "Returns recent chat messages (up to 10). Each message has sender and message fields.",
         annotations(read_only_hint = true)
     )]
-    async fn get_chat_history(&self) -> String {
+    async fn get_chat_history(&self) -> Result<String, BotError> {
         crate::mcp::tools_chat::get_chat_history(&self.state)
     }
 
@@ -138,7 +139,7 @@ impl McpBotServer {
         description = "Reports whether commands are enabled on the server and the current gamemode. commands_enabled is true/false/null.",
         annotations(read_only_hint = true)
     )]
-    async fn get_server_info(&self) -> String {
+    async fn get_server_info(&self) -> Result<String, BotError> {
         crate::mcp::tools_query::get_server_info(&self.state)
     }
 
@@ -149,29 +150,38 @@ impl McpBotServer {
     async fn get_world_view(
         &self,
         Parameters(input): Parameters<GetWorldViewInput>,
-    ) -> rmcp::model::Content {
+    ) -> Result<rmcp::model::Content, BotError> {
         crate::mcp::tools_query::get_world_view(&self.state, input.radius)
     }
 
     // ── Movement tools ───────────────────────────────────────
 
     #[tool(description = "Move the bot to a specific position")]
-    async fn move_to(&self, Parameters(input): Parameters<MoveToInput>) -> String {
+    async fn move_to(
+        &self,
+        Parameters(input): Parameters<MoveToInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_movement::handle_move_to(&self.state, &self.sender, input).await
     }
 
     #[tool(description = "Walk the bot in a cardinal direction")]
-    async fn walk_direction(&self, Parameters(input): Parameters<WalkDirectionInput>) -> String {
+    async fn walk_direction(
+        &self,
+        Parameters(input): Parameters<WalkDirectionInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_movement::handle_walk_direction(&self.state, &self.sender, input).await
     }
 
     #[tool(description = "Make the bot jump")]
-    async fn jump(&self, Parameters(input): Parameters<JumpInput>) -> String {
+    async fn jump(&self, Parameters(input): Parameters<JumpInput>) -> Result<String, BotError> {
         crate::mcp::tools_movement::handle_jump(&self.state, &self.sender, input).await
     }
 
     #[tool(description = "Teleport the bot to a position (requires Creative mode)")]
-    async fn teleport(&self, Parameters(input): Parameters<TeleportInput>) -> String {
+    async fn teleport(
+        &self,
+        Parameters(input): Parameters<TeleportInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_movement::handle_teleport(&self.state, &self.sender, input).await
     }
 
@@ -179,7 +189,10 @@ impl McpBotServer {
         description = "Smart movement toward target with auto-jump over 1-block obstacles. Stops on impassable obstacle and reports it.",
         annotations(destructive_hint = true)
     )]
-    async fn smart_move(&self, Parameters(input): Parameters<SmartMoveInput>) -> String {
+    async fn smart_move(
+        &self,
+        Parameters(input): Parameters<SmartMoveInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_movement::handle_smart_move(&self.state, &self.sender, input).await
     }
 
@@ -187,7 +200,7 @@ impl McpBotServer {
         description = "Creative mode only. Flies toward target in 3D. Stops on obstacle. Returns reached status.",
         annotations(destructive_hint = true)
     )]
-    async fn fly_to(&self, Parameters(input): Parameters<FlyToInput>) -> String {
+    async fn fly_to(&self, Parameters(input): Parameters<FlyToInput>) -> Result<String, BotError> {
         crate::mcp::tools_movement::handle_fly_to(&self.state, &self.sender, input).await
     }
 
@@ -197,7 +210,10 @@ impl McpBotServer {
         description = "Break a block at the given position",
         annotations(destructive_hint = true)
     )]
-    async fn break_block(&self, Parameters(input): Parameters<BreakBlockInput>) -> String {
+    async fn break_block(
+        &self,
+        Parameters(input): Parameters<BreakBlockInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_block::handle_break_block(&self.state, &self.sender, input).await
     }
 
@@ -205,7 +221,10 @@ impl McpBotServer {
         description = "Place a block at the given position",
         annotations(destructive_hint = true)
     )]
-    async fn place_block(&self, Parameters(input): Parameters<PlaceBlockInput>) -> String {
+    async fn place_block(
+        &self,
+        Parameters(input): Parameters<PlaceBlockInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_block::handle_place_block(&self.state, &self.sender, input).await
     }
 
@@ -216,7 +235,7 @@ impl McpBotServer {
     async fn use_item_on_block(
         &self,
         Parameters(input): Parameters<UseItemOnBlockInput>,
-    ) -> String {
+    ) -> Result<String, BotError> {
         crate::mcp::tools_block::handle_use_item_on_block(&self.state, &self.sender, input).await
     }
 
@@ -229,7 +248,7 @@ impl McpBotServer {
     async fn switch_hotbar_slot(
         &self,
         Parameters(input): Parameters<SwitchHotbarSlotInput>,
-    ) -> String {
+    ) -> Result<String, BotError> {
         crate::mcp::tools_item::handle_switch_hotbar_slot(&self.state, &self.sender, input).await
     }
 
@@ -237,7 +256,10 @@ impl McpBotServer {
         description = "Drop items from an inventory slot.",
         annotations(destructive_hint = true)
     )]
-    async fn drop_item(&self, Parameters(input): Parameters<DropItemInput>) -> String {
+    async fn drop_item(
+        &self,
+        Parameters(input): Parameters<DropItemInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_item::handle_drop_item(&self.state, &self.sender, input).await
     }
 
@@ -245,7 +267,10 @@ impl McpBotServer {
         description = "Use the currently held item.",
         annotations(destructive_hint = true)
     )]
-    async fn use_item(&self, Parameters(input): Parameters<UseItemInput>) -> String {
+    async fn use_item(
+        &self,
+        Parameters(input): Parameters<UseItemInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_item::handle_use_item(&self.state, &self.sender, input).await
     }
 
@@ -253,15 +278,21 @@ impl McpBotServer {
         description = "Equip the best available tool of a given type.",
         annotations(destructive_hint = true)
     )]
-    async fn equip_tool(&self, Parameters(input): Parameters<EquipToolInput>) -> String {
+    async fn equip_tool(
+        &self,
+        Parameters(input): Parameters<EquipToolInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_item::handle_equip_tool(&self.state, &self.sender, input).await
     }
 
     #[tool(
-        description = "Walks toward nearby dropped item entities within radius. Returns count approached (pickup unverified).",
+        description = "Walks toward and picks up nearby dropped item entities within radius. Returns count collected.",
         annotations(destructive_hint = true)
     )]
-    async fn collect_items(&self, Parameters(input): Parameters<CollectItemsInput>) -> String {
+    async fn collect_items(
+        &self,
+        Parameters(input): Parameters<CollectItemsInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_item::handle_collect_items(&self.state, &self.sender, input).await
     }
 
@@ -271,7 +302,10 @@ impl McpBotServer {
         description = "Open a container at the given position",
         annotations(destructive_hint = true)
     )]
-    async fn open_container(&self, Parameters(input): Parameters<OpenContainerInput>) -> String {
+    async fn open_container(
+        &self,
+        Parameters(input): Parameters<OpenContainerInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_container::handle_open_container(&self.state, &self.sender, input).await
     }
 
@@ -282,7 +316,7 @@ impl McpBotServer {
     async fn take_from_container(
         &self,
         Parameters(input): Parameters<TakeFromContainerInput>,
-    ) -> String {
+    ) -> Result<String, BotError> {
         crate::mcp::tools_container::handle_take_from_container(&self.state, &self.sender, input)
             .await
     }
@@ -294,7 +328,7 @@ impl McpBotServer {
     async fn put_into_container(
         &self,
         Parameters(input): Parameters<PutIntoContainerInput>,
-    ) -> String {
+    ) -> Result<String, BotError> {
         crate::mcp::tools_container::handle_put_into_container(&self.state, &self.sender, input)
             .await
     }
@@ -303,7 +337,10 @@ impl McpBotServer {
         description = "Close the currently open container",
         annotations(destructive_hint = true)
     )]
-    async fn close_container(&self, Parameters(input): Parameters<CloseContainerInput>) -> String {
+    async fn close_container(
+        &self,
+        Parameters(input): Parameters<CloseContainerInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_container::handle_close_container(&self.state, &self.sender, input).await
     }
 
@@ -313,7 +350,10 @@ impl McpBotServer {
         description = "Attack an entity by its Minecraft entity ID",
         annotations(destructive_hint = true)
     )]
-    async fn attack_entity(&self, Parameters(input): Parameters<AttackEntityInput>) -> String {
+    async fn attack_entity(
+        &self,
+        Parameters(input): Parameters<AttackEntityInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_combat::handle_attack_entity(&self.state, &self.sender, input).await
     }
 
@@ -321,7 +361,10 @@ impl McpBotServer {
         description = "Hold up shield to block incoming attacks",
         annotations(destructive_hint = true)
     )]
-    async fn shield_block(&self, Parameters(input): Parameters<ShieldBlockInput>) -> String {
+    async fn shield_block(
+        &self,
+        Parameters(input): Parameters<ShieldBlockInput>,
+    ) -> Result<String, BotError> {
         crate::mcp::tools_combat::handle_shield_block(&self.state, &self.sender, input).await
     }
 
@@ -332,7 +375,7 @@ impl McpBotServer {
     async fn send_chat(
         &self,
         Parameters(SendChatInput { message }): Parameters<SendChatInput>,
-    ) -> String {
+    ) -> Result<String, BotError> {
         crate::mcp::tools_chat::handle_send_chat(&self.state, &self.sender, message).await
     }
 
@@ -343,7 +386,7 @@ impl McpBotServer {
     async fn execute_command(
         &self,
         Parameters(ExecuteCommandInput { command }): Parameters<ExecuteCommandInput>,
-    ) -> String {
+    ) -> Result<String, BotError> {
         crate::mcp::tools_chat::handle_execute_command(&self.state, &self.sender, command).await
     }
 
@@ -354,7 +397,7 @@ impl McpBotServer {
     async fn set_game_mode(
         &self,
         Parameters(SetGameModeInput { mode }): Parameters<SetGameModeInput>,
-    ) -> String {
+    ) -> Result<String, BotError> {
         crate::mcp::tools_chat::handle_set_game_mode(&self.state, &self.sender, mode).await
     }
 
@@ -364,7 +407,7 @@ impl McpBotServer {
         description = "Unified action tool. Executes one action and returns the result plus nearby blocks, entities, and self info for iterative mining/exploration loops.",
         annotations(destructive_hint = true)
     )]
-    async fn act(&self, Parameters(input): Parameters<ActInput>) -> String {
+    async fn act(&self, Parameters(input): Parameters<ActInput>) -> Result<String, BotError> {
         crate::mcp::tools_act::handle_act(&self.state, &self.sender, input).await
     }
 }
@@ -394,15 +437,9 @@ impl ServerHandler for McpBotServer {
 
 /// Start the MCP server on stdio transport.
 ///
-/// This function blocks until the transport is closed **or** the
-/// [`SharedState::shutdown_token`] is cancelled (e.g. on window close). All
-/// logging goes to stderr; stdout is reserved for MCP JSON-RPC messages.
+/// This function blocks until the transport is closed. All logging goes to
+/// stderr; stdout is reserved for MCP JSON-RPC messages.
 pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
-    // Clone the shutdown token before moving `state` into the server so we
-    // can race it against the transport's `waiting()` future. `state` is
-    // still consumed by `McpBotServer::new` below — only the cheap token
-    // clone escapes.
-    let shutdown = state.shutdown_token();
     let server = McpBotServer::new(state, sender);
     let (stdin, stdout) = stdio();
 
@@ -411,19 +448,9 @@ pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
     match server.serve((stdin, stdout)).await {
         Ok(running) => {
             info!("MCP server initialized, waiting for transport to close");
-            // Race the transport close against the shutdown token so window
-            // close interrupts an idle stdio loop instead of waiting for
-            // stdin EOF (which may never arrive if the MCP client is still
-            // connected).
-            tokio::select! {
-                biased;
-                _ = shutdown.cancelled() => {
-                    info!("MCP stdio server shutting down (shutdown token cancelled)");
-                }
-                _ = running.waiting() => {
-                    info!("MCP server transport closed cleanly");
-                }
-            }
+            // Wait until the transport is closed or the service is cancelled.
+            let _ = running.waiting().await;
+            info!("MCP server transport closed cleanly");
         }
         Err(e) => {
             error!(error = %e, "MCP server failed");
@@ -437,61 +464,23 @@ pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
 
 /// Extract the Bearer token from an `Authorization` header value.
 ///
-/// Returns `Some(token)` only when the header starts with the `Bearer `
-/// scheme. Per RFC 6750 §2.1 the token68 scheme name is case-insensitive,
-/// so the prefix is matched case-insensitively. The returned token is
-/// trimmed of surrounding whitespace.
+/// Returns `Some(token)` only when the header starts with `Bearer ` (case-sensitive
+/// per RFC 6750). The returned token is trimmed of surrounding whitespace.
 fn extract_bearer_token(header: &str) -> Option<&str> {
-    // RFC 6750 §2.1: token68 scheme name is case-insensitive.
-    // Match "Bearer " prefix case-insensitively, then return the rest as the token.
-    // `get(..7)` returns None when the slice would split a UTF-8 code point, which
-    // also correctly rejects non-ASCII prefixes without panicking.
-    let prefix = header.get(..7)?;
-    if prefix.eq_ignore_ascii_case("Bearer ") {
-        Some(header[7..].trim())
-    } else {
-        None
-    }
+    header.strip_prefix("Bearer ").map(str::trim)
 }
 
 /// Check whether the request's `Authorization` header carries the expected
 /// Bearer token.
 ///
 /// Reads the expected token from `state.config().mcp_token` on every request so
-/// configuration changes take effect immediately. Token comparison uses a
-/// constant-time comparison (see [`constant_time_token_eq`]) to avoid timing
-/// side-channels on the authentication check.
+/// configuration changes take effect immediately.
 fn is_bearer_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
     headers
         .get("Authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(extract_bearer_token)
-        .is_some_and(|token| constant_time_token_eq(token, expected_token))
-}
-
-/// Compare two bearer tokens in constant time to avoid timing side-channels.
-///
-/// Does not early-return on length mismatch; instead it accumulates byte
-/// differences over the longer slice so the comparison runs in time bounded by
-/// the longer input regardless of where (or whether) the tokens differ. The
-/// length difference is folded into the accumulator so different-length tokens
-/// always fail. The accumulator is `u32` so the length XOR (also accumulated as
-/// `u32`) cannot wrap around — a previous `u8` cast would truncate to 0 when
-/// the length difference was a multiple of 256, allowing a theoretical
-/// length-collision attack.
-fn constant_time_token_eq(a: &str, b: &str) -> bool {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-    let mut diff: u32 = 0;
-    let max_len = a.len().max(b.len());
-    for i in 0..max_len {
-        let av = a.get(i).copied().unwrap_or(0) as u32;
-        let bv = b.get(i).copied().unwrap_or(0) as u32;
-        diff |= av ^ bv;
-    }
-    // Fold length difference (usize, no wraparound) into diff.
-    diff |= (a.len() as u32) ^ (b.len() as u32);
-    diff == 0
+        .is_some_and(|token| token == expected_token)
 }
 
 /// Axum middleware that enforces the configured Bearer token.
@@ -518,10 +507,6 @@ async fn bearer_auth_middleware(
 /// authentication read live from [`SharedState::read_config`]. Runs until the
 /// process exits or the axum server encounters an unrecoverable error.
 pub async fn serve_http(state: Arc<SharedState>, sender: BotCommandSender, addr: SocketAddr) {
-    // Clone the shutdown token before `state` is moved into the router below
-    // so we can hand it to `with_graceful_shutdown`.
-    let shutdown = state.shutdown_token();
-
     // The streamable HTTP service creates a fresh McpBotServer per session,
     // so capture cheap clones of state and sender in the factory closure.
     let state_for_factory = Arc::clone(&state);
@@ -554,16 +539,7 @@ pub async fn serve_http(state: Arc<SharedState>, sender: BotCommandSender, addr:
 
     info!("MCP server starting on HTTP at {addr}");
 
-    // Graceful shutdown: cancel the listener's accept loop when the
-    // application's shutdown token fires (window close). `with_graceful_shutdown`
-    // stops accepting new connections and drains in-flight requests before
-    // returning, so the MCP HTTP server thread can join promptly on Drop.
-    if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown.cancelled().await;
-        })
-        .await
-    {
+    if let Err(e) = axum::serve(listener, app).await {
         error!(error = %e, "MCP HTTP server error");
     }
 }
@@ -636,7 +612,7 @@ mod tests {
         let result = server
             .move_to(Parameters(MoveToInput { x: 0, y: 64, z: 0 }))
             .await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
 
         let result = server
             .walk_direction(Parameters(WalkDirectionInput {
@@ -644,15 +620,15 @@ mod tests {
                 distance: 1,
             }))
             .await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
 
         let result = server.jump(Parameters(JumpInput {})).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
 
         let result = server
             .teleport(Parameters(TeleportInput { x: 0, y: 64, z: 0 }))
             .await;
-        assert!(result.contains("requires Creative") || result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     /// Container tool integration tests — verify offline/no-container rejection.
@@ -665,7 +641,7 @@ mod tests {
         let result = server
             .open_container(Parameters(OpenContainerInput { x: 0, y: 64, z: 0 }))
             .await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
 
         let result = server
             .take_from_container(Parameters(TakeFromContainerInput {
@@ -673,7 +649,8 @@ mod tests {
                 count: Some(1),
             }))
             .await;
-        assert!(result.contains("No container is currently open"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("No container is currently open")));
 
         let result = server
             .put_into_container(Parameters(PutIntoContainerInput {
@@ -681,12 +658,14 @@ mod tests {
                 count: Some(1),
             }))
             .await;
-        assert!(result.contains("No container is currently open"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("No container is currently open")));
 
         let result = server
             .close_container(Parameters(CloseContainerInput {}))
             .await;
-        assert!(result.contains("No container is currently open"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("No container is currently open")));
     }
 
     /// Combat tool integration tests — verify offline/entity-not-found rejection.
@@ -699,12 +678,13 @@ mod tests {
         let result = server
             .attack_entity(Parameters(AttackEntityInput { entity_id: 42 }))
             .await;
-        assert!(result.contains("not found") || result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("not found")));
 
         let result = server
             .shield_block(Parameters(ShieldBlockInput { blocking: true }))
             .await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     /// Query tools return offline error when the bot is not connected.
@@ -714,12 +694,26 @@ mod tests {
         let (sender, _receiver) = create_command_channel(4);
         let server = McpBotServer::new(state, sender);
 
-        let offline = r#"{"error":"Bot is currently offline"}"#;
-        assert_eq!(server.get_self_info().await, offline);
-        assert_eq!(server.get_inventory().await, offline);
-        assert_eq!(server.get_nearby_blocks().await, offline);
-        assert_eq!(server.get_nearby_entities().await, offline);
-        assert_eq!(server.get_chunk_summary().await, offline);
+        assert!(matches!(
+            server.get_self_info().await,
+            Err(BotError::Offline(_))
+        ));
+        assert!(matches!(
+            server.get_inventory().await,
+            Err(BotError::Offline(_))
+        ));
+        assert!(matches!(
+            server.get_nearby_blocks().await,
+            Err(BotError::Offline(_))
+        ));
+        assert!(matches!(
+            server.get_nearby_entities().await,
+            Err(BotError::Offline(_))
+        ));
+        assert!(matches!(
+            server.get_chunk_summary().await,
+            Err(BotError::Offline(_))
+        ));
     }
 
     /// is_connected returns false when bot is offline.
@@ -729,7 +723,10 @@ mod tests {
         let (sender, _receiver) = create_command_channel(4);
         let server = McpBotServer::new(state, sender);
 
-        assert_eq!(server.is_connected().await, r#"{"connected":false}"#);
+        assert_eq!(
+            server.is_connected().await.unwrap(),
+            r#"{"connected":false}"#
+        );
     }
 
     /// is_connected returns true when bot is online.
@@ -740,7 +737,10 @@ mod tests {
         let (sender, _receiver) = create_command_channel(4);
         let server = McpBotServer::new(state, sender);
 
-        assert_eq!(server.is_connected().await, r#"{"connected":true}"#);
+        assert_eq!(
+            server.is_connected().await.unwrap(),
+            r#"{"connected":true}"#
+        );
     }
 
     // ── Block tool integration tests ───────────────────────────────────
@@ -759,7 +759,7 @@ mod tests {
                 use_best_tool: None,
             }))
             .await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -776,7 +776,7 @@ mod tests {
                 item_slot: 1,
             }))
             .await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -793,7 +793,7 @@ mod tests {
                 item_slot: None,
             }))
             .await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -811,7 +811,8 @@ mod tests {
                 use_best_tool: None,
             }))
             .await;
-        assert!(result.contains("out of bounds") || result.contains("out of range"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("out of bounds") || msg.contains("out of range")));
     }
 
     #[tokio::test]
@@ -829,7 +830,8 @@ mod tests {
                 item_slot: 9,
             }))
             .await;
-        assert!(result.contains("must be 0-8"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("must be 0-8")));
     }
 
     #[tokio::test]
@@ -847,7 +849,8 @@ mod tests {
                 item_slot: Some(10),
             }))
             .await;
-        assert!(result.contains("must be 0-8"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("must be 0-8")));
     }
 
     // ── Item tool integration tests ─────────────────────────────────────
@@ -861,7 +864,7 @@ mod tests {
         let result = server
             .switch_hotbar_slot(Parameters(SwitchHotbarSlotInput { slot: 0 }))
             .await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -876,7 +879,7 @@ mod tests {
                 count: Some(1),
             }))
             .await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -888,7 +891,7 @@ mod tests {
         let result = server
             .use_item(Parameters(UseItemInput { item_slot: None }))
             .await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -903,7 +906,7 @@ mod tests {
                 material_preference: None,
             }))
             .await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -916,7 +919,8 @@ mod tests {
         let result = server
             .switch_hotbar_slot(Parameters(SwitchHotbarSlotInput { slot: 9 }))
             .await;
-        assert!(result.contains("must be 0-8"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("must be 0-8")));
     }
 
     #[tokio::test]
@@ -932,7 +936,8 @@ mod tests {
                 material_preference: None,
             }))
             .await;
-        assert!(result.contains("Unknown tool type"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("Unknown tool type")));
     }
 
     // ── Bearer token helper tests ───────────────────────────────────────
@@ -953,25 +958,9 @@ mod tests {
 
     #[test]
     fn test_extract_bearer_token_rejects_missing_prefix() {
-        // Inputs that truly lack the `Bearer ` scheme prefix must be rejected.
         assert_eq!(extract_bearer_token("secret"), None);
         assert_eq!(extract_bearer_token("Basic secret"), None);
-    }
-
-    #[test]
-    fn test_extract_bearer_token_accepts_lowercase_scheme() {
-        // RFC 6750 §2.1: the scheme name is case-insensitive.
-        assert_eq!(extract_bearer_token("bearer secret"), Some("secret"));
-    }
-
-    #[test]
-    fn test_extract_bearer_token_accepts_uppercase_scheme() {
-        assert_eq!(extract_bearer_token("BEARER secret"), Some("secret"));
-    }
-
-    #[test]
-    fn test_extract_bearer_token_accepts_mixed_case_scheme() {
-        assert_eq!(extract_bearer_token("BeArEr secret"), Some("secret"));
+        assert_eq!(extract_bearer_token("bearer secret"), None);
     }
 
     #[test]
@@ -1004,56 +993,5 @@ mod tests {
 
         let headers = HeaderMap::new();
         assert!(!is_bearer_authorized(&headers, &expected));
-    }
-
-    #[test]
-    fn test_is_bearer_authorized_constant_time_shape() {
-        // Exercises the constant-time comparison through the public helper:
-        // correct token passes; wrong token, different-length token, and an
-        // empty token all fail.
-        let expected = "expected-secret-token";
-
-        // Correct token passes.
-        let mut headers_ok = HeaderMap::new();
-        headers_ok.insert(
-            "Authorization",
-            format!("Bearer {expected}").parse().unwrap(),
-        );
-        assert!(is_bearer_authorized(&headers_ok, expected));
-
-        // Wrong token (same length) fails.
-        let mut headers_wrong = HeaderMap::new();
-        headers_wrong.insert(
-            "Authorization",
-            "Bearer xxxxxxxxxxxxxxxxxxxxx".parse().unwrap(),
-        );
-        assert!(!is_bearer_authorized(&headers_wrong, expected));
-
-        // Different-length token fails.
-        let mut headers_short = HeaderMap::new();
-        headers_short.insert("Authorization", "Bearer short".parse().unwrap());
-        assert!(!is_bearer_authorized(&headers_short, expected));
-
-        // Empty token (extracts to "") fails.
-        let mut headers_empty = HeaderMap::new();
-        headers_empty.insert("Authorization", "Bearer ".parse().unwrap());
-        assert!(!is_bearer_authorized(&headers_empty, expected));
-    }
-
-    /// Regression: length-difference wraparound must not mask a mismatch.
-    ///
-    /// The previous implementation cast `a.len() ^ b.len()` to `u8`, so a
-    /// length delta of 256 (or any multiple of 256) truncated to 0. Combined
-    /// with the `unwrap_or(0)` zero-padding of the shorter slice, two
-    /// different-length tokens whose extra bytes were all `\0` would compare
-    /// equal. The `u32` accumulator no longer truncates, so this must fail.
-    #[test]
-    fn test_constant_time_token_eq_length_wraparound_safe() {
-        let a = "x".repeat(300);
-        let b = "x".repeat(300) + &"\0".repeat(256);
-        // Same prefix, length delta of 256 — must NOT be treated as equal.
-        assert!(!constant_time_token_eq(&a, &b));
-        // Sanity: identical tokens still compare equal.
-        assert!(constant_time_token_eq(&a, &a));
     }
 }

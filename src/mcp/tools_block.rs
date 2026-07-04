@@ -18,6 +18,7 @@ use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
 use crate::command_validate::validate_block_pos;
+use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::{BlockPos, BotCommand};
 
@@ -96,31 +97,33 @@ pub async fn handle_break_block(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: BreakBlockInput,
-) -> String {
+) -> Result<String, BotError> {
     // Validate coordinates are within world bounds
     if let Err(e) = validate_block_pos(&BlockPos::new(input.x, input.y, input.z)) {
-        return format!(r#"{{"success":false,"error":"{e}"}}"#);
+        return Err(BotError::InvalidParams(e));
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::BreakBlock(BlockPos::new(input.x, input.y, input.z));
     match sender.send_command(cmd).await {
         Ok(result) => {
-            let mut json = serde_json::to_value(&result).unwrap_or_default();
+            let mut json = serde_json::to_value(&result)
+                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))?;
             if let Some(obj) = json.as_object_mut() {
                 obj.insert(
                     "use_best_tool".to_string(),
                     Value::Bool(input.use_best_tool.unwrap_or(false)),
                 );
             }
-            serde_json::to_string(&json).unwrap_or_else(|e| {
-                format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-            })
+            serde_json::to_string(&json)
+                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
         }
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -181,22 +184,24 @@ pub async fn handle_place_block(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: PlaceBlockInput,
-) -> String {
+) -> Result<String, BotError> {
     // Validate coordinates are within world bounds
     if let Err(e) = validate_block_pos(&BlockPos::new(input.x, input.y, input.z)) {
-        return format!(r#"{{"success":false,"error":"{e}"}}"#);
+        return Err(BotError::InvalidParams(e));
     }
 
     // Validate item slot is in hotbar range
     if input.item_slot > 8 {
-        return format!(
-            r#"{{"success":false,"error":"item_slot must be 0-8, got {}"}}"#,
+        return Err(BotError::InvalidParams(format!(
+            "item_slot must be 0-8, got {}",
             input.item_slot
-        );
+        )));
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::PlaceBlock(
@@ -204,10 +209,9 @@ pub async fn handle_place_block(
         format!("slot:{}", input.item_slot),
     );
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -265,29 +269,32 @@ pub async fn handle_use_item_on_block(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: UseItemOnBlockInput,
-) -> String {
+) -> Result<String, BotError> {
     // Validate coordinates are within world bounds
     if let Err(e) = validate_block_pos(&BlockPos::new(input.x, input.y, input.z)) {
-        return format!(r#"{{"success":false,"error":"{e}"}}"#);
+        return Err(BotError::InvalidParams(e));
     }
 
     // Validate optional item slot
     if let Some(slot) = input.item_slot
         && slot > 8
     {
-        return format!(r#"{{"success":false,"error":"item_slot must be 0-8, got {slot}"}}"#);
+        return Err(BotError::InvalidParams(format!(
+            "item_slot must be 0-8, got {slot}"
+        )));
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::UseItemOnBlock(BlockPos::new(input.x, input.y, input.z), input.item_slot);
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -340,7 +347,7 @@ mod tests {
             use_best_tool: None,
         };
         let result = handle_break_block(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -354,12 +361,14 @@ mod tests {
             use_best_tool: None,
         };
         let result = handle_break_block(&state, &sender, input).await;
-        assert!(result.contains("out of bounds") || result.contains("out of range"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("out of bounds") || msg.contains("out of range"))
+        );
     }
 
     #[tokio::test]
     async fn test_break_block_valid() {
-        let (state, sender) = setup();
+        let (state, sender) = make_echo_channel();
         make_online(&state);
         let input = BreakBlockInput {
             x: 10,
@@ -367,7 +376,7 @@ mod tests {
             z: -5,
             use_best_tool: None,
         };
-        let result = handle_break_block(&state, &sender, input).await;
+        let result = handle_break_block(&state, &sender, input).await.unwrap();
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
     }
 
@@ -381,7 +390,7 @@ mod tests {
             z: -5,
             use_best_tool: Some(true),
         };
-        let result = handle_break_block(&state, &sender, input).await;
+        let result = handle_break_block(&state, &sender, input).await.unwrap();
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
         assert_eq!(json.get("use_best_tool"), Some(&Value::Bool(true)));
     }
@@ -396,7 +405,7 @@ mod tests {
             z: -5,
             use_best_tool: Some(false),
         };
-        let result = handle_break_block(&state, &sender, input).await;
+        let result = handle_break_block(&state, &sender, input).await.unwrap();
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
         assert_eq!(json.get("use_best_tool"), Some(&Value::Bool(false)));
     }
@@ -413,7 +422,7 @@ mod tests {
             item_slot: 0,
         };
         let result = handle_place_block(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -427,7 +436,9 @@ mod tests {
             item_slot: 0,
         };
         let result = handle_place_block(&state, &sender, input).await;
-        assert!(result.contains("out of bounds") || result.contains("out of range"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("out of bounds") || msg.contains("out of range"))
+        );
     }
 
     #[tokio::test]
@@ -441,12 +452,14 @@ mod tests {
             item_slot: 9,
         };
         let result = handle_place_block(&state, &sender, input).await;
-        assert!(result.contains("must be 0-8"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("must be 0-8"))
+        );
     }
 
     #[tokio::test]
     async fn test_place_block_valid() {
-        let (state, sender) = setup();
+        let (state, sender) = make_echo_channel();
         make_online(&state);
         let input = PlaceBlockInput {
             x: 5,
@@ -454,13 +467,13 @@ mod tests {
             z: 10,
             item_slot: 3,
         };
-        let result = handle_place_block(&state, &sender, input).await;
+        let result = handle_place_block(&state, &sender, input).await.unwrap();
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
     }
 
     #[tokio::test]
     async fn test_place_block_min_slot_valid() {
-        let (state, sender) = setup();
+        let (state, sender) = make_echo_channel();
         make_online(&state);
         let input = PlaceBlockInput {
             x: 0,
@@ -468,13 +481,13 @@ mod tests {
             z: 0,
             item_slot: 0,
         };
-        let result = handle_place_block(&state, &sender, input).await;
+        let result = handle_place_block(&state, &sender, input).await.unwrap();
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
     }
 
     #[tokio::test]
     async fn test_place_block_max_slot_valid() {
-        let (state, sender) = setup();
+        let (state, sender) = make_echo_channel();
         make_online(&state);
         let input = PlaceBlockInput {
             x: 0,
@@ -482,7 +495,7 @@ mod tests {
             z: 0,
             item_slot: 8,
         };
-        let result = handle_place_block(&state, &sender, input).await;
+        let result = handle_place_block(&state, &sender, input).await.unwrap();
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
     }
 
@@ -498,7 +511,7 @@ mod tests {
             item_slot: None,
         };
         let result = handle_use_item_on_block(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -512,7 +525,9 @@ mod tests {
             item_slot: None,
         };
         let result = handle_use_item_on_block(&state, &sender, input).await;
-        assert!(result.contains("out of bounds") || result.contains("out of range"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("out of bounds") || msg.contains("out of range"))
+        );
     }
 
     #[tokio::test]
@@ -526,12 +541,14 @@ mod tests {
             item_slot: Some(10),
         };
         let result = handle_use_item_on_block(&state, &sender, input).await;
-        assert!(result.contains("must be 0-8"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("must be 0-8"))
+        );
     }
 
     #[tokio::test]
     async fn test_use_item_on_block_valid_no_slot() {
-        let (state, sender) = setup();
+        let (state, sender) = make_echo_channel();
         make_online(&state);
         let input = UseItemOnBlockInput {
             x: 0,
@@ -539,7 +556,9 @@ mod tests {
             z: 0,
             item_slot: None,
         };
-        let result = handle_use_item_on_block(&state, &sender, input).await;
+        let result = handle_use_item_on_block(&state, &sender, input)
+            .await
+            .unwrap();
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
     }
 
@@ -578,7 +597,9 @@ mod tests {
             z: 1,
             item_slot: Some(3),
         };
-        let result = handle_use_item_on_block(&state, &sender, input).await;
+        let result = handle_use_item_on_block(&state, &sender, input)
+            .await
+            .unwrap();
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
         assert!(
             json.get("success")

@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
+use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::BotCommand;
 
@@ -64,29 +65,30 @@ pub async fn handle_attack_entity(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: AttackEntityInput,
-) -> String {
+) -> Result<String, BotError> {
     // Verify the entity exists in the current snapshot
     {
         let snap = state.read_snapshot();
         let found = snap.entities.iter().any(|e| e.id == input.entity_id);
         if !found {
-            return format!(
-                r#"{{"success":false,"error":"Entity with ID {} not found in current world snapshot"}}"#,
+            return Err(BotError::InvalidParams(format!(
+                "Entity with ID {} not found in current world snapshot",
                 input.entity_id
-            );
+            )));
         }
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::AttackEntity(input.entity_id);
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -128,23 +130,25 @@ pub async fn handle_shield_block(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: ShieldBlockInput,
-) -> String {
+) -> Result<String, BotError> {
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::ShieldBlock(input.blocking);
     match sender.send_command(cmd).await {
         Ok(result) => {
-            let mut json = serde_json::to_value(&result).unwrap_or_default();
+            let mut json = serde_json::to_value(&result)
+                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))?;
             if let Some(obj) = json.as_object_mut() {
                 obj.insert("blocking".to_string(), Value::Bool(input.blocking));
             }
-            serde_json::to_string(&json).unwrap_or_else(|e| {
-                format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-            })
+            serde_json::to_string(&json)
+                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
         }
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -223,7 +227,7 @@ mod tests {
         add_test_entity(&state, 42);
         let input = AttackEntityInput { entity_id: 42 };
         let result = handle_attack_entity(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -233,17 +237,19 @@ mod tests {
         // No entities in default snapshot
         let input = AttackEntityInput { entity_id: 99 };
         let result = handle_attack_entity(&state, &sender, input).await;
-        assert!(result.contains("not found"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("not found"))
+        );
     }
 
     #[tokio::test]
     async fn test_attack_entity_valid() {
-        let (state, sender) = setup();
+        let (state, sender) = make_echo_channel();
         make_online(&state);
         add_test_entity(&state, 42);
         let input = AttackEntityInput { entity_id: 42 };
         let result = handle_attack_entity(&state, &sender, input).await;
-        let _: Value = serde_json::from_str(&result).expect("valid JSON");
+        let _: Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
     }
 
     // ── shield_block ────────────────────────────────────────────
@@ -253,7 +259,7 @@ mod tests {
         let (state, sender) = setup();
         let input = ShieldBlockInput { blocking: true };
         let result = handle_shield_block(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -261,7 +267,7 @@ mod tests {
         let (state, sender) = make_echo_channel();
         make_online(&state);
         let input = ShieldBlockInput { blocking: true };
-        let result = handle_shield_block(&state, &sender, input).await;
+        let result = handle_shield_block(&state, &sender, input).await.unwrap();
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
         assert_eq!(json.get("blocking"), Some(&Value::Bool(true)));
     }
@@ -291,7 +297,7 @@ mod tests {
         });
 
         let input = ShieldBlockInput { blocking: false };
-        let result = handle_shield_block(&state, &sender, input).await;
+        let result = handle_shield_block(&state, &sender, input).await.unwrap();
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
         assert!(
             json.get("success")

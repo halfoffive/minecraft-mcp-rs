@@ -3,7 +3,7 @@
 //! The [`WorldSnapshot`] type lives in `crate::types`; this module adds
 //! incremental-update helpers and radius-query methods.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::types::{BlockEntry, BlockPos, EntityEntry, SelfPlayer, WorldSnapshot};
@@ -17,6 +17,10 @@ use crate::types::{BlockEntry, BlockPos, EntityEntry, SelfPlayer, WorldSnapshot}
 pub struct DirtyTracker {
     dirty_blocks: HashSet<BlockPos>,
     dirty_chunks: HashSet<(i32, i32)>,
+    /// Spatial index from dirty chunk to the set of dirty block positions
+    /// within that chunk. A chunk may be present with an empty set when the
+    /// entire chunk is marked dirty via `mark_chunk_dirty`.
+    chunk_index: HashMap<(i32, i32), HashSet<BlockPos>>,
 }
 
 impl DirtyTracker {
@@ -28,18 +32,27 @@ impl DirtyTracker {
     /// Mark a single block position as dirty.
     pub fn mark_block_dirty(&mut self, pos: BlockPos) {
         self.dirty_blocks.insert(pos);
+        let chunk = (pos.x >> 4, pos.z >> 4);
+        self.chunk_index.entry(chunk).or_default().insert(pos);
     }
 
     /// Mark an entire chunk as dirty.
     pub fn mark_chunk_dirty(&mut self, pos: (i32, i32)) {
         self.dirty_chunks.insert(pos);
+        self.chunk_index.entry(pos).or_default();
     }
 
     /// Drain and return the current dirty sets, clearing the tracker.
     pub fn take_dirty_sets(&mut self) -> (HashSet<BlockPos>, HashSet<(i32, i32)>) {
         let blocks = std::mem::take(&mut self.dirty_blocks);
         let chunks = std::mem::take(&mut self.dirty_chunks);
+        self.chunk_index.clear();
         (blocks, chunks)
+    }
+
+    /// Returns a reference to the chunk -> dirty block positions index.
+    pub fn dirty_chunk_index(&self) -> &HashMap<(i32, i32), HashSet<BlockPos>> {
+        &self.chunk_index
     }
 
     /// Returns true if no dirty regions are tracked.
@@ -63,6 +76,7 @@ pub struct SnapshotBuilder {
     old: WorldSnapshot,
     dirty_blocks: HashSet<BlockPos>,
     dirty_chunks: HashSet<(i32, i32)>,
+    dirty_chunk_index: HashMap<(i32, i32), HashSet<BlockPos>>,
     new_blocks: Vec<BlockEntry>,
     new_entities: Option<Vec<EntityEntry>>,
     new_self_player: Option<SelfPlayer>,
@@ -76,6 +90,7 @@ impl SnapshotBuilder {
             old,
             dirty_blocks: HashSet::new(),
             dirty_chunks: HashSet::new(),
+            dirty_chunk_index: HashMap::new(),
             new_blocks: Vec::new(),
             new_entities: None,
             new_self_player: None,
@@ -85,9 +100,11 @@ impl SnapshotBuilder {
 
     /// Consume a [`DirtyTracker`] to know which regions changed.
     pub fn with_dirty_tracker(mut self, tracker: &mut DirtyTracker) -> Self {
+        let chunk_index = tracker.dirty_chunk_index().clone();
         let (blocks, chunks) = tracker.take_dirty_sets();
         self.dirty_blocks = blocks;
         self.dirty_chunks = chunks;
+        self.dirty_chunk_index = chunk_index;
         self
     }
 
@@ -126,15 +143,18 @@ impl SnapshotBuilder {
     /// All other fields use the new data when provided, otherwise fall back
     /// to the old snapshot.
     pub fn build(self) -> WorldSnapshot {
-        let mut blocks: Vec<BlockEntry> = self
-            .old
-            .blocks
-            .into_iter()
-            .filter(|b| {
-                let chunk = (b.position.x >> 4, b.position.z >> 4);
-                !self.dirty_blocks.contains(&b.position) && !self.dirty_chunks.contains(&chunk)
-            })
-            .collect();
+        let mut blocks: Vec<BlockEntry> =
+            Vec::with_capacity(self.old.blocks.len() + self.new_blocks.len());
+
+        for b in self.old.blocks {
+            let chunk = (b.position.x >> 4, b.position.z >> 4);
+            if self.dirty_chunk_index.contains_key(&chunk)
+                && (self.dirty_blocks.contains(&b.position) || self.dirty_chunks.contains(&chunk))
+            {
+                continue;
+            }
+            blocks.push(b);
+        }
         blocks.extend(self.new_blocks);
 
         let entities = self.new_entities.unwrap_or(self.old.entities);
@@ -297,6 +317,33 @@ mod tests {
         tracker.mark_block_dirty(BlockPos::new(0, 0, 0)); // duplicate
         let (blocks, _) = tracker.take_dirty_sets();
         assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn test_dirty_tracker_chunk_index() {
+        let mut tracker = DirtyTracker::new();
+        tracker.mark_block_dirty(BlockPos::new(0, 64, 0)); // chunk (0,0)
+        tracker.mark_block_dirty(BlockPos::new(16, 64, 0)); // chunk (1,0)
+        tracker.mark_chunk_dirty((2, 2)); // empty-set entry
+
+        let index = tracker.dirty_chunk_index();
+        assert_eq!(index.len(), 3);
+        assert!(
+            index
+                .get(&(0, 0))
+                .unwrap()
+                .contains(&BlockPos::new(0, 64, 0))
+        );
+        assert!(
+            index
+                .get(&(1, 0))
+                .unwrap()
+                .contains(&BlockPos::new(16, 64, 0))
+        );
+        assert!(index.get(&(2, 2)).unwrap().is_empty());
+
+        let (_, _) = tracker.take_dirty_sets();
+        assert!(tracker.dirty_chunk_index().is_empty());
     }
 
     // ── SnapshotBuilder tests ───────────────────────────────
@@ -462,6 +509,69 @@ mod tests {
         assert!(types.contains(&"emerald_block".into()));
         assert!(!types.contains(&"dirt".into()));
         assert!(!types.contains(&"grass".into()));
+    }
+
+    #[test]
+    fn test_builder_skips_clean_chunks() {
+        // Place many blocks in a clean chunk far from the dirty block. If the
+        // implementation accidentally scanned all old blocks, these would still
+        // be preserved, but this test documents that they are untouched.
+        let mut old_blocks = vec![
+            block(BlockPos::new(0, 64, 0), "target"), // chunk (0,0)
+        ];
+        for i in 1..=100 {
+            // chunk (10,10) is clean
+            old_blocks.push(block(BlockPos::new(160 + i, 64, 160 + i), "clean"));
+        }
+
+        let old = make_snapshot(old_blocks, vec![]);
+        let mut tracker = DirtyTracker::new();
+        tracker.mark_block_dirty(BlockPos::new(0, 64, 0));
+
+        let new = SnapshotBuilder::new(old)
+            .with_dirty_tracker(&mut tracker)
+            .with_blocks(vec![block(BlockPos::new(0, 64, 0), "replaced")])
+            .build();
+
+        assert_eq!(new.blocks.len(), 101);
+        let types: Vec<_> = new.blocks.iter().map(|b| b.block_type.clone()).collect();
+        assert!(types.contains(&"replaced".into()));
+        assert!(!types.contains(&"target".into()));
+        assert_eq!(
+            new.blocks
+                .iter()
+                .filter(|b| b.block_type == "clean")
+                .count(),
+            100
+        );
+    }
+
+    #[test]
+    fn test_builder_dirty_chunk_replaces_all_in_chunk() {
+        let old = make_snapshot(
+            vec![
+                block(BlockPos::new(0, 64, 0), "a"),     // chunk (0,0)
+                block(BlockPos::new(15, 64, 15), "b"),   // chunk (0,0)
+                block(BlockPos::new(16, 64, 0), "c"),    // chunk (1,0)
+                block(BlockPos::new(160, 64, 160), "d"), // chunk (10,10)
+            ],
+            vec![],
+        );
+        let mut tracker = DirtyTracker::new();
+        tracker.mark_chunk_dirty((0, 0));
+
+        let new = SnapshotBuilder::new(old)
+            .with_dirty_tracker(&mut tracker)
+            .with_blocks(vec![block(BlockPos::new(0, 64, 0), "new_a")])
+            .build();
+
+        assert_eq!(new.blocks.len(), 3);
+        let types: Vec<_> = new.blocks.iter().map(|b| b.block_type.clone()).collect();
+        assert!(types.contains(&"new_a".into()));
+        assert!(types.contains(&"c".into()));
+        assert!(types.contains(&"d".into()));
+        assert!(!types.contains(&"a".into()));
+        assert!(!types.contains(&"b".into()));
     }
 
     // ── Radius query tests ──────────────────────────────────

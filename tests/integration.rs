@@ -121,12 +121,12 @@ async fn test_full_mcp_cycle_initialize_and_query() {
     );
 
     // ── Query tool via underlying public function ───────────────
-    let self_info = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
+    let self_info = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state).unwrap();
     assert!(self_info.contains("TestBot"));
     assert!(self_info.contains("550e8400"));
     assert!(self_info.contains("18.5"));
 
-    let connected = minecraft_mcp_rs::mcp::tools_query::is_connected(&state);
+    let connected = minecraft_mcp_rs::mcp::tools_query::is_connected(&state).unwrap();
     assert_eq!(connected, r#"{"connected":true}"#);
 
     // ── Action tool via channel ──────────────────────────────────
@@ -145,7 +145,8 @@ async fn test_full_mcp_cycle_initialize_and_query() {
 
     let chat_response =
         minecraft_mcp_rs::mcp::tools_chat::handle_send_chat(&state, &sender, "Hello World".into())
-            .await;
+            .await
+            .unwrap();
     assert!(chat_response.contains("message sent"));
 
     responder.await.expect("responder should complete");
@@ -162,17 +163,16 @@ async fn test_full_mcp_cycle_tool_list_and_offline_handling() {
     assert_eq!(info.server_info.name, "minecraft-mcp-rs");
 
     // Query tools return offline error when bot is offline
-    let offline = r#"{"error":"Bot is currently offline"}"#;
-    assert_eq!(
+    assert!(matches!(
         minecraft_mcp_rs::mcp::tools_query::get_self_info(&state),
-        offline
-    );
-    assert_eq!(
+        Err(BotError::Offline(_))
+    ));
+    assert!(matches!(
         minecraft_mcp_rs::mcp::tools_query::get_inventory(&state),
-        offline
-    );
+        Err(BotError::Offline(_))
+    ));
     assert_eq!(
-        minecraft_mcp_rs::mcp::tools_query::is_connected(&state),
+        minecraft_mcp_rs::mcp::tools_query::is_connected(&state).unwrap(),
         r#"{"connected":false}"#
     );
 }
@@ -297,7 +297,7 @@ async fn test_channel_place_block_sends_position_and_type() {
 #[test]
 fn test_get_self_info_returns_player_data_from_snapshot() {
     let state = make_online_state();
-    let result = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
+    let result = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state).unwrap();
 
     let parsed: serde_json::Value =
         serde_json::from_str(&result).expect("get_self_info should return valid JSON");
@@ -317,20 +317,20 @@ fn test_get_self_info_returns_player_data_from_snapshot() {
 fn test_get_self_info_offline_returns_error() {
     let state = make_offline_state();
     let result = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
-    assert_eq!(result, r#"{"error":"Bot is currently offline"}"#);
+    assert!(matches!(result, Err(BotError::Offline(_))));
 }
 
 #[test]
 fn test_is_connected_reflects_online_status() {
     let state = make_online_state();
     assert_eq!(
-        minecraft_mcp_rs::mcp::tools_query::is_connected(&state),
+        minecraft_mcp_rs::mcp::tools_query::is_connected(&state).unwrap(),
         r#"{"connected":true}"#
     );
 
     let offline_state = make_offline_state();
     assert_eq!(
-        minecraft_mcp_rs::mcp::tools_query::is_connected(&offline_state),
+        minecraft_mcp_rs::mcp::tools_query::is_connected(&offline_state).unwrap(),
         r#"{"connected":false}"#
     );
 }
@@ -484,27 +484,26 @@ async fn test_bot_offline_all_command_types_fail() {
 async fn test_query_tools_offline_return_error() {
     let state = make_offline_state();
 
-    let offline = r#"{"error":"Bot is currently offline"}"#;
-    assert_eq!(
+    assert!(matches!(
         minecraft_mcp_rs::mcp::tools_query::get_self_info(&state),
-        offline
-    );
-    assert_eq!(
+        Err(BotError::Offline(_))
+    ));
+    assert!(matches!(
         minecraft_mcp_rs::mcp::tools_query::get_inventory(&state),
-        offline
-    );
-    assert_eq!(
+        Err(BotError::Offline(_))
+    ));
+    assert!(matches!(
         minecraft_mcp_rs::mcp::tools_query::get_nearby_blocks(&state, 10, None),
-        offline
-    );
-    assert_eq!(
+        Err(BotError::Offline(_))
+    ));
+    assert!(matches!(
         minecraft_mcp_rs::mcp::tools_query::get_nearby_entities(&state, 10),
-        offline
-    );
-    assert_eq!(
+        Err(BotError::Offline(_))
+    ));
+    assert!(matches!(
         minecraft_mcp_rs::mcp::tools_query::get_chunk_summary(&state),
-        offline
-    );
+        Err(BotError::Offline(_))
+    ));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -604,20 +603,20 @@ async fn test_auto_reconnect_sequence_simulation() {
 
     // Phase 1: Online
     assert_eq!(
-        minecraft_mcp_rs::mcp::tools_query::is_connected(&state),
+        minecraft_mcp_rs::mcp::tools_query::is_connected(&state).unwrap(),
         r#"{"connected":true}"#
     );
-    let response = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
+    let response = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state).unwrap();
     assert!(response.contains("TestBot"));
 
     // Phase 2: Disconnect
     state.set_online(false);
     assert_eq!(
-        minecraft_mcp_rs::mcp::tools_query::is_connected(&state),
+        minecraft_mcp_rs::mcp::tools_query::is_connected(&state).unwrap(),
         r#"{"connected":false}"#
     );
     let offline_resp = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
-    assert_eq!(offline_resp, r#"{"error":"Bot is currently offline"}"#);
+    assert!(matches!(offline_resp, Err(BotError::Offline(_))));
 
     // Phase 3: Reconnect with fresh snapshot
     state.set_online(true);
@@ -645,11 +644,11 @@ async fn test_auto_reconnect_sequence_simulation() {
     state.update_snapshot(fresh_snap);
 
     assert_eq!(
-        minecraft_mcp_rs::mcp::tools_query::is_connected(&state),
+        minecraft_mcp_rs::mcp::tools_query::is_connected(&state).unwrap(),
         r#"{"connected":true}"#
     );
 
-    let reconnected = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
+    let reconnected = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state).unwrap();
     assert!(reconnected.contains("200"), "reconnected: x should be 200");
     assert!(
         reconnected.contains("20.0"),
@@ -678,20 +677,20 @@ async fn test_reconnect_multiple_cycles() {
     for cycle in 0..3 {
         state.set_online(true);
         assert_eq!(
-            minecraft_mcp_rs::mcp::tools_query::is_connected(&state),
+            minecraft_mcp_rs::mcp::tools_query::is_connected(&state).unwrap(),
             r#"{"connected":true}"#,
             "cycle {cycle}: should be online"
         );
 
         state.set_online(false);
         assert_eq!(
-            minecraft_mcp_rs::mcp::tools_query::is_connected(&state),
+            minecraft_mcp_rs::mcp::tools_query::is_connected(&state).unwrap(),
             r#"{"connected":false}"#,
             "cycle {cycle}: should be offline"
         );
         let offline_resp = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
-        assert_eq!(
-            offline_resp, r#"{"error":"Bot is currently offline"}"#,
+        assert!(
+            matches!(offline_resp, Err(BotError::Offline(_))),
             "cycle {cycle}: offline should return error"
         );
     }
@@ -705,22 +704,24 @@ async fn test_reconnect_multiple_cycles() {
 fn test_all_query_tools_exist_and_work() {
     let state = make_online_state();
 
-    let self_info = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
+    let self_info = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state).unwrap();
     assert!(!self_info.is_empty());
 
-    let inventory = minecraft_mcp_rs::mcp::tools_query::get_inventory(&state);
+    let inventory = minecraft_mcp_rs::mcp::tools_query::get_inventory(&state).unwrap();
     assert!(inventory.contains("held_item_slot"));
 
-    let nearby_blocks = minecraft_mcp_rs::mcp::tools_query::get_nearby_blocks(&state, 1, None);
+    let nearby_blocks =
+        minecraft_mcp_rs::mcp::tools_query::get_nearby_blocks(&state, 1, None).unwrap();
     assert!(!nearby_blocks.is_empty());
 
-    let nearby_entities = minecraft_mcp_rs::mcp::tools_query::get_nearby_entities(&state, 1);
+    let nearby_entities =
+        minecraft_mcp_rs::mcp::tools_query::get_nearby_entities(&state, 1).unwrap();
     assert!(!nearby_entities.is_empty());
 
-    let chunk_summary = minecraft_mcp_rs::mcp::tools_query::get_chunk_summary(&state);
+    let chunk_summary = minecraft_mcp_rs::mcp::tools_query::get_chunk_summary(&state).unwrap();
     assert!(!chunk_summary.is_empty());
 
-    let connected = minecraft_mcp_rs::mcp::tools_query::is_connected(&state);
+    let connected = minecraft_mcp_rs::mcp::tools_query::is_connected(&state).unwrap();
     assert_eq!(connected, r#"{"connected":true}"#);
 }
 

@@ -217,6 +217,12 @@ impl From<BotError> for ErrorData {
     }
 }
 
+impl rmcp::handler::server::tool::IntoCallToolResult for BotError {
+    fn into_call_tool_result(self) -> Result<rmcp::model::CallToolResult, ErrorData> {
+        Err(self.into())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

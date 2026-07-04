@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
+use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::{BotCommand, ToolType};
 
@@ -61,23 +62,24 @@ pub async fn handle_switch_hotbar_slot(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: SwitchHotbarSlotInput,
-) -> String {
+) -> Result<String, BotError> {
     if input.slot > 8 {
-        return format!(
-            r#"{{"success":false,"error":"Hotbar slot must be 0-8, got {}"}}"#,
+        return Err(BotError::InvalidParams(format!(
+            "Hotbar slot must be 0-8, got {}",
             input.slot
-        );
+        )));
     }
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::SwitchHotbarSlot(input.slot);
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -123,27 +125,30 @@ pub async fn handle_drop_item(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: DropItemInput,
-) -> String {
+) -> Result<String, BotError> {
     if input.slot > 35 {
-        return format!(
-            r#"{{"success":false,"error":"Inventory slot must be 0-35, got {}"}}"#,
+        return Err(BotError::InvalidParams(format!(
+            "Inventory slot must be 0-35, got {}",
             input.slot
-        );
+        )));
     }
     let count = input.count.unwrap_or(1);
     if count == 0 {
-        return r#"{"success":false,"error":"Count must be greater than 0"}"#.to_string();
+        return Err(BotError::InvalidParams(
+            "Count must be greater than 0".to_string(),
+        ));
     }
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::DropItem(input.slot, count);
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -184,14 +189,18 @@ pub async fn handle_use_item(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: UseItemInput,
-) -> String {
+) -> Result<String, BotError> {
     if let Some(slot) = input.item_slot
         && slot > 8
     {
-        return format!(r#"{{"success":false,"error":"item_slot must be 0-8, got {slot}"}}"#);
+        return Err(BotError::InvalidParams(format!(
+            "item_slot must be 0-8, got {slot}"
+        )));
     }
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     // Select the requested hotbar slot first so the held item matches.
@@ -202,19 +211,18 @@ pub async fn handle_use_item(
         {
             Ok(r) => {
                 if !r.success {
-                    return format!(r#"{{"success":false,"error":"{}"}}"#, r.message);
+                    return Err(BotError::Internal(r.message));
                 }
             }
-            Err(e) => return format!(r#"{{"success":false,"error":"{e}"}}"#),
+            Err(e) => return Err(BotError::Internal(format!("Command failed: {e}"))),
         }
     }
 
     let cmd = BotCommand::UseItem;
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -271,35 +279,37 @@ pub async fn handle_equip_tool(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: EquipToolInput,
-) -> String {
+) -> Result<String, BotError> {
     let tool = match parse_tool_type(&input.tool_type) {
         Some(t) => t,
         None => {
-            return format!(
-                r#"{{"success":false,"error":"Unknown tool type: '{}'. Valid types: pickaxe, axe, shovel, hoe, sword, shears, hand"}}"#,
+            return Err(BotError::InvalidParams(format!(
+                "Unknown tool type: '{}'. Valid types: pickaxe, axe, shovel, hoe, sword, shears, hand",
                 input.tool_type
-            );
+            )));
         }
     };
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::EquipTool(tool);
     match sender.send_command(cmd).await {
         Ok(result) => {
-            let mut json = serde_json::to_value(&result).unwrap_or_default();
+            let mut json = serde_json::to_value(&result)
+                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))?;
             if let Some(mat) = input.material_preference
                 && let Some(obj) = json.as_object_mut()
             {
                 obj.insert("material_preference".to_string(), Value::String(mat));
             }
-            serde_json::to_string(&json).unwrap_or_else(|e| {
-                format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-            })
+            serde_json::to_string(&json)
+                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
         }
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -336,30 +346,31 @@ impl rmcp::schemars::JsonSchema for CollectItemsInput {
 /// Handle `collect_items` MCP tool.
 ///
 /// Validates `radius` is in `1..=64`, checks online status, then sends
-/// [`BotCommand::CollectItems`]. The bot moves toward dropped item entities
-/// within the radius; pickup is unverified (the `approached` count is
-/// returned, not a confirmed `collected` count).
+/// [`BotCommand::CollectItems`]. The bot walks toward dropped item entities
+/// within the radius; items are picked up automatically when the bot gets
+/// close enough.
 pub async fn handle_collect_items(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: CollectItemsInput,
-) -> String {
+) -> Result<String, BotError> {
     if input.radius < 1 || input.radius > 64 {
-        return format!(
-            r#"{{"success":false,"error":"radius must be 1-64, got {}"}}"#,
+        return Err(BotError::InvalidParams(format!(
+            "radius must be 1-64, got {}",
             input.radius
-        );
+        )));
     }
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::CollectItems(input.radius);
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -405,7 +416,7 @@ mod tests {
         let (state, sender) = setup();
         let input = SwitchHotbarSlotInput { slot: 0 };
         let result = handle_switch_hotbar_slot(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -414,17 +425,19 @@ mod tests {
         make_online(&state);
         let input = SwitchHotbarSlotInput { slot: 9 };
         let result = handle_switch_hotbar_slot(&state, &sender, input).await;
-        assert!(result.contains("must be 0-8"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("must be 0-8"))
+        );
     }
 
     #[tokio::test]
     async fn test_switch_hotbar_slot_valid_range() {
-        let (state, sender) = setup();
+        let (state, sender) = make_echo_channel();
         make_online(&state);
         for slot in 0..=8u8 {
             let result =
                 handle_switch_hotbar_slot(&state, &sender, SwitchHotbarSlotInput { slot }).await;
-            let _: Value = serde_json::from_str(&result).expect("valid JSON");
+            let _: Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
         }
     }
 
@@ -436,7 +449,7 @@ mod tests {
             count: Some(1),
         };
         let result = handle_drop_item(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -448,7 +461,9 @@ mod tests {
             count: Some(1),
         };
         let result = handle_drop_item(&state, &sender, input).await;
-        assert!(result.contains("must be 0-35"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("must be 0-35"))
+        );
     }
 
     #[tokio::test]
@@ -460,19 +475,21 @@ mod tests {
             count: Some(0),
         };
         let result = handle_drop_item(&state, &sender, input).await;
-        assert!(result.contains("greater than 0"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("greater than 0"))
+        );
     }
 
     #[tokio::test]
     async fn test_drop_item_default_count() {
-        let (state, sender) = setup();
+        let (state, sender) = make_echo_channel();
         make_online(&state);
         let input = DropItemInput {
             slot: 5,
             count: None,
         };
         let result = handle_drop_item(&state, &sender, input).await;
-        let _: Value = serde_json::from_str(&result).expect("valid JSON");
+        let _: Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
     }
 
     #[tokio::test]
@@ -480,16 +497,16 @@ mod tests {
         let (state, sender) = setup();
         let input = UseItemInput { item_slot: None };
         let result = handle_use_item(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
     async fn test_use_item_no_slot() {
-        let (state, sender) = setup();
+        let (state, sender) = make_echo_channel();
         make_online(&state);
         let input = UseItemInput { item_slot: None };
         let result = handle_use_item(&state, &sender, input).await;
-        let _: Value = serde_json::from_str(&result).expect("valid JSON");
+        let _: Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
     }
 
     #[tokio::test]
@@ -500,7 +517,9 @@ mod tests {
             item_slot: Some(10),
         };
         let result = handle_use_item(&state, &sender, input).await;
-        assert!(result.contains("must be 0-8"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("must be 0-8"))
+        );
     }
 
     #[tokio::test]
@@ -511,7 +530,7 @@ mod tests {
             material_preference: None,
         };
         let result = handle_equip_tool(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -523,12 +542,14 @@ mod tests {
             material_preference: None,
         };
         let result = handle_equip_tool(&state, &sender, input).await;
-        assert!(result.contains("Unknown tool type"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("Unknown tool type"))
+        );
     }
 
     #[tokio::test]
     async fn test_equip_tool_valid_types() {
-        let (state, sender) = setup();
+        let (state, sender) = make_echo_channel();
         make_online(&state);
         for tt in ["pickaxe", "axe", "shovel", "sword", "shears", "hand"] {
             let input = EquipToolInput {
@@ -536,7 +557,7 @@ mod tests {
                 material_preference: None,
             };
             let result = handle_equip_tool(&state, &sender, input).await;
-            let _: Value = serde_json::from_str(&result).expect("valid JSON");
+            let _: Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
         }
     }
 
@@ -549,7 +570,7 @@ mod tests {
             material_preference: Some("diamond".into()),
         };
         let result = handle_equip_tool(&state, &sender, input).await;
-        assert!(result.contains("material_preference"));
+        assert!(result.unwrap().contains("material_preference"));
     }
 
     #[test]
@@ -583,7 +604,7 @@ mod tests {
         let (state, sender) = setup();
         let input = CollectItemsInput { radius: 8 };
         let result = handle_collect_items(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -592,8 +613,8 @@ mod tests {
         make_online(&state);
         let input = CollectItemsInput { radius: 0 };
         let result = handle_collect_items(&state, &sender, input).await;
-        assert!(result.contains("radius must be 1-64"));
-        assert!(result.contains("got 0"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("radius must be 1-64") && msg.contains("got 0")));
     }
 
     #[tokio::test]
@@ -602,8 +623,8 @@ mod tests {
         make_online(&state);
         let input = CollectItemsInput { radius: 65 };
         let result = handle_collect_items(&state, &sender, input).await;
-        assert!(result.contains("radius must be 1-64"));
-        assert!(result.contains("got 65"));
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("radius must be 1-64") && msg.contains("got 65")));
     }
 
     #[tokio::test]
@@ -612,7 +633,7 @@ mod tests {
         make_online(&state);
         let input = CollectItemsInput { radius: 16 };
         let result = handle_collect_items(&state, &sender, input).await;
-        let _: Value = serde_json::from_str(&result).expect("valid JSON");
+        let _: Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
     }
 
     #[tokio::test]
@@ -639,7 +660,7 @@ mod tests {
         });
 
         let input = CollectItemsInput { radius: 16 };
-        let result = handle_collect_items(&state, &sender, input).await;
+        let result = handle_collect_items(&state, &sender, input).await.unwrap();
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
         assert!(
             json.get("success")

@@ -17,6 +17,7 @@ use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
 use crate::command_validate::validate_block_pos;
+use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::{BlockPos, BotCommand, Direction, GameMode};
 
@@ -90,21 +91,22 @@ pub async fn handle_move_to(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: MoveToInput,
-) -> String {
+) -> Result<String, BotError> {
     if let Err(e) = validate_block_pos(&BlockPos::new(input.x, input.y, input.z)) {
-        return format!(r#"{{"success":false,"error":"{e}"}}"#);
+        return Err(BotError::InvalidParams(e));
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::MoveTo(BlockPos::new(input.x, input.y, input.z));
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -151,37 +153,41 @@ pub async fn handle_walk_direction(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: WalkDirectionInput,
-) -> String {
+) -> Result<String, BotError> {
     let direction = match parse_direction(&input.direction) {
         Some(d) => d,
         None => {
-            return format!(
-                r#"{{"success":false,"error":"Invalid direction: '{}'. Must be one of: north, south, east, west, up, down, northeast, northwest, southeast, southwest"}}"#,
+            return Err(BotError::InvalidParams(format!(
+                "Invalid direction: '{}'. Must be one of: north, south, east, west, up, down, northeast, northwest, southeast, southwest",
                 input.direction
-            );
+            )));
         }
     };
 
     if input.distance == 0 {
-        return r#"{"success":false,"error":"Distance must be greater than 0"}"#.to_string();
+        return Err(BotError::InvalidParams(
+            "Distance must be greater than 0".to_string(),
+        ));
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::WalkDirection(direction, input.distance);
     match sender.send_command(cmd).await {
         Ok(result) => {
-            let mut json = serde_json::to_value(&result).unwrap_or_default();
+            let mut json = serde_json::to_value(&result)
+                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))?;
             if let Some(obj) = json.as_object_mut() {
                 obj.insert("distance".to_string(), Value::Number(input.distance.into()));
             }
-            serde_json::to_string(&json).unwrap_or_else(|e| {
-                format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-            })
+            serde_json::to_string(&json)
+                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
         }
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -212,17 +218,18 @@ pub async fn handle_jump(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     _input: JumpInput,
-) -> String {
+) -> Result<String, BotError> {
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::Jump;
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -273,29 +280,32 @@ pub async fn handle_teleport(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: TeleportInput,
-) -> String {
+) -> Result<String, BotError> {
     if let Err(e) = validate_block_pos(&BlockPos::new(input.x, input.y, input.z)) {
-        return format!(r#"{{"success":false,"error":"{e}"}}"#);
+        return Err(BotError::InvalidParams(e));
+    }
+
+    if !state.is_online() {
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     // Teleport requires Creative mode (or operator permissions)
     {
         let snap = state.read_snapshot();
         if snap.self_player.gamemode != GameMode::Creative {
-            return r#"{"success":false,"error":"Teleport requires Creative mode"}"#.to_string();
+            return Err(BotError::PermissionDenied(
+                "Teleport requires Creative mode".to_string(),
+            ));
         }
-    }
-
-    if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::Teleport(BlockPos::new(input.x, input.y, input.z));
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -347,21 +357,22 @@ pub async fn handle_smart_move(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: SmartMoveInput,
-) -> String {
+) -> Result<String, BotError> {
     if let Err(e) = validate_block_pos(&BlockPos::new(input.x, input.y, input.z)) {
-        return format!(r#"{{"success":false,"error":"{e}"}}"#);
+        return Err(BotError::InvalidParams(e));
     }
 
     if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     let cmd = BotCommand::SmartMove(BlockPos::new(input.x, input.y, input.z));
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -412,29 +423,32 @@ pub async fn handle_fly_to(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: FlyToInput,
-) -> String {
+) -> Result<String, BotError> {
     if let Err(e) = validate_block_pos(&BlockPos::new(input.x, input.y, input.z)) {
-        return format!(r#"{{"success":false,"error":"{e}"}}"#);
+        return Err(BotError::InvalidParams(e));
+    }
+
+    if !state.is_online() {
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
     }
 
     // Fly requires Creative mode
     {
         let snap = state.read_snapshot();
         if snap.self_player.gamemode != GameMode::Creative {
-            return r#"{"success":false,"error":"Fly requires Creative mode"}"#.to_string();
+            return Err(BotError::PermissionDenied(
+                "Fly requires Creative mode".to_string(),
+            ));
         }
-    }
-
-    if !state.is_online() {
-        return r#"{"success":false,"error":"Bot is not connected to a server"}"#.to_string();
     }
 
     let cmd = BotCommand::FlyTo(BlockPos::new(input.x, input.y, input.z));
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result).unwrap_or_else(|e| {
-            format!(r#"{{"success":false,"error":"Serialization error: {e}"}}"#)
-        }),
-        Err(e) => format!(r#"{{"success":false,"error":"{e}"}}"#),
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
 
@@ -449,7 +463,22 @@ mod tests {
 
     fn setup() -> (Arc<SharedState>, BotCommandSender) {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, mut receiver) = create_command_channel(4);
+
+        // Spawn a mock receiver so tests that actually send commands get a
+        // successful response instead of a "channel closed" error.
+        tokio::spawn(async move {
+            use crate::types::BotResult;
+            while let Some(cmd) = receiver.recv().await {
+                let result = Ok(BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                });
+                let _ = cmd.respond_to.send(result);
+            }
+        });
+
         (state, sender)
     }
 
@@ -521,7 +550,7 @@ mod tests {
         let (state, sender) = setup();
         let input = MoveToInput { x: 0, y: 64, z: 0 };
         let result = handle_move_to(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -530,7 +559,9 @@ mod tests {
         make_online(&state);
         let input = MoveToInput { x: 0, y: 500, z: 0 };
         let result = handle_move_to(&state, &sender, input).await;
-        assert!(result.contains("out of bounds") || result.contains("out of range"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("out of bounds") || msg.contains("out of range"))
+        );
     }
 
     #[tokio::test]
@@ -542,7 +573,7 @@ mod tests {
             y: 64,
             z: -5,
         };
-        let result = handle_move_to(&state, &sender, input).await;
+        let result = handle_move_to(&state, &sender, input).await.unwrap();
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
     }
 
@@ -556,7 +587,7 @@ mod tests {
             distance: 1,
         };
         let result = handle_walk_direction(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -568,7 +599,7 @@ mod tests {
             distance: 1,
         };
         let result = handle_walk_direction(&state, &sender, input).await;
-        assert!(result.contains("Invalid direction"));
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
     }
 
     #[tokio::test]
@@ -580,7 +611,7 @@ mod tests {
             distance: 0,
         };
         let result = handle_walk_direction(&state, &sender, input).await;
-        assert!(result.contains("greater than 0"));
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
     }
 
     #[tokio::test]
@@ -615,7 +646,7 @@ mod tests {
             direction: "north".into(),
             distance: 3,
         };
-        let result = handle_walk_direction(&state, &sender, input).await;
+        let result = handle_walk_direction(&state, &sender, input).await.unwrap();
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
         assert!(
             json.get("success")
@@ -636,7 +667,7 @@ mod tests {
         let (state, sender) = setup();
         let input = JumpInput {};
         let result = handle_jump(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -644,7 +675,7 @@ mod tests {
         let (state, sender) = setup();
         make_online(&state);
         let input = JumpInput {};
-        let result = handle_jump(&state, &sender, input).await;
+        let result = handle_jump(&state, &sender, input).await.unwrap();
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
     }
 
@@ -660,7 +691,7 @@ mod tests {
             z: 200,
         };
         let result = handle_teleport(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -674,7 +705,7 @@ mod tests {
             z: 200,
         };
         let result = handle_teleport(&state, &sender, input).await;
-        assert!(result.contains("requires Creative"));
+        assert!(matches!(result, Err(BotError::PermissionDenied(_))));
     }
 
     #[tokio::test]
@@ -684,7 +715,9 @@ mod tests {
         make_creative(&state);
         let input = TeleportInput { x: 0, y: 500, z: 0 };
         let result = handle_teleport(&state, &sender, input).await;
-        assert!(result.contains("out of bounds") || result.contains("out of range"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("out of bounds") || msg.contains("out of range"))
+        );
     }
 
     #[tokio::test]
@@ -697,7 +730,7 @@ mod tests {
             y: 64,
             z: 200,
         };
-        let result = handle_teleport(&state, &sender, input).await;
+        let result = handle_teleport(&state, &sender, input).await.unwrap();
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
     }
 
@@ -708,7 +741,7 @@ mod tests {
         let (state, sender) = setup();
         let input = SmartMoveInput { x: 0, y: 64, z: 0 };
         let result = handle_smart_move(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -717,7 +750,9 @@ mod tests {
         make_online(&state);
         let input = SmartMoveInput { x: 0, y: 500, z: 0 };
         let result = handle_smart_move(&state, &sender, input).await;
-        assert!(result.contains("out of bounds") || result.contains("out of range"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("out of bounds") || msg.contains("out of range"))
+        );
     }
 
     #[tokio::test]
@@ -729,7 +764,7 @@ mod tests {
             y: 64,
             z: -5,
         };
-        let result = handle_smart_move(&state, &sender, input).await;
+        let result = handle_smart_move(&state, &sender, input).await.unwrap();
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
     }
 
@@ -760,7 +795,7 @@ mod tests {
         });
 
         let input = SmartMoveInput { x: 7, y: 64, z: -3 };
-        let result = handle_smart_move(&state, &sender, input).await;
+        let result = handle_smart_move(&state, &sender, input).await.unwrap();
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
         assert!(
             json.get("success")
@@ -778,7 +813,7 @@ mod tests {
         make_creative(&state);
         let input = FlyToInput { x: 0, y: 80, z: 0 };
         let result = handle_fly_to(&state, &sender, input).await;
-        assert!(result.contains("not connected"));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -788,7 +823,7 @@ mod tests {
         // Default snapshot is Survival mode
         let input = FlyToInput { x: 0, y: 80, z: 0 };
         let result = handle_fly_to(&state, &sender, input).await;
-        assert!(result.contains("requires Creative"));
+        assert!(matches!(result, Err(BotError::PermissionDenied(_))));
     }
 
     #[tokio::test]
@@ -798,7 +833,9 @@ mod tests {
         make_creative(&state);
         let input = FlyToInput { x: 0, y: 500, z: 0 };
         let result = handle_fly_to(&state, &sender, input).await;
-        assert!(result.contains("out of bounds") || result.contains("out of range"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("out of bounds") || msg.contains("out of range"))
+        );
     }
 
     #[tokio::test]
@@ -811,7 +848,7 @@ mod tests {
             y: 80,
             z: 200,
         };
-        let result = handle_fly_to(&state, &sender, input).await;
+        let result = handle_fly_to(&state, &sender, input).await.unwrap();
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
     }
 
@@ -843,7 +880,7 @@ mod tests {
         });
 
         let input = FlyToInput { x: 12, y: 80, z: 5 };
-        let result = handle_fly_to(&state, &sender, input).await;
+        let result = handle_fly_to(&state, &sender, input).await.unwrap();
         let json: Value = serde_json::from_str(&result).expect("valid JSON");
         assert!(
             json.get("success")
