@@ -314,16 +314,9 @@ impl Default for WorldSnapshot {
         Self {
             blocks: Vec::new(),
             entities: Vec::new(),
-            self_player: SelfPlayer {
-                uuid: String::new(),
-                username: String::new(),
-                position: BlockPos::new(0, 0, 0),
-                health: 0.0,
-                hunger: 0,
-                gamemode: GameMode::Survival,
-                held_item_slot: 0,
-                inventory: Vec::new(),
-            },
+            // SelfPlayer derives Default with identical values (empty strings,
+            // BlockPos::default() == (0,0,0), GameMode::Survival, etc.).
+            self_player: SelfPlayer::default(),
             timestamp: 0,
             chunk_summary: Vec::new(),
             commands_enabled: None,

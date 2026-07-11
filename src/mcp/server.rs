@@ -649,8 +649,7 @@ mod tests {
                 count: Some(1),
             }))
             .await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        assert!(matches!(result, Err(BotError::Offline(_))));
 
         let result = server
             .put_into_container(Parameters(PutIntoContainerInput {
@@ -658,14 +657,12 @@ mod tests {
                 count: Some(1),
             }))
             .await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        assert!(matches!(result, Err(BotError::Offline(_))));
 
         let result = server
             .close_container(Parameters(CloseContainerInput {}))
             .await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     /// Combat tool integration tests — verify offline/entity-not-found rejection.
@@ -678,8 +675,7 @@ mod tests {
         let result = server
             .attack_entity(Parameters(AttackEntityInput { entity_id: 42 }))
             .await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("not found")));
+        assert!(matches!(result, Err(BotError::Offline(_))));
 
         let result = server
             .shield_block(Parameters(ShieldBlockInput { blocking: true }))

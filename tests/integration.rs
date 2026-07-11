@@ -507,7 +507,7 @@ async fn test_query_tools_offline_return_error() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Test 6: Command timeout returns CommandTimeout error
+// Test 6: Responder dropped returns Internal (cancelled), not CommandTimeout
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -522,14 +522,11 @@ async fn test_command_timeout_when_responder_dropped() {
     let result = sender.send_command(BotCommand::Jump).await;
 
     match result {
-        Err(BotError::CommandTimeout {
-            command,
-            timeout_secs,
-        }) => {
-            assert!(command.contains("Jump"), "timeout should mention Jump");
-            assert_eq!(timeout_secs, 30);
+        Err(BotError::Internal(msg)) => {
+            assert!(msg.contains("Jump"), "internal error should mention Jump");
+            assert!(msg.contains("cancelled"), "should mention cancellation");
         }
-        other => panic!("expected BotError::CommandTimeout, got: {:?}", other),
+        other => panic!("expected BotError::Internal (cancelled), got: {:?}", other),
     }
 
     dropper.await.expect("dropper should complete");

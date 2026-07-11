@@ -14,6 +14,7 @@ use azalea::container::ContainerHandle;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::time::Instant;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -184,8 +185,19 @@ impl SharedState {
     }
 
     /// Set the bot online status atomically.
+    ///
+    /// Also maintains [`RunStats::connected_since`] so the UI can show
+    /// uptime: set to `now` when transitioning online, cleared when
+    /// transitioning offline. The write lock is held only on these rare
+    /// transitions, not per command.
     pub fn set_online(&self, online: bool) {
         self.bot_online.store(online, Ordering::SeqCst);
+        let mut stats = self.run_stats.write().unwrap_or_else(|e| e.into_inner());
+        if online {
+            stats.connected_since = Some(Instant::now());
+        } else {
+            stats.connected_since = None;
+        }
     }
 
     /// Read the bot online status atomically.
@@ -430,11 +442,14 @@ impl SharedState {
     /// Notify any waiter that the bot has reached its goto target.
     ///
     /// Called from the tick event handler when `is_goto_target_reached()`
-    /// is true. Uses `notify_waiters` so the call is cheap when no one is
-    /// waiting and so all current waiters are woken (there should be at
-    /// most one for a serial command executor).
+    /// is true. Uses `notify_one` so a permit is stored even if the waiter
+    /// has not yet registered (e.g. in the window between
+    /// `is_goto_target_reached()` returning false in `RealBotClient::goto`
+    /// and the `notified()` future being first polled). `notify_waiters`
+    /// does not store a permit and would drop notifications that arrive
+    /// in that window, causing `goto` to spuriously time out.
     pub fn notify_goto_reached(&self) {
-        self.goto_notify.notify_waiters();
+        self.goto_notify.notify_one();
     }
 
     /// Return a clone of the shared goto notification.
@@ -917,19 +932,26 @@ mod tests {
         notified.await.expect("waiter task should finish");
     }
 
-    #[test]
-    fn test_goto_notify_clone_shares_state() {
+    #[tokio::test]
+    async fn test_goto_notify_clone_shares_state() {
         let state = SharedState::new(AppConfig::default());
         let notify1 = state.goto_notify();
         let notify2 = state.goto_notify();
 
-        // Notifying through one Arc must wake waiters on the other Arc.
-        let waiter = notify2.notified();
-        notify1.notify_waiters();
-        // The future returned by notified() should be ready after notify_waiters.
-        // We can't easily await in a sync test, but we verify both Arcs are
-        // non-null and distinct clones.
+        // Both clones must point at the same underlying Notify, so a
+        // `notify_one()` issued through one Arc wakes a waiter registered
+        // via the other Arc.
+        let notified = tokio::spawn(async move {
+            notify2.notified().await;
+        });
+
+        // Yield so the waiter registers before we notify.
+        tokio::task::yield_now().await;
+        notify1.notify_one();
+
+        notified
+            .await
+            .expect("waiter on the cloned Arc should wake");
         assert!(Arc::strong_count(&state.goto_notify) >= 2);
-        drop(waiter);
     }
 }

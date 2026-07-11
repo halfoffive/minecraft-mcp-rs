@@ -152,9 +152,27 @@ impl MinecraftApp {
         let state = Arc::clone(&self.state);
         let receiver = Arc::clone(&self.command_receiver);
 
+        // Guard that clears `bot_connecting` on drop. We hold it for the
+        // whole connection attempt so the flag is always released — even
+        // if `Runtime::new` panics inside the spawned thread (which would
+        // otherwise leave `bot_connecting == true` and permanently disable
+        // the Connect button). The guard is created before spawning so a
+        // spawn failure also clears the flag via this scope's drop.
+        struct ClearConnectingGuard(Arc<SharedState>);
+        impl Drop for ClearConnectingGuard {
+            fn drop(&mut self) {
+                self.0.clear_connecting();
+            }
+        }
+        let guard = ClearConnectingGuard(Arc::clone(&state));
+
         let handle = std::thread::Builder::new()
             .name("bot-connection".into())
             .spawn(move || {
+                // Move the guard in so it drops on thread exit (normal or
+                // panic unwind), guaranteeing `clear_connecting` runs.
+                let _guard = guard;
+
                 let rt = tokio::runtime::Runtime::new()
                     .expect("Failed to create tokio runtime for bot connection");
                 let manager = ConnectionManager::new(config, Arc::clone(&state));
@@ -165,15 +183,22 @@ impl MinecraftApp {
                     }
                 });
 
-                // Clear the connecting flag in case the loop exited without
-                // doing it (e.g. due to an early error return).
-                state.clear_connecting();
                 tracing::info!("Bot connection thread exited");
-            })
-            .expect("Failed to spawn bot connection thread");
+            });
 
-        self.bot_thread = Some(handle);
-        tracing::info!("Bot connection thread spawned");
+        match handle {
+            Ok(h) => {
+                self.bot_thread = Some(h);
+                tracing::info!("Bot connection thread spawned");
+            }
+            Err(e) => {
+                // spawn failed — guard already dropped in this scope and
+                // cleared the flag. Log and surface the error.
+                tracing::error!(error = %e, "Failed to spawn bot connection thread");
+                self.state
+                    .set_last_error(format!("Failed to spawn connection thread: {e}"));
+            }
+        }
     }
 }
 
@@ -226,17 +251,15 @@ impl App for MinecraftApp {
     /// in a `CentralPanel` via `show_inside` to get the standard background
     /// and margins.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // ── Per-frame language sync ─────────────────────────────────
-        // Keep the active i18n language in lock-step with the persisted
-        // AppConfig value.  Cheap RwLock write, only fires when the value
-        // actually changes (e.g. after a fresh config load on startup or
-        // when the user applies edits).  The settings panel also calls
-        // `i18n::set` directly when the dropdown changes so the new
-        // language applies on the next frame without a reconnect.
-        let cfg_lang = self.state.read_config().language;
-        if crate::ui::i18n::current() != cfg_lang {
-            crate::ui::i18n::set(cfg_lang);
-        }
+        // Note: per-frame i18n sync was previously done here by overwriting
+        // the active language with the persisted `AppConfig::language`
+        // value. That fought with `settings_panel`, which calls
+        // `i18n::set(edit.language)` immediately when the user picks a new
+        // language in the dropdown — the next frame this code reverted it
+        // to the persisted value (which only updates on Connect). As a
+        // result the title and "Settings" header always stayed in the old
+        // language. The startup sync in `main.rs` is sufficient; the
+        // settings panel keeps the live language in sync from then on.
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.heading(crate::ui::i18n::tr(crate::ui::i18n::TextKey::AppTitle));

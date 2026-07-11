@@ -120,6 +120,9 @@ impl AppConfig {
         if self.ai_username.is_empty() {
             return Err("ai_username must not be empty".into());
         }
+        if self.mcp_address.is_empty() {
+            return Err("mcp_address must not be empty".into());
+        }
         if self.chunk_scan_radius < 1 || self.chunk_scan_radius > 16 {
             return Err(format!(
                 "chunk_scan_radius must be between 1 and 16, got {}",
@@ -134,6 +137,15 @@ impl AppConfig {
         }
         if self.command_timeout_secs == 0 {
             return Err("command_timeout_secs must be greater than 0".into());
+        }
+        if self.snapshot_interval_ms == 0 {
+            return Err("snapshot_interval_ms must be greater than 0".into());
+        }
+        if self.reconnect_initial_delay_ms > self.reconnect_max_delay_ms {
+            return Err(format!(
+                "reconnect_initial_delay_ms ({}) must be <= reconnect_max_delay_ms ({})",
+                self.reconnect_initial_delay_ms, self.reconnect_max_delay_ms
+            ));
         }
         if self.mcp_token.is_empty() {
             return Err("mcp_token must not be empty".into());

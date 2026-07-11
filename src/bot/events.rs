@@ -129,7 +129,7 @@ impl Default for BotState {
 pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::Result<()> {
     match event {
         Event::Spawn => {
-            handle_spawn(bot, &state);
+            handle_spawn(bot, &state).await;
         }
         Event::Disconnect(_) => {
             handle_disconnect(bot, &state).await;
@@ -164,7 +164,7 @@ pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::R
 // Event helpers
 // ---------------------------------------------------------------------------
 
-fn handle_spawn(bot: Client, state: &BotState) {
+async fn handle_spawn(bot: Client, state: &BotState) {
     state.shared_state.set_online(true);
 
     // Store the ECS handle so request_disconnect can trigger shutdown by
@@ -196,6 +196,13 @@ fn handle_spawn(bot: Client, state: &BotState) {
     };
     if let Some(handle) = handle_to_abort {
         handle.abort();
+        // Await the cancelled task so its `ReceiverLease` drop guard runs
+        // and returns the receiver to the slot before we try to lease it
+        // below. Without this, a prompt second `Spawn` (e.g. respawn after
+        // death) could race the abort and find the slot still empty, then
+        // warn and skip starting a new executor — leaving the bot online
+        // but unable to process any commands.
+        let _ = handle.await;
         info!("aborted previous command executor before starting a new one");
     }
 
@@ -246,18 +253,36 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     // request_disconnect no longer needs to write AppExit::Success.
     state.shared_state.clear_bot_ecs();
 
+    // Drop any open container handle. Without this, a stale handle would
+    // make `has_container_open()` return true after reconnect, causing
+    // `open_container` to incorrectly report `ContainerAlreadyOpen`.
+    state.shared_state.set_container_handle(None);
+
     // Abort the command executor so it can't use the now-stale azalea Client
     // (which would panic when touching the ECS after disconnect). The
     // ReceiverLease guard drops and returns the receiver to the slot, ready
     // for the next Spawn.
-    let aborted = {
+    //
+    // Take the handle out of the mutex first and drop the lock before
+    // calling `abort()` — `JoinHandle::abort` may park/schedule and must
+    // not be called while holding the `executor_handle` mutex (the aborted
+    // task's cleanup path could otherwise try to re-acquire it). We then
+    // `await` the handle so the `ReceiverLease::drop` runs to completion
+    // before this function returns — otherwise a prompt reconnect could
+    // race and find the slot still empty (handle_spawn would warn and skip
+    // starting a new executor).
+    let handle_to_abort = {
         let mut handle_guard = state
             .executor_handle
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        handle_guard.take().is_some()
+        handle_guard.take()
     };
-    if aborted {
+    if let Some(handle) = handle_to_abort {
+        handle.abort();
+        // Await the cancelled task so its `ReceiverLease` drop guard runs
+        // and returns the receiver to the slot before we proceed.
+        let _ = handle.await;
         info!("aborted command executor on disconnect");
     }
 

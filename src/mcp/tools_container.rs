@@ -88,8 +88,10 @@ impl rmcp::schemars::JsonSchema for OpenContainerInput {
 
 /// Handle `open_container` MCP tool.
 ///
-/// Validates coordinates, ensures no container is already open,
-/// checks online status, then sends [`BotCommand::OpenContainer`].
+/// Validates coordinates, checks online status (before the container-state
+/// check so a stale `has_container_open()` from a disconnected session does
+/// not shadow the more fundamental offline error), then ensures no container
+/// is already open, then sends [`BotCommand::OpenContainer`].
 pub async fn handle_open_container(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
@@ -99,13 +101,13 @@ pub async fn handle_open_container(
         return Err(BotError::InvalidParams(e));
     }
 
-    check_container_not_open(state)?;
-
     if !state.is_online() {
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),
         ));
     }
+
+    check_container_not_open(state)?;
 
     let cmd = BotCommand::OpenContainer(BlockPos::new(input.x, input.y, input.z));
     match sender.send_command(cmd).await {
@@ -160,13 +162,13 @@ pub async fn handle_take_from_container(
     sender: &BotCommandSender,
     input: TakeFromContainerInput,
 ) -> Result<String, BotError> {
-    check_container_open(state)?;
-
     if !state.is_online() {
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),
         ));
     }
+
+    check_container_open(state)?;
 
     let count = input.count.unwrap_or(1);
     if count == 0 {
@@ -228,13 +230,13 @@ pub async fn handle_put_into_container(
     sender: &BotCommandSender,
     input: PutIntoContainerInput,
 ) -> Result<String, BotError> {
-    check_container_open(state)?;
-
     if !state.is_online() {
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),
         ));
     }
+
+    check_container_open(state)?;
 
     let count = input.count.unwrap_or(1);
     if count == 0 {
@@ -280,13 +282,13 @@ pub async fn handle_close_container(
     sender: &BotCommandSender,
     _input: CloseContainerInput,
 ) -> Result<String, BotError> {
-    check_container_open(state)?;
-
     if !state.is_online() {
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),
         ));
     }
+
+    check_container_open(state)?;
 
     let cmd = BotCommand::CloseContainer;
     match sender.send_command(cmd).await {
@@ -313,18 +315,6 @@ mod tests {
 
     fn make_online(state: &SharedState) {
         state.set_online(true);
-    }
-
-    /// Simulate an open container by storing a dummy handle.
-    /// Since we cannot construct a real `ContainerHandle` in tests,
-    /// we use `set_container_handle` to set the internal Option to `Some`.
-    /// The actual handle type doesn't matter for `has_container_open()` checks.
-    #[allow(dead_code)]
-    fn simulate_container_open(_state: &SharedState) {
-        // ContainerHandle can't be constructed in tests — we test the
-        // has_container_open() path via the existing state API.
-        // For integration tests, a real Minecraft connection is needed.
-        // Unit tests below validate the error paths (offline, no container open).
     }
 
     // ── open_container ──────────────────────────────────────────
@@ -356,21 +346,24 @@ mod tests {
     #[tokio::test]
     async fn test_take_from_container_offline() {
         let (state, sender) = setup();
-        // No container open — should get "No container is currently open"
+        // Bot is offline by default — `is_online` runs before the
+        // container-open check, so we get `Offline` rather than
+        // "No container is currently open".
         let input = TakeFromContainerInput {
             slot: 0,
             count: Some(1),
         };
         let result = handle_take_from_container(&state, &sender, input).await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
     async fn test_take_from_container_zero_count() {
         let (state, sender) = setup();
-        // Even with no container open, we need a container to be "open"
-        // to reach the count check. But check_container_open runs first.
+        // Go online so the `is_online` check passes; with no container
+        // open we then hit `check_container_open`. (The count==0 branch
+        // is unreachable without a real container handle in tests.)
+        make_online(&state);
         let input = TakeFromContainerInput {
             slot: 0,
             count: Some(0),
@@ -383,7 +376,8 @@ mod tests {
     #[tokio::test]
     async fn test_take_from_container_default_count() {
         let (state, sender) = setup();
-        // No container open — error expected
+        // Online but no container open — error expected.
+        make_online(&state);
         let input = TakeFromContainerInput {
             slot: 5,
             count: None,
@@ -398,13 +392,13 @@ mod tests {
     #[tokio::test]
     async fn test_put_into_container_offline() {
         let (state, sender) = setup();
+        // Offline by default — `is_online` runs before the container check.
         let input = PutIntoContainerInput {
             slot: 0,
             count: Some(1),
         };
         let result = handle_put_into_container(&state, &sender, input).await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     // ── close_container ─────────────────────────────────────────

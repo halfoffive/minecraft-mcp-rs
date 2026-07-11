@@ -94,11 +94,12 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
             Ok(())
         }
 
-        // Container slots can go up to 50 (large chests).
+        // Container slots can go up to 53 (large chests have 54 slots,
+        // indexed 0-53). Single chests use 0-26, crafting tables 0-9.
         BotCommand::TakeFromContainer(slot, count) => {
-            if *slot > 50 {
+            if *slot > 53 {
                 return Err(BotError::InvalidParams(format!(
-                    "TakeFromContainer slot must be 0-50, got {slot}"
+                    "TakeFromContainer slot must be 0-53, got {slot}"
                 )));
             }
             if *count == 0 {
@@ -111,9 +112,9 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
 
         // PutIntoContainer mirrors TakeFromContainer's bounds.
         BotCommand::PutIntoContainer(slot, count) => {
-            if *slot > 50 {
+            if *slot > 53 {
                 return Err(BotError::InvalidParams(format!(
-                    "PutIntoContainer slot must be 0-50, got {slot}"
+                    "PutIntoContainer slot must be 0-53, got {slot}"
                 )));
             }
             if *count == 0 {
@@ -710,15 +711,15 @@ mod tests {
 
     #[test]
     fn test_take_from_container_valid_slot_boundary() {
-        // Large chests can use slots up to 50.
-        let cmd = BotCommand::TakeFromContainer(50, 1);
+        // Large chests can use slots up to 53 (54 slots, indexed 0-53).
+        let cmd = BotCommand::TakeFromContainer(53, 1);
         assert!(validate_command(&cmd).is_ok());
     }
 
     #[test]
     fn test_take_from_container_slot_too_high() {
-        // Slot 51 exceeds the container slot range.
-        let cmd = BotCommand::TakeFromContainer(51, 1);
+        // Slot 54 exceeds the container slot range.
+        let cmd = BotCommand::TakeFromContainer(54, 1);
         assert!(validate_command(&cmd).is_err());
         let cmd = BotCommand::TakeFromContainer(u8::MAX, 1);
         assert!(validate_command(&cmd).is_err());
@@ -738,15 +739,15 @@ mod tests {
 
     #[test]
     fn test_put_into_container_valid_slot_boundary() {
-        // Large chests can use slots up to 50.
-        let cmd = BotCommand::PutIntoContainer(50, 1);
+        // Large chests can use slots up to 53.
+        let cmd = BotCommand::PutIntoContainer(53, 1);
         assert!(validate_command(&cmd).is_ok());
     }
 
     #[test]
     fn test_put_into_container_slot_too_high() {
-        // Slot 51 exceeds the container slot range.
-        let cmd = BotCommand::PutIntoContainer(51, 1);
+        // Slot 54 exceeds the container slot range.
+        let cmd = BotCommand::PutIntoContainer(54, 1);
         assert!(validate_command(&cmd).is_err());
         let cmd = BotCommand::PutIntoContainer(u8::MAX, 1);
         assert!(validate_command(&cmd).is_err());

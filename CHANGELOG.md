@@ -95,6 +95,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`handle_disconnect` now aborts the command executor properly:** previously
+  `handle_disconnect` called `handle.abort()` but never `await`ed the handle,
+  so the `ReceiverLease` drop guard (which returns the command receiver to the
+  slot for the next reconnect) might not run before a prompt reconnect. Now
+  `handle.await` ensures the lease is fully released.
+- **`handle_spawn` now `await`s the aborted previous executor:** without the
+  await, a second `Spawn` event (e.g. respawn after death) could race the
+  abort and find the receiver slot still empty, leaving the bot online but
+  unable to process any commands. `handle_spawn` is now `async`.
+- **`goto` stale-permit false success fixed:** the `notify_one()` drain was
+  only on the fast path (target already reached). A stale permit from a tick
+  between two `goto` calls could make the slow path return `Ok(())`
+  immediately even though the new target was unreached. The drain now runs
+  before both paths.
+- **`handle_disconnect` clears `container_handle`:** without this, a stale
+  handle would make `has_container_open()` return true after reconnect,
+  causing `open_container` to incorrectly report `ContainerAlreadyOpen`.
+- **`handle_open_container` error priority:** `is_online()` check moved
+  before `check_container_not_open()` so a stale container-state from a
+  disconnected session does not shadow the more fundamental offline error.
+- **`chest`/`trapped_chest` tool mapping:** moved from Pickaxe to Axe (they
+  are wooden containers; only `ender_chest` stays on Pickaxe as it is made
+  of obsidian).
+- **4 stale `tools_container` unit tests fixed:** tests asserting
+  `InvalidParams("No container is currently open")` while offline now
+  correctly assert `Offline` (or call `make_online` first to reach the
+  container check).
+- **`test_goto_notify_clone_shares_state` strengthened:** was a sync test
+  that never `await`ed the waiter and used `notify_waiters()` (inconsistent
+  with production `notify_one()`). Now a proper `#[tokio::test]` that
+  verifies cross-Arc wake-up.
+- **Removed dead `simulate_container_open` test stub.**
+- **`WorldSnapshot::default()` now delegates to `SelfPlayer::default()`**
+  instead of hand-constructing the same field values.
+
 - **MCP tool errors are now standard MCP errors:** all `#[tool]` handlers and
   their underlying functions return `Result<T, BotError>`, so the existing
   `From<BotError> for ErrorData` conversion is no longer dead code. Clients now

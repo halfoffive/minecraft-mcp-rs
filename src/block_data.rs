@@ -68,6 +68,10 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "end_stone",
         "purpur_block",
         "purpur_pillar",
+        // Ice variants (Pickaxe is the canonical tool in Minecraft)
+        "ice",
+        "packed_ice",
+        "blue_ice",
         // Manufactured
         "bricks",
         "brick_slab",
@@ -88,8 +92,8 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "dropper",
         "dispenser",
         "observer",
-        "chest",
-        "trapped_chest",
+        // Ender chest is made of obsidian — Pickaxe is correct. Plain
+        // `chest`/`trapped_chest` are wooden and belong in the Axe list.
         "ender_chest",
     ] {
         m.insert(block, ToolType::Pickaxe);
@@ -126,6 +130,10 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "bookshelf",
         "ladder",
         "barrel",
+        // Wooden containers — Axe is the canonical tool (unlike ender_chest
+        // which is obsidian and stays in the Pickaxe list).
+        "chest",
+        "trapped_chest",
     ] {
         m.insert(block, ToolType::Axe);
     }
@@ -373,16 +381,38 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
     m.insert("white_wool", 0.8);
     m.insert("glass", 0.3);
     m.insert("ice", 0.5);
+    m.insert("packed_ice", 0.5);
+    m.insert("blue_ice", 0.5);
     m.insert("snow", 0.1);
 
     // Notable blocks
     m.insert("obsidian", 50.0);
     m.insert("furnace", 3.5);
+    m.insert("blast_furnace", 3.5);
+    m.insert("smoker", 3.5);
     m.insert("anvil", 5.0);
+    m.insert("chipped_anvil", 5.0);
+    m.insert("damaged_anvil", 5.0);
     m.insert("enchanting_table", 5.0);
+    m.insert("brewing_stand", 0.5);
     m.insert("ender_chest", 22.5);
     m.insert("iron_block", 5.0);
+    m.insert("gold_block", 5.0);
     m.insert("diamond_block", 5.0);
+    m.insert("emerald_block", 5.0);
+    m.insert("chest", 2.5);
+    m.insert("trapped_chest", 2.5);
+    m.insert("hopper", 3.0);
+    m.insert("dropper", 3.5);
+    m.insert("dispenser", 3.5);
+    m.insert("observer", 3.0);
+    m.insert("bricks", 2.0);
+    m.insert("brick_slab", 2.0);
+    m.insert("brick_stairs", 2.0);
+    m.insert("cobblestone_slab", 2.0);
+    m.insert("cobblestone_wall", 2.0);
+    m.insert("purpur_block", 1.5);
+    m.insert("purpur_pillar", 1.5);
 
     m
 });

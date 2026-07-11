@@ -58,8 +58,12 @@ impl BotCommandSender {
     /// # Errors
     /// - `BotError::Offline` if the receiver has been dropped.
     /// - `BotError::CommandTimeout` if no response arrives within
-    ///   [`BotCommandSender::with_timeout`] or if the responder side drops the
-    ///   oneshot without sending.
+    ///   [`BotCommandSender::with_timeout`].
+    /// - `BotError::Internal` if the responder side drops the oneshot
+    ///   without sending a reply (e.g. the executor task was cancelled
+    ///   mid-command). This is distinct from a timeout so callers and AI
+    ///   agents can tell "no one ever answered" apart from "we waited
+    ///   too long".
     pub async fn send_command(&self, cmd: BotCommand) -> Result<BotResult, BotError> {
         let (respond_to, rx) = oneshot::channel();
         let cmd_str = format!("{:?}", cmd);
@@ -83,10 +87,9 @@ impl BotCommandSender {
             }
             Ok(Err(_)) => {
                 warn!(command = %cmd_str, "bot command responder dropped without reply");
-                Err(BotError::CommandTimeout {
-                    command: cmd_str,
-                    timeout_secs,
-                })
+                Err(BotError::Internal(format!(
+                    "bot command `{cmd_str}` was cancelled (responder dropped without reply)"
+                )))
             }
             Err(_) => {
                 error!(command = %cmd_str, timeout_secs, "bot command timed out");
@@ -272,7 +275,9 @@ mod tests {
     // ── Timeout / responder drop ──────────────────────────────
 
     /// When the receiver drops the oneshot sender without responding,
-    /// the caller should get `BotError::CommandTimeout`.
+    /// the caller should get `BotError::Internal` (cancelled), not a
+    /// timeout — the two cases are distinguished so AI agents can tell
+    /// "no one ever answered" apart from "we waited too long".
     #[tokio::test]
     async fn test_timeout_when_responder_dropped() {
         let (sender, mut receiver) = create_command_channel(10);
@@ -288,14 +293,11 @@ mod tests {
         let result = sender.send_command(cmd).await;
         assert!(result.is_err());
         match result {
-            Err(BotError::CommandTimeout {
-                command,
-                timeout_secs,
-            }) => {
-                assert!(command.contains("Jump"));
-                assert_eq!(timeout_secs, 30);
+            Err(BotError::Internal(msg)) => {
+                assert!(msg.contains("Jump"), "internal error should mention Jump");
+                assert!(msg.contains("cancelled"), "should mention cancellation");
             }
-            other => panic!("expected CommandTimeout, got: {:?}", other),
+            other => panic!("expected Internal (cancelled), got: {:?}", other),
         }
 
         responder.await.expect("responder task should complete");

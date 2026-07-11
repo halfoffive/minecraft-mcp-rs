@@ -178,10 +178,22 @@ mod tests {
 
     #[test]
     fn test_mine_time_hand_no_penalty() {
-        // ice is not in BLOCK_TO_TOOL_TYPE, so it doesn't require a tool.
-        // Hand on ice: no penalty, speed = 1.0.
+        // `no_tool_block` is not in BLOCK_TO_TOOL_TYPE, so it doesn't
+        // require a tool. Hand on it: no penalty, speed = 1.0, hardness
+        // defaults to 1.0 for unknown blocks.
+        let time = calculate_mine_time("no_tool_block", ToolType::Hand, MaterialTier::Wood);
+        assert!((time - 1.5).abs() < f64::EPSILON); // 1.0 * 1.5 / 1.0 = 1.5
+    }
+
+    #[test]
+    fn test_mine_time_ice_requires_pickaxe() {
+        // ice is in BLOCK_TO_TOOL_TYPE mapped to Pickaxe, so mining it
+        // with Hand incurs the 5× penalty.
         let time = calculate_mine_time("ice", ToolType::Hand, MaterialTier::Wood);
-        assert!((time - 0.75).abs() < f64::EPSILON); // 0.5 * 1.5 / 1.0 = 0.75
+        assert!((time - 3.75).abs() < f64::EPSILON); // 0.5 * 1.5 / 1.0 * 5.0 = 3.75
+        // Pickaxe (Wood, speed 2.0) on ice: correct tool, no penalty.
+        let time = calculate_mine_time("ice", ToolType::Pickaxe, MaterialTier::Wood);
+        assert!((time - 0.375).abs() < f64::EPSILON); // 0.5 * 1.5 / 2.0 = 0.375
     }
 
     #[test]

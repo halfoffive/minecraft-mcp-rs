@@ -66,6 +66,12 @@ pub async fn handle_attack_entity(
     sender: &BotCommandSender,
     input: AttackEntityInput,
 ) -> Result<String, BotError> {
+    if !state.is_online() {
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
+    }
+
     // Verify the entity exists in the current snapshot
     {
         let snap = state.read_snapshot();
@@ -76,12 +82,6 @@ pub async fn handle_attack_entity(
                 input.entity_id
             )));
         }
-    }
-
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
     }
 
     let cmd = BotCommand::AttackEntity(input.entity_id);

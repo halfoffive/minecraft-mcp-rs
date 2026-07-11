@@ -105,6 +105,16 @@ impl BotActions for RealBotClient {
 
         self.client.goto(goal).await;
 
+        // Drain any stale `notify_one` permit left by a tick that fired
+        // between the previous `goto` call's return and this one's start.
+        // The drain must run *before* both the fast-path check and the
+        // slow-path wait: a leftover permit would otherwise make the slow
+        // path's `timeout(.., notify.notified())` return `Ok(())` right
+        // away even though the new target is unreached, causing a false
+        // success report. `notify_waiters` does not drain stored permits,
+        // so we poll `notified()` with a zero timeout.
+        let _ = tokio::time::timeout(Duration::ZERO, notify.notified()).await;
+
         // Fast path: target may already be reached before we start waiting.
         if self.client.is_goto_target_reached() {
             return Ok(());
@@ -1001,7 +1011,7 @@ impl<B: BotActions> CommandExecutor<B> {
                 };
 
                 Ok(BotResult {
-                    success: true,
+                    success: reached,
                     message: format!("SmartMove to {target}: {reason}"),
                     data: Some(serde_json::json!({
                         "reached": reached,
@@ -1016,7 +1026,7 @@ impl<B: BotActions> CommandExecutor<B> {
                 let obstacle =
                     find_obstacle_block(&self.state.read_snapshot(), current_pos, target);
                 Ok(BotResult {
-                    success: true,
+                    success: false,
                     message: format!("SmartMove to {target} blocked: {e}"),
                     data: Some(serde_json::json!({
                         "reached": false,
@@ -1132,18 +1142,19 @@ impl<B: BotActions> CommandExecutor<B> {
     /// enriched with nearby blocks/entities and self info from the snapshot.
     async fn handle_act(&self, action: ActAction) -> Result<BotResult, BotError> {
         trace!(?action, "Act");
-        let (action_result, reason): (String, Option<String>) = match action {
+        // (action_result message, success, optional failure reason)
+        let (action_result, success, reason): (String, bool, Option<String>) = match action {
             ActAction::Move { target } => match self.handle_move_to(target).await {
-                Ok(r) => (r.message, None),
-                Err(e) => ("failed".into(), Some(e.to_string())),
+                Ok(r) => (r.message, r.success, None),
+                Err(e) => ("failed".into(), false, Some(e.to_string())),
             },
             ActAction::SmartMove { target } => match self.handle_smart_move(target).await {
-                Ok(r) => (r.message, None),
-                Err(e) => ("failed".into(), Some(e.to_string())),
+                Ok(r) => (r.message, r.success, None),
+                Err(e) => ("failed".into(), false, Some(e.to_string())),
             },
             ActAction::Fly { target } => match self.handle_fly_to(target).await {
-                Ok(r) => (r.message, None),
-                Err(e) => ("failed".into(), Some(e.to_string())),
+                Ok(r) => (r.message, r.success, None),
+                Err(e) => ("failed".into(), false, Some(e.to_string())),
             },
             ActAction::Mine { block_pos } => match self.handle_break_block(block_pos) {
                 // TODO(bug): `handle_break_block` only *starts* mining via
@@ -1159,16 +1170,16 @@ impl<B: BotActions> CommandExecutor<B> {
                 // `Act::Mine` result honestly reports that mining was *started*
                 // (see `handle_break_block`'s "Started mining block at {pos}"
                 // message), not completed.
-                Ok(r) => (r.message, None),
-                Err(e) => ("failed".into(), Some(e.to_string())),
+                Ok(r) => (r.message, r.success, None),
+                Err(e) => ("failed".into(), false, Some(e.to_string())),
             },
             ActAction::Attack { entity_id } => match self.handle_attack_entity(entity_id) {
-                Ok(r) => (r.message, None),
-                Err(e) => ("failed".into(), Some(e.to_string())),
+                Ok(r) => (r.message, r.success, None),
+                Err(e) => ("failed".into(), false, Some(e.to_string())),
             },
             ActAction::CollectItems { radius } => match self.handle_collect_items(radius).await {
-                Ok(r) => (r.message, None),
-                Err(e) => ("failed".into(), Some(e.to_string())),
+                Ok(r) => (r.message, r.success, None),
+                Err(e) => ("failed".into(), false, Some(e.to_string())),
             },
         };
 
@@ -1208,8 +1219,12 @@ impl<B: BotActions> CommandExecutor<B> {
         };
 
         Ok(BotResult {
-            success: true,
-            message: "Act completed".into(),
+            success,
+            message: if success {
+                "Act completed".into()
+            } else {
+                "Act completed with failure".into()
+            },
             data: Some(serde_json::to_value(&act_result).unwrap_or_default()),
         })
     }

@@ -50,7 +50,7 @@ pub fn get_inventory(state: &Arc<SharedState>) -> Result<String, BotError> {
     .to_string())
 }
 
-/// Get blocks near the bot within the given Chebyshev (square) radius.
+/// Get blocks near the bot within the given Chebyshev (cube) radius.
 ///
 /// If `filter_type` is `Some(ft)` and non-empty, only blocks whose
 /// `block_type` contains `ft` (case-insensitive substring match) are
@@ -63,9 +63,13 @@ pub fn get_nearby_blocks(
     if !state.is_online() {
         return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
+    // Clamp radius to i32::MAX so the `as i32` cast below cannot wrap a
+    // huge `u32` into a negative value (which would silently exclude
+    // every block). A radius this large would already cover the whole
+    // loaded world, so clamping is lossless in practice.
+    let r = radius.min(i32::MAX as u32) as i32;
     let snapshot = state.read_snapshot();
     let center = snapshot.self_player.position;
-    let r = radius as i32;
 
     let blocks: Vec<&crate::types::BlockEntry> = snapshot
         .blocks
@@ -85,14 +89,15 @@ pub fn get_nearby_blocks(
         .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
 }
 
-/// Get entities near the bot within the given Chebyshev (square) radius.
+/// Get entities near the bot within the given Chebyshev (cube) radius.
 pub fn get_nearby_entities(state: &Arc<SharedState>, radius: u32) -> Result<String, BotError> {
     if !state.is_online() {
         return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
+    // Clamp radius to i32::MAX to avoid `as i32` wraparound on huge u32.
+    let r = radius.min(i32::MAX as u32) as i32;
     let snapshot = state.read_snapshot();
     let center = snapshot.self_player.position;
-    let r = radius as i32;
 
     let entities: Vec<&crate::types::EntityEntry> = snapshot
         .entities

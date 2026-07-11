@@ -172,7 +172,13 @@ impl SnapshotBuilder {
             self_player,
             timestamp,
             chunk_summary,
-            commands_enabled: None,
+            // Preserve the cached `commands_enabled` from the previous
+            // snapshot. The SnapshotBuilder doesn't refresh server info
+            // (that's a separate QueryServerInfo round-trip), so dropping
+            // the old value here would force clients back to "unknown"
+            // until the next explicit query. Callers that need to refresh
+            // it can overwrite the field after `build()`.
+            commands_enabled: self.old.commands_enabled,
         }
     }
 }
