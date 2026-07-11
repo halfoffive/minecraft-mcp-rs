@@ -138,6 +138,11 @@ pub async fn handle_drop_item(
             "Count must be greater than 0".to_string(),
         ));
     }
+    if count > 64 {
+        return Err(BotError::InvalidParams(format!(
+            "Count must not exceed 64 (max stack size), got {count}"
+        )));
+    }
     if !state.is_online() {
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),

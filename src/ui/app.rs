@@ -142,7 +142,7 @@ impl MinecraftApp {
     /// Uses [`SharedState::try_begin_connecting`] to guard against
     /// double-spawn if the user clicks Connect while a previous attempt
     /// is still in progress.
-    fn connect_bot(&mut self) {
+    fn connect_bot(&mut self, ctx: egui::Context) {
         if !self.state.try_begin_connecting() {
             tracing::warn!("Connect clicked but a connection attempt is already in progress");
             return;
@@ -178,7 +178,7 @@ impl MinecraftApp {
                 let manager = ConnectionManager::new(config, Arc::clone(&state));
 
                 rt.block_on(async move {
-                    if let Err(e) = manager.connect(receiver, None).await {
+                    if let Err(e) = manager.connect(receiver, Some(ctx)).await {
                         tracing::error!(error = %e, "bot connection task failed");
                     }
                 });
@@ -275,7 +275,7 @@ impl App for MinecraftApp {
                             if connect_clicked {
                                 // Persist edits before connecting.
                                 edit.apply(&self.state);
-                                self.connect_bot();
+                                self.connect_bot(ui.ctx().clone());
                             }
                         }
                     },

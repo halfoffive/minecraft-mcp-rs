@@ -295,7 +295,7 @@ pub enum GameEvent {
 // ═══════════════════════════════════════════════════════════════
 
 /// A snapshot of the world state at a moment in time.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct WorldSnapshot {
     pub blocks: Vec<BlockEntry>,
     pub entities: Vec<EntityEntry>,
@@ -307,21 +307,6 @@ pub struct WorldSnapshot {
     /// Populated by `QueryServerInfo`; `None` until the server reports it.
     #[serde(default)]
     pub commands_enabled: Option<bool>,
-}
-
-impl Default for WorldSnapshot {
-    fn default() -> Self {
-        Self {
-            blocks: Vec::new(),
-            entities: Vec::new(),
-            // SelfPlayer derives Default with identical values (empty strings,
-            // BlockPos::default() == (0,0,0), GameMode::Survival, etc.).
-            self_player: SelfPlayer::default(),
-            timestamp: 0,
-            chunk_summary: Vec::new(),
-            commands_enabled: None,
-        }
-    }
 }
 
 /// A single inventory slot entry.

@@ -290,10 +290,7 @@ mod tests {
         let (sender, _rx) = make_echo_channel();
         let state = make_state(true);
         let result = handle_send_chat(&state, &sender, "hello".into()).await;
-        assert!(
-            !result.as_ref().unwrap().contains("Error"),
-            "unexpected error: {result:?}"
-        );
+        assert!(result.is_ok(), "expected success, got: {result:?}");
     }
 
     #[tokio::test]
@@ -378,10 +375,7 @@ mod tests {
         let (sender, mut rx) = make_echo_channel();
         let state = make_state(true);
         let result = handle_set_game_mode(&state, &sender, "survival".into()).await;
-        assert!(
-            !result.as_ref().unwrap().contains("Error"),
-            "unexpected error: {result:?}"
-        );
+        assert!(result.is_ok(), "expected success, got: {result:?}");
 
         let sent = rx.recv().await.expect("should receive command");
         assert!(sent.contains("SetGameMode(Survival)"));

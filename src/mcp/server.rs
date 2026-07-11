@@ -1,7 +1,8 @@
 //! MCP server setup, transport, and request dispatch.
 //!
-//! Uses rmcp 1.7.0 with `#[tool_router]`/`#[tool_handler]` macros to define
-//! 25+ MCP tools. All logging goes to stderr via `tracing`.
+//! Uses rmcp 1.8.0 (with local patch in `patches/rmcp/`) with
+//! `#[tool_router]`/`#[tool_handler]` macros to define 30+ MCP tools.
+//! All logging goes to stderr via `tracing`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -65,19 +66,18 @@ impl McpBotServer {
 }
 
 // ---------------------------------------------------------------------------
-// Tool Router — 26 MCP tool stubs
+// Tool Router — 30+ MCP tools
 // ---------------------------------------------------------------------------
 
 #[tool_router]
 impl McpBotServer {
     // ── Query tools (read_only) ──────────────────────────────
     //
-    // NOTE: get_nearby_blocks and get_nearby_entities currently take no
-    // parameters due to a schemars version mismatch (Cargo.toml uses
-    // schemars 0.8, rmcp re-exports schemars 1.x).  Once the project
-    // upgrades to schemars 1.x, these tools should accept `radius: u32`
-    // and `filter_type: Option<String>` parameters.  For now sensible
-    // defaults (radius=10, no filter) are baked into the implementations.
+    // `get_nearby_blocks` and `get_nearby_entities` use a fixed radius=10
+    // default. The underlying `tools_query` functions already accept a
+    // custom radius (and filter_type for blocks), but exposing them as
+    // MCP parameters would require an Input struct with schemars — left
+    // as a future enhancement.
 
     #[tool(
         description = "Get information about the bot's own player",

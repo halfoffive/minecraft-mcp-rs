@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
+use crate::command_validate::validate_block_pos;
 use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::{ActAction, BotCommand};
@@ -58,6 +59,33 @@ pub async fn handle_act(
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),
         ));
+    }
+
+    // Validate action parameters before dispatching, so invalid coordinates
+    // or radius are rejected at the MCP layer rather than reaching the bot
+    // executor. This mirrors the checks in the standalone tool handlers
+    // (handle_move_to, handle_break_block, handle_collect_items).
+    match &input.action {
+        ActAction::Move { target }
+        | ActAction::SmartMove { target }
+        | ActAction::Fly { target } => {
+            if let Err(e) = validate_block_pos(target) {
+                return Err(BotError::InvalidParams(e));
+            }
+        }
+        ActAction::Mine { block_pos } => {
+            if let Err(e) = validate_block_pos(block_pos) {
+                return Err(BotError::InvalidParams(e));
+            }
+        }
+        ActAction::Attack { entity_id: _ } => {}
+        ActAction::CollectItems { radius } => {
+            if *radius == 0 || *radius > 1024 {
+                return Err(BotError::InvalidParams(format!(
+                    "CollectItems radius must be between 1 and 1024, got {radius}"
+                )));
+            }
+        }
     }
 
     let cmd = BotCommand::Act(input.action);

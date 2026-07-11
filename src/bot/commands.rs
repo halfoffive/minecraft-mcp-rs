@@ -426,6 +426,7 @@ impl<B: BotActions> CommandExecutor<B> {
                 Some(wrapped) => {
                     debug!(command = ?wrapped.command, "dispatching command");
                     let result = self.dispatch(wrapped.command.clone()).await;
+                    self.state.record_command_result(result.is_ok());
                     if wrapped.respond_to.send(result).is_err() {
                         warn!("command responder dropped — result lost");
                     }

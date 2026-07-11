@@ -312,6 +312,22 @@ impl SharedState {
         self.run_stats.read().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Record the outcome of a command execution in [`RunStats`].
+    ///
+    /// Increments `commands_processed` unconditionally, plus
+    /// `commands_succeeded` or `commands_failed` based on the `success`
+    /// flag. Uses `Relaxed` ordering — these are statistics, not
+    /// synchronisation primitives.
+    pub fn record_command_result(&self, success: bool) {
+        let stats = self.run_stats.read().unwrap_or_else(|e| e.into_inner());
+        stats.commands_processed.fetch_add(1, Ordering::Relaxed);
+        if success {
+            stats.commands_succeeded.fetch_add(1, Ordering::Relaxed);
+        } else {
+            stats.commands_failed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Store (or clear) the container handle.
     ///
     /// If a previous handle was stored, it is dropped and the container

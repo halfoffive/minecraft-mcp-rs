@@ -129,6 +129,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Removed dead `simulate_container_open` test stub.**
 - **`WorldSnapshot::default()` now delegates to `SelfPlayer::default()`**
   instead of hand-constructing the same field values.
+- **`act` tool now validates action parameters:** coordinates are
+  validated via `validate_block_pos` and `CollectItems` radius is range
+  checked (1-1024) before dispatch, matching the standalone tool handlers.
+- **Container `take`/`put` now enforce slot (0-53) and count (1-64)
+  limits** in the MCP handler, not just in the dead `validate_command`.
+- **`drop_item` now enforces count ≤ 64** (max stack size).
+- **`tools_chat` tests:** replaced fragile `!contains("Error")` assertions
+  with proper `is_ok()` checks.
+- **`RunStats` command counters now incremented:** the
+  `commands_processed`/`succeeded`/`failed` atomics are updated in the
+  command executor loop, so the UI Status panel shows real data.
+- **`egui_ctx` now passed to the bot connection thread:** event-driven
+  UI repaints (connect, disconnect, chat, death) now work instead of
+  falling back to 1-second polling.
+- **`server.rs` doc comments updated:** rmcp version (1.8.0), tool count
+  (30+), and removed stale schemars v0.8 mismatch note.
 
 - **MCP tool errors are now standard MCP errors:** all `#[tool]` handlers and
   their underlying functions return `Result<T, BotError>`, so the existing

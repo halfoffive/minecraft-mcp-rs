@@ -170,11 +170,23 @@ pub async fn handle_take_from_container(
 
     check_container_open(state)?;
 
+    if input.slot > 53 {
+        return Err(BotError::InvalidParams(format!(
+            "Container slot must be 0-53 (large chest has 54 slots), got {}",
+            input.slot
+        )));
+    }
+
     let count = input.count.unwrap_or(1);
     if count == 0 {
         return Err(BotError::InvalidParams(
             "Count must be greater than 0".to_string(),
         ));
+    }
+    if count > 64 {
+        return Err(BotError::InvalidParams(format!(
+            "Count must not exceed 64 (max stack size), got {count}"
+        )));
     }
 
     let cmd = BotCommand::TakeFromContainer(input.slot, count);
@@ -238,11 +250,23 @@ pub async fn handle_put_into_container(
 
     check_container_open(state)?;
 
+    if input.slot > 53 {
+        return Err(BotError::InvalidParams(format!(
+            "Container slot must be 0-53 (large chest has 54 slots), got {}",
+            input.slot
+        )));
+    }
+
     let count = input.count.unwrap_or(1);
     if count == 0 {
         return Err(BotError::InvalidParams(
             "Count must be greater than 0".to_string(),
         ));
+    }
+    if count > 64 {
+        return Err(BotError::InvalidParams(format!(
+            "Count must not exceed 64 (max stack size), got {count}"
+        )));
     }
 
     let cmd = BotCommand::PutIntoContainer(input.slot, count);
