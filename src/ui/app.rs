@@ -31,6 +31,10 @@ pub struct MinecraftApp {
     /// Shared state accessed lock-free for the world snapshot,
     /// and with short-lived read locks for config and stats.
     state: Arc<SharedState>,
+    /// Clone of the command channel sender, passed into
+    /// [`ConnectionManager::connect`] so compound ops (e.g. `Act::Mine`) can
+    /// issue sub-commands through the executor.
+    sender: BotCommandSender,
     /// Shared command receiver slot, passed to the bot connection task so it
     /// can process commands from the MCP server while connected. The receiver
     /// is leased out to the command executor on `Event::Spawn`.
@@ -135,16 +139,17 @@ impl MinecraftApp {
     /// Create a new [`MinecraftApp`].
     pub fn new(
         state: Arc<SharedState>,
-        _sender: BotCommandSender,
+        sender: BotCommandSender,
         command_receiver: Arc<std::sync::Mutex<Option<BotCommandReceiver>>>,
         mcp_handle: JoinHandle<()>,
     ) -> Self {
-        // _sender is intentionally unused here — the MCP server thread holds
-        // its own clone and is the sole consumer of the command channel. The
-        // parameter is retained to keep the main.rs wiring simple and allow
-        // future UI-driven commands without a signature change.
+        // `sender` is cloned into the bot connection thread on each Connect
+        // click (see `connect_bot`) so compound ops can issue sub-commands.
+        // The MCP server thread holds its own clone and is the primary
+        // consumer of the command channel.
         Self {
             state,
+            sender,
             command_receiver,
             bot_thread: None,
             mcp_handle: Some(mcp_handle),
@@ -170,6 +175,7 @@ impl MinecraftApp {
         let config = self.state.read_config().clone();
         let state = Arc::clone(&self.state);
         let receiver = Arc::clone(&self.command_receiver);
+        let sender = self.sender.clone();
 
         let handle = std::thread::Builder::new()
             .name("bot-connection".into())
@@ -179,7 +185,7 @@ impl MinecraftApp {
                 let manager = ConnectionManager::new(config, Arc::clone(&state));
 
                 rt.block_on(async move {
-                    if let Err(e) = manager.connect(receiver, None).await {
+                    if let Err(e) = manager.connect(receiver, None, sender).await {
                         tracing::error!(error = %e, "bot connection task failed");
                     }
                 });

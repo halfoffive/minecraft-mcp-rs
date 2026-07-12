@@ -109,6 +109,16 @@ pub struct SharedState {
     /// can be replaced with a fresh token on each new connection attempt
     /// (see [`reset_cancel_token`](Self::reset_cancel_token)).
     cancel_token: Mutex<CancellationToken>,
+    /// Cancellation token used to signal the MCP server (stdio or HTTP)
+    /// to begin graceful shutdown. Triggered by
+    /// [`trigger_shutdown`](Self::trigger_shutdown) on `MinecraftApp::drop`
+    /// so the MCP transport returns promptly instead of hanging on stdin
+    /// EOF or an idle HTTP connection.
+    ///
+    /// Distinct from [`cancel_token`](Self::cancel_token), which is for
+    /// interrupting the bot reconnect backoff sleep — the two lifecycles
+    /// are independent.
+    shutdown_token: Mutex<CancellationToken>,
     /// Handle to the bot's ECS World, set on `Event::Spawn` and cleared on
     /// `Event::Disconnect`. When [`request_disconnect`](Self::request_disconnect)
     /// is called, the handle's [`BotEcsHandle::write_app_exit`] is invoked,
@@ -162,6 +172,7 @@ impl SharedState {
             chat_messages: Mutex::new(VecDeque::new()),
             last_error: Mutex::new(None),
             cancel_token: Mutex::new(CancellationToken::new()),
+            shutdown_token: Mutex::new(CancellationToken::new()),
             bot_ecs: Mutex::new(None),
             goto_notify: Arc::new(Notify::new()),
         }
@@ -181,6 +192,30 @@ impl SharedState {
     /// without blocking subsequent updates.
     pub fn read_snapshot(&self) -> Arc<WorldSnapshot> {
         self.world_snapshot.load_full()
+    }
+
+    /// Atomically read-modify-write the world snapshot via [`ArcSwap::rcu`].
+    ///
+    /// This is the canonical way for event handlers to update a subset of
+    /// snapshot fields (e.g. set `self_player.health` on death, push an entry
+    /// to `entities` on add-player). The closure receives `&mut WorldSnapshot`
+    /// and may mutate any field; `rcu` retries the closure if the underlying
+    /// `ArcSwap` was concurrently updated, so concurrent writers never lose
+    /// updates to each other or to [`SnapshotUpdater`](crate::bot::snapshot_updater::SnapshotUpdater).
+    ///
+    /// The closure signature is `FnMut` (not `FnOnce`) because `rcu` may
+    /// invoke it more than once on retry. Do not perform side effects (like
+    /// logging or pushing to external state) inside the closure.
+    ///
+    /// Prefer this over `read_snapshot().clone() + update_snapshot()`, which
+    /// races with concurrent snapshot stores and can silently drop field
+    /// updates.
+    pub fn modify_snapshot<F: FnMut(&mut WorldSnapshot)>(&self, mut f: F) {
+        self.world_snapshot.rcu(|curr| {
+            let mut snap = (**curr).clone();
+            f(&mut snap);
+            Arc::new(snap)
+        });
     }
 
     /// Set the bot online status atomically.
@@ -274,6 +309,36 @@ impl SharedState {
     pub fn reset_cancel_token(&self) {
         let mut guard = self.cancel_token.lock().unwrap_or_else(|e| e.into_inner());
         *guard = CancellationToken::new();
+    }
+
+    /// Return a clone of the MCP shutdown [`CancellationToken`].
+    ///
+    /// Callers (notably `serve_http` and `serve_stdio`) await
+    /// `token.cancelled()` to begin graceful shutdown when
+    /// [`trigger_shutdown`](Self::trigger_shutdown) is invoked.
+    ///
+    /// Cloning is cheap — it shares the same underlying cancellation state.
+    /// Distinct from [`cancel_token`](Self::cancel_token), which signals the
+    /// bot reconnect loop to stop.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown_token
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Trigger MCP server graceful shutdown.
+    ///
+    /// Cancels the shutdown token so `serve_http`'s
+    /// `with_graceful_shutdown` future resolves and `serve_stdio`'s
+    /// `tokio::select!` takes the shutdown branch. Called from
+    /// `MinecraftApp::drop` so closing the window exits the MCP transport
+    /// promptly instead of waiting for stdin EOF or an idle HTTP client.
+    pub fn trigger_shutdown(&self) {
+        self.shutdown_token
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cancel();
     }
 
     /// Update config under a write lock.
@@ -599,6 +664,107 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    // -- modify_snapshot (RCU) ----------------------------------------------
+
+    #[test]
+    fn test_modify_snapshot_updates_field() {
+        let state = SharedState::new(AppConfig::default());
+        // Seed the snapshot with non-default health so we can verify the
+        // closure actually mutated the field.
+        let seed = crate::types::WorldSnapshot {
+            blocks: vec![],
+            entities: vec![],
+            self_player: crate::types::SelfPlayer {
+                uuid: "u".into(),
+                username: "Steve".into(),
+                position: crate::types::BlockPos::new(0, 64, 0),
+                health: 20.0,
+                hunger: 20,
+                gamemode: crate::types::GameMode::Survival,
+                held_item_slot: 0,
+                inventory: Vec::new(),
+            },
+            timestamp: 1,
+            chunk_summary: vec![],
+            commands_enabled: None,
+        };
+        state.update_snapshot(seed.clone());
+
+        state.modify_snapshot(|s| s.self_player.health = 0.0);
+
+        let snap = state.read_snapshot();
+        assert_eq!(snap.self_player.health, 0.0);
+        // Other fields preserved.
+        assert_eq!(snap.self_player.username, "Steve");
+        assert_eq!(snap.timestamp, 1);
+    }
+
+    #[test]
+    fn test_modify_snapshot_concurrent_no_loss() {
+        // Two threads mutate different fields concurrently; both updates
+        // must be visible in the final snapshot (RCU retries on conflict).
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        // Seed with one entity so the "push" thread's retain+push has
+        // something to operate on without panicking.
+        let seed = crate::types::WorldSnapshot {
+            blocks: vec![],
+            entities: vec![crate::types::EntityEntry {
+                id: 0,
+                uuid: "seed".into(),
+                entity_type: "player".into(),
+                position: crate::types::BlockPos::new(0, 0, 0),
+                display_name: None,
+                health: None,
+            }],
+            self_player: crate::types::SelfPlayer {
+                uuid: "u".into(),
+                username: "Steve".into(),
+                position: crate::types::BlockPos::new(0, 64, 0),
+                health: 20.0,
+                hunger: 20,
+                gamemode: crate::types::GameMode::Survival,
+                held_item_slot: 0,
+                inventory: Vec::new(),
+            },
+            timestamp: 1,
+            chunk_summary: vec![],
+            commands_enabled: None,
+        };
+        state.update_snapshot(seed);
+
+        let s1 = Arc::clone(&state);
+        let s2 = Arc::clone(&state);
+        let h1 = thread::spawn(move || {
+            for _ in 0..100 {
+                s1.modify_snapshot(|s| s.self_player.health = 0.0);
+            }
+        });
+        let h2 = thread::spawn(move || {
+            for _ in 0..100 {
+                s2.modify_snapshot(|s| {
+                    s.entities.retain(|e| e.uuid != "added");
+                    s.entities.push(crate::types::EntityEntry {
+                        id: 99,
+                        uuid: "added".into(),
+                        entity_type: "player".into(),
+                        position: crate::types::BlockPos::new(1, 2, 3),
+                        display_name: None,
+                        health: None,
+                    });
+                });
+            }
+        });
+        h1.join().unwrap();
+        h2.join().unwrap();
+
+        let snap = state.read_snapshot();
+        // health was set to 0.0 by thread 1 — must not have been lost.
+        assert_eq!(snap.self_player.health, 0.0);
+        // The "added" entity from thread 2 must be present (last write wins
+        // for the entities field, but it must not have been lost entirely).
+        assert!(snap.entities.iter().any(|e| e.uuid == "added"));
     }
 
     // -- Online status -------------------------------------------------------

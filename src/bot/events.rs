@@ -12,7 +12,7 @@ use tracing::{info, trace, warn};
 
 use super::commands::{CommandExecutor, RealBotClient};
 use super::snapshot_updater::SnapshotUpdater;
-use crate::channel::{ReceiverLease, ReceiverSlot};
+use crate::channel::{BotCommandSender, ReceiverLease, ReceiverSlot};
 use crate::snapshot::DirtyTracker;
 use crate::state::SharedState;
 use crate::types::{BlockPos, EntityEntry};
@@ -39,6 +39,15 @@ pub(crate) static INJECTED_COMMAND_RECEIVER: OnceLock<ReceiverSlot> = OnceLock::
 
 /// Pre-initialized egui context to inject into [`BotState`] (optional).
 pub(crate) static INJECTED_EGUI_CTX: OnceLock<Option<egui::Context>> = OnceLock::new();
+
+/// Pre-initialized command sender to inject into [`BotState`] (optional).
+///
+/// Used to give the command executor a way to issue sub-commands (e.g.
+/// `Act::Mine` delegating to `CompoundOpExecutor` which sends `MoveTo` /
+/// `BreakBlock` back through the channel). `None` in unit tests where the
+/// executor's `handle_act` falls back to fire-and-forget behaviour.
+/// Set by [`crate::bot::connection::ConnectionManager::connect`].
+pub(crate) static INJECTED_COMMAND_SENDER: OnceLock<Option<BotCommandSender>> = OnceLock::new();
 
 /// Pre-initialized snapshot interval to inject into [`BotState`].
 ///
@@ -81,6 +90,10 @@ pub struct BotState {
     pub last_snapshot_time: Arc<Mutex<Instant>>,
     /// Minimum milliseconds between snapshot updates.
     pub snapshot_interval_ms: u64,
+    /// Optional command sender for issuing sub-commands (e.g. `Act::Mine`
+    /// delegating to `CompoundOpExecutor`). `None` in unit tests; set from
+    /// `INJECTED_COMMAND_SENDER` in production.
+    pub command_sender: Option<BotCommandSender>,
 }
 
 impl Default for BotState {
@@ -96,6 +109,8 @@ impl Default for BotState {
         });
 
         let egui_ctx = INJECTED_EGUI_CTX.get().cloned().flatten();
+
+        let command_sender = INJECTED_COMMAND_SENDER.get().cloned().flatten();
 
         let snapshot_interval_ms = {
             let v = INJECTED_SNAPSHOT_INTERVAL_MS.load(Ordering::Relaxed);
@@ -114,6 +129,7 @@ impl Default for BotState {
             dirty_tracker: Arc::new(Mutex::new(DirtyTracker::new())),
             last_snapshot_time: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(3600))),
             snapshot_interval_ms,
+            command_sender,
         }
     }
 }
@@ -203,9 +219,11 @@ fn handle_spawn(bot: Client, state: &BotState) {
     match ReceiverLease::take(&state.command_receiver) {
         Some(lease) => {
             let shared_state = Arc::clone(&state.shared_state);
+            let command_sender = state.command_sender.clone();
             let client = RealBotClient::new(bot, Arc::clone(&shared_state));
             let handle = tokio::task::spawn_local(async move {
-                let mut executor = CommandExecutor::new_for_lease(client, shared_state);
+                let mut executor =
+                    CommandExecutor::new_for_lease(client, shared_state, command_sender);
                 executor.run_with_lease(lease).await;
             });
             *state
@@ -321,15 +339,9 @@ fn handle_chat(state: &BotState, chat_packet: azalea::chat::ChatPacket) {
 }
 
 fn handle_death(state: &BotState) {
-    // TODO(race): this clone-modify-write can lose updates written by
-    // `SnapshotUpdater::update_from_tick` between the clone and the
-    // store. `SharedState` exposes no `modify_snapshot` closure and its
-    // `ArcSwap` is private, so an RCU fix can't be done from events.rs
-    // alone — it needs a new method on `SharedState` (state.rs). The race
-    // is display-only (health), so it is tolerated for now.
-    let mut snapshot = (*state.shared_state.read_snapshot()).clone();
-    snapshot.self_player.health = 0.0;
-    state.shared_state.update_snapshot(snapshot);
+    state
+        .shared_state
+        .modify_snapshot(|s| s.self_player.health = 0.0);
     request_repaint(state);
     trace!("bot died, set health=0");
 }
@@ -365,48 +377,38 @@ fn add_player_to_snapshot(
     id: u32,
     position: BlockPos,
 ) {
-    // TODO(race): clone-modify-write races with SnapshotUpdater — see
-    // `handle_death` for details. Needs a `modify_snapshot` method on
-    // `SharedState` to fix from events.rs alone.
-    let mut snapshot = (*state.shared_state.read_snapshot()).clone();
-    snapshot
-        .entities
-        .retain(|e| e.uuid != info.uuid.to_string());
-    snapshot.entities.push(EntityEntry {
-        id,
-        uuid: info.uuid.to_string(),
-        entity_type: "player".to_string(),
-        position,
-        display_name: info.display_name.as_ref().map(|dt| dt.to_string()),
-        health: None,
+    let uuid = info.uuid.to_string();
+    let display_name = info.display_name.as_ref().map(|dt| dt.to_string());
+    state.shared_state.modify_snapshot(|s| {
+        s.entities.retain(|e| e.uuid != uuid);
+        s.entities.push(EntityEntry {
+            id,
+            uuid: uuid.clone(),
+            entity_type: "player".to_string(),
+            position,
+            display_name: display_name.clone(),
+            health: None,
+        });
     });
-    state.shared_state.update_snapshot(snapshot);
     trace!("player added: {}", info.profile.name);
 }
 
 fn handle_remove_player(state: &BotState, info: &azalea::player::PlayerInfo) {
-    // TODO(race): clone-modify-write races with SnapshotUpdater — see
-    // `handle_death` for details.
-    let mut snapshot = (*state.shared_state.read_snapshot()).clone();
-    snapshot
-        .entities
-        .retain(|e| e.uuid != info.uuid.to_string());
-    state.shared_state.update_snapshot(snapshot);
+    let uuid = info.uuid.to_string();
+    state
+        .shared_state
+        .modify_snapshot(|s| s.entities.retain(|e| e.uuid != uuid));
     trace!("player removed: {}", info.profile.name);
 }
 
 fn handle_update_player(state: &BotState, info: &azalea::player::PlayerInfo) {
-    // TODO(race): clone-modify-write races with SnapshotUpdater — see
-    // `handle_death` for details.
-    let mut snapshot = (*state.shared_state.read_snapshot()).clone();
-    if let Some(entity) = snapshot
-        .entities
-        .iter_mut()
-        .find(|e| e.uuid == info.uuid.to_string())
-    {
-        entity.display_name = info.display_name.as_ref().map(|dt| dt.to_string());
-    }
-    state.shared_state.update_snapshot(snapshot);
+    let uuid = info.uuid.to_string();
+    let display_name = info.display_name.as_ref().map(|dt| dt.to_string());
+    state.shared_state.modify_snapshot(|s| {
+        if let Some(entity) = s.entities.iter_mut().find(|e| e.uuid == uuid) {
+            entity.display_name = display_name.clone();
+        }
+    });
     trace!("player updated: {}", info.profile.name);
 }
 

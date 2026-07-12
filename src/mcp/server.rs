@@ -440,6 +440,8 @@ impl ServerHandler for McpBotServer {
 /// This function blocks until the transport is closed. All logging goes to
 /// stderr; stdout is reserved for MCP JSON-RPC messages.
 pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
+    // Capture the shutdown token before `state` is moved into the server.
+    let shutdown_token = state.shutdown_token();
     let server = McpBotServer::new(state, sender);
     let (stdin, stdout) = stdio();
 
@@ -447,10 +449,17 @@ pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
 
     match server.serve((stdin, stdout)).await {
         Ok(running) => {
-            info!("MCP server initialized, waiting for transport to close");
-            // Wait until the transport is closed or the service is cancelled.
-            let _ = running.waiting().await;
-            info!("MCP server transport closed cleanly");
+            info!("MCP server initialized, waiting for transport to close or shutdown");
+            // Race the transport-close future against the shutdown token so
+            // closing the window exits promptly instead of hanging on stdin EOF.
+            tokio::select! {
+                _ = running.waiting() => {
+                    info!("MCP server transport closed cleanly");
+                }
+                _ = shutdown_token.cancelled() => {
+                    info!("MCP server shutting down (shutdown token triggered)");
+                }
+            }
         }
         Err(e) => {
             error!(error = %e, "MCP server failed");
@@ -523,6 +532,7 @@ pub async fn serve_http(state: Arc<SharedState>, sender: BotCommandSender, addr:
             StreamableHttpServerConfig::default(),
         );
 
+    let shutdown_token = state.shutdown_token();
     let middleware_state = Arc::clone(&state);
     let app = Router::new()
         .nest_service("/mcp", mcp_service)
@@ -539,7 +549,12 @@ pub async fn serve_http(state: Arc<SharedState>, sender: BotCommandSender, addr:
 
     info!("MCP server starting on HTTP at {addr}");
 
-    if let Err(e) = axum::serve(listener, app).await {
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_token.cancelled().await;
+        })
+        .await
+    {
         error!(error = %e, "MCP HTTP server error");
     }
 }
