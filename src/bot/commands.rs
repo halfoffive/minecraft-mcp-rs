@@ -13,7 +13,8 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, trace, warn};
 
 use crate::block_data::ItemStack;
-use crate::channel::{BotCommandReceiver, ReceiverLease};
+use crate::bot::ops::CompoundOpExecutor;
+use crate::channel::{BotCommandReceiver, BotCommandSender, ReceiverLease};
 use crate::error::BotError;
 use crate::state::SharedState;
 use crate::tool_select::find_tool_in_inventory;
@@ -342,27 +343,43 @@ pub(crate) struct CommandExecutor<B: BotActions> {
     /// leased receiver instead.
     #[allow(dead_code)]
     receiver: Option<BotCommandReceiver>,
+    /// Optional sender for issuing sub-commands. When `Some`, `handle_act`
+    /// with `ActAction::Mine` delegates to [`CompoundOpExecutor`] to wait
+    /// for mining completion. `None` in unit tests (mock executors can't
+    /// respond to their own sub-commands without deadlocking).
+    sender: Option<BotCommandSender>,
 }
 
 impl<B: BotActions> CommandExecutor<B> {
     /// Create a new executor that owns its receiver (used by tests).
     #[allow(dead_code)]
-    pub fn new(bot: B, state: Arc<SharedState>, receiver: BotCommandReceiver) -> Self {
+    pub fn new(
+        bot: B,
+        state: Arc<SharedState>,
+        receiver: BotCommandReceiver,
+        sender: Option<BotCommandSender>,
+    ) -> Self {
         Self {
             bot,
             state,
             receiver: Some(receiver),
+            sender,
         }
     }
 
     /// Create a new executor without an owned receiver; meant to be driven by
     /// [`run_with_lease`](Self::run_with_lease) so the receiver is returned to
     /// its shared slot when the task is aborted.
-    pub(crate) fn new_for_lease(bot: B, state: Arc<SharedState>) -> Self {
+    pub(crate) fn new_for_lease(
+        bot: B,
+        state: Arc<SharedState>,
+        sender: Option<BotCommandSender>,
+    ) -> Self {
         Self {
             bot,
             state,
             receiver: None,
+            sender,
         }
     }
 
@@ -1145,23 +1162,35 @@ impl<B: BotActions> CommandExecutor<B> {
                 Ok(r) => (r.message, None),
                 Err(e) => ("failed".into(), Some(e.to_string())),
             },
-            ActAction::Mine { block_pos } => match self.handle_break_block(block_pos) {
-                // TODO(bug): `handle_break_block` only *starts* mining via
-                // `Client::start_mining` and returns immediately — it does not
-                // wait for the block to actually break. The compound operation
-                // `CompoundOpExecutor::execute_mine_block` in `bot/ops.rs` waits
-                // for completion (walks to the block, selects the best tool,
-                // sleeps for the calculated mine time, and verifies the block
-                // broke), but it requires a `BotCommandSender` to construct,
-                // which `CommandExecutor` does not own (it holds the receiver,
-                // not a sender). Wiring it in here needs a cross-file change
-                // (passing a sender into the executor). Until then, the
-                // `Act::Mine` result honestly reports that mining was *started*
-                // (see `handle_break_block`'s "Started mining block at {pos}"
-                // message), not completed.
-                Ok(r) => (r.message, None),
-                Err(e) => ("failed".into(), Some(e.to_string())),
-            },
+            ActAction::Mine { block_pos } => {
+                // When a sender is available, delegate to the compound
+                // operation executor which walks to the block, selects the
+                // best tool, sleeps for the calculated mine time, and
+                // verifies the block broke — returning a real success/failure
+                // result instead of just "started mining".
+                match &self.sender {
+                    Some(sender) => {
+                        let executor =
+                            CompoundOpExecutor::new(sender.clone(), Arc::clone(&self.state));
+                        match executor.execute_mine_block(block_pos, true).await {
+                            Ok(r) => (r.message, None),
+                            Err(e) => ("failed".into(), Some(e.to_string())),
+                        }
+                    }
+                    None => {
+                        warn!(
+                            ?block_pos,
+                            "Act::Mine called without a command sender — \
+                             falling back to fire-and-forget mining (no \
+                             completion verification)"
+                        );
+                        match self.handle_break_block(block_pos) {
+                            Ok(r) => (r.message, None),
+                            Err(e) => ("failed".into(), Some(e.to_string())),
+                        }
+                    }
+                }
+            }
             ActAction::Attack { entity_id } => match self.handle_attack_entity(entity_id) {
                 Ok(r) => (r.message, None),
                 Err(e) => ("failed".into(), Some(e.to_string())),
@@ -1471,7 +1500,7 @@ mod tests {
         state.set_online(true);
         let mock = MockBotClient::new();
         let log = mock.log().clone();
-        let executor = CommandExecutor::new(mock, Arc::clone(&state), receiver);
+        let executor = CommandExecutor::new(mock, Arc::clone(&state), receiver, None);
         (executor, sender, state, log)
     }
 

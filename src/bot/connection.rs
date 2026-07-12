@@ -15,7 +15,7 @@ use azalea::{Account, ClientBuilder, prelude::AppExit};
 use tracing::{info, warn};
 
 use crate::bot::events;
-use crate::channel::ReceiverSlot;
+use crate::channel::{BotCommandSender, ReceiverSlot};
 use crate::config::AppConfig;
 use crate::state::SharedState;
 
@@ -82,16 +82,22 @@ impl ConnectionManager {
     ///   on `Event::Spawn` (and return it on disconnect). Shared across
     ///   reconnection attempts.
     /// - `egui_ctx`: optional egui context for triggering UI repaints.
+    /// - `command_sender`: clone of the command channel sender, injected into
+    ///   `events::INJECTED_COMMAND_SENDER` so `BotState::default()` picks it
+    ///   up and compound ops (e.g. `Act::Mine`) can issue sub-commands via the
+    ///   executor.
     pub async fn connect(
         &self,
         command_receiver: ReceiverSlot,
         egui_ctx: Option<egui::Context>,
+        command_sender: BotCommandSender,
     ) -> eyre::Result<()> {
         // Inject dependencies so BotState::default() picks them up when
         // azalea initializes the state internally via Default.
         let _ = events::INJECTED_SHARED_STATE.set(Arc::clone(&self.state));
         let _ = events::INJECTED_COMMAND_RECEIVER.set(Arc::clone(&command_receiver));
         let _ = events::INJECTED_EGUI_CTX.set(egui_ctx.clone());
+        let _ = events::INJECTED_COMMAND_SENDER.set(Some(command_sender));
         events::INJECTED_SNAPSHOT_INTERVAL_MS.store(
             self.config.snapshot_interval_ms,
             std::sync::atomic::Ordering::Relaxed,

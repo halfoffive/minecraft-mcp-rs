@@ -22,6 +22,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **(this branch) Snapshot race actually fixed:** `handle_death` /
+  `add_player_to_snapshot` / `handle_remove_player` / `handle_update_player`
+  now use `SharedState::modify_snapshot` (atomic RCU via `ArcSwap::rcu`).
+  Previously the handlers used `read_snapshot().clone()` + `update_snapshot()`,
+  which lost updates when `SnapshotUpdater` interleaved at await points
+  (the earlier H1 entry described the API as adopted before it actually
+  was — the migration is now genuinely done; all `TODO(race)` comments
+  removed).
+- **(this branch) `Act::Mine` now waits for completion (supersedes H8):**
+  `handle_act`'s `ActAction::Mine` branch delegates to
+  `CompoundOpExecutor::execute_mine_block(pos, true)`, which selects the
+  best tool, walks to the block, mines, and verifies completion. The
+  `BotCommandSender` is injected via a new chain
+  `ConnectionManager::connect` → `INJECTED_COMMAND_SENDER` →
+  `BotState.command_sender` → `CommandExecutor::sender` →
+  `CompoundOpExecutor`. When `sender` is `None` (unit tests with a mock
+  executor), the handler falls back to the legacy fire-and-forget path
+  with a `warn!` log so existing tests stay green. H8's "warn that it's
+  fire-and-forget" stopgap is no longer the production behaviour.
+- **(this branch) `shutdown_token` lifecycle implemented (compile-blocker
+  fix):** `SharedState::shutdown_token() -> CancellationToken` and
+  `SharedState::trigger_shutdown()` are now actually defined. The AGENTS.md
+  convention was documented but the methods were never implemented,
+  causing E0599 on `src/ui/app.rs:210` (which called `trigger_shutdown()`
+  from `MinecraftApp::drop`). `serve_http` now uses
+  `axum::serve(...).with_graceful_shutdown(async move { token.cancelled().await; })`
+  (the `async move` wrapper is required because `CancellationToken::cancelled()`
+  borrows the token and is not `'static`); `serve_stdio` uses `tokio::select!`
+  racing `shutdown_token.cancelled()` against `running.waiting()` so shutdown
+  returns immediately instead of waiting for stdin EOF.
 - **H1:** `SharedState::modify_snapshot` adopted by `handle_death` /
   `add_player_to_snapshot` / `handle_remove_player` / `handle_update_player`,
   eliminating the snapshot lost-update race (all `TODO(race)` comments removed).
