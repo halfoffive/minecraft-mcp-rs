@@ -2,18 +2,11 @@
 //!
 //! Each tool validates parameters, checks online status, and dispatches a
 //! [`BotCommand`] through the bot command channel.
-//!
-//! # Parameter structs
-//!
-//! We implement [`rmcp::schemars::JsonSchema`] manually using schemars v1.2.1
-//! API (bundled by rmcp 1.7.0) to avoid version conflicts with the project's
-//! schemars v0.8 dependency.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 
 use crate::channel::BotCommandSender;
 use crate::command_validate::validate_block_pos;
@@ -22,11 +15,6 @@ use crate::state::SharedState;
 use crate::types::{BlockPos, BotCommand, Direction, GameMode};
 
 // ── Helper ──────────────────────────────────────────────────────────────────
-
-fn schema_from_json(v: Value) -> rmcp::schemars::Schema {
-    let map: Map<String, Value> = v.as_object().cloned().unwrap_or_default();
-    rmcp::schemars::Schema::from(map)
-}
 
 /// Parse a direction string (case-insensitive) into a [`Direction`].
 fn parse_direction(s: &str) -> Option<Direction> {
@@ -48,39 +36,14 @@ fn parse_direction(s: &str) -> Option<Direction> {
 // ── move_to ─────────────────────────────────────────────────────────────────
 
 /// Input for the `move_to` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct MoveToInput {
+    /// X coordinate to move to.
     pub x: i32,
+    /// Y coordinate to move to.
     pub y: i32,
+    /// Z coordinate to move to.
     pub z: i32,
-}
-
-impl rmcp::schemars::JsonSchema for MoveToInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("MoveToInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "x": {
-                    "type": "integer",
-                    "description": "X coordinate to move to"
-                },
-                "y": {
-                    "type": "integer",
-                    "description": "Y coordinate to move to"
-                },
-                "z": {
-                    "type": "integer",
-                    "description": "Z coordinate to move to"
-                }
-            },
-            "required": ["x", "y", "z"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `move_to` MCP tool.
@@ -113,36 +76,14 @@ pub async fn handle_move_to(
 // ── walk_direction ──────────────────────────────────────────────────────────
 
 /// Input for the `walk_direction` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct WalkDirectionInput {
+    /// Cardinal direction to walk. One of: north, south, east, west, up, down,
+    /// northeast, northwest, southeast, southwest.
     pub direction: String,
+    /// Number of blocks to walk in the given direction (1-1000).
+    #[schemars(range(min = 1, max = 1000))]
     pub distance: u32,
-}
-
-impl rmcp::schemars::JsonSchema for WalkDirectionInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("WalkDirectionInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "direction": {
-                    "type": "string",
-                    "description": "Cardinal direction to walk. One of: north, south, east, west, up, down, northeast, northwest, southeast, southwest",
-                    "enum": ["north", "south", "east", "west", "up", "down", "northeast", "northwest", "southeast", "southwest"]
-                },
-                "distance": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Number of blocks to walk in the given direction"
-                }
-            },
-            "required": ["direction", "distance"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `walk_direction` MCP tool.
@@ -194,22 +135,8 @@ pub async fn handle_walk_direction(
 // ── jump ────────────────────────────────────────────────────────────────────
 
 /// Input for the `jump` MCP tool (no parameters needed).
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct JumpInput {}
-
-impl rmcp::schemars::JsonSchema for JumpInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("JumpInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        }))
-    }
-}
 
 /// Handle `jump` MCP tool.
 ///
@@ -236,39 +163,14 @@ pub async fn handle_jump(
 // ── teleport ────────────────────────────────────────────────────────────────
 
 /// Input for the `teleport` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct TeleportInput {
+    /// X coordinate to teleport to.
     pub x: i32,
+    /// Y coordinate to teleport to.
     pub y: i32,
+    /// Z coordinate to teleport to.
     pub z: i32,
-}
-
-impl rmcp::schemars::JsonSchema for TeleportInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("TeleportInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "x": {
-                    "type": "integer",
-                    "description": "X coordinate to teleport to"
-                },
-                "y": {
-                    "type": "integer",
-                    "description": "Y coordinate to teleport to"
-                },
-                "z": {
-                    "type": "integer",
-                    "description": "Z coordinate to teleport to"
-                }
-            },
-            "required": ["x", "y", "z"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `teleport` MCP tool.
@@ -312,39 +214,14 @@ pub async fn handle_teleport(
 // ── smart_move ──────────────────────────────────────────────────────────────
 
 /// Input for the `smart_move` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct SmartMoveInput {
+    /// X coordinate to move to.
     pub x: i32,
+    /// Y coordinate to move to.
     pub y: i32,
+    /// Z coordinate to move to.
     pub z: i32,
-}
-
-impl rmcp::schemars::JsonSchema for SmartMoveInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("SmartMoveInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "x": {
-                    "type": "integer",
-                    "description": "X coordinate to move to"
-                },
-                "y": {
-                    "type": "integer",
-                    "description": "Y coordinate to move to"
-                },
-                "z": {
-                    "type": "integer",
-                    "description": "Z coordinate to move to"
-                }
-            },
-            "required": ["x", "y", "z"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `smart_move` MCP tool.
@@ -379,39 +256,14 @@ pub async fn handle_smart_move(
 // ── fly_to ──────────────────────────────────────────────────────────────────
 
 /// Input for the `fly_to` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct FlyToInput {
+    /// X coordinate to fly to.
     pub x: i32,
+    /// Y coordinate to fly to.
     pub y: i32,
+    /// Z coordinate to fly to.
     pub z: i32,
-}
-
-impl rmcp::schemars::JsonSchema for FlyToInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("FlyToInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "x": {
-                    "type": "integer",
-                    "description": "X coordinate to fly to"
-                },
-                "y": {
-                    "type": "integer",
-                    "description": "Y coordinate to fly to"
-                },
-                "z": {
-                    "type": "integer",
-                    "description": "Z coordinate to fly to"
-                }
-            },
-            "required": ["x", "y", "z"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `fly_to` MCP tool.

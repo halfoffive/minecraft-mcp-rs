@@ -7,15 +7,15 @@
 //! render as empty boxes (tofu).  Rather than bundling a multi-megabyte
 //! CJK font into the binary (which would bloat the release artifact), we
 //! detect the platform's pre-installed system CJK font at runtime and
-//! inject it into the egui [`FontDefinitions`].
+//! inject it into the egui `FontDefinitions`.
 //!
 //! # Detection strategy
 //!
-//! [`candidate_font_paths`] returns a hard-coded list of well-known CJK
-//! font locations per OS (Windows / macOS / Linux).  [`first_existing_font`]
+//! `candidate_font_paths` returns a hard-coded list of well-known CJK
+//! font locations per OS (Windows / macOS / Linux).  `first_existing_font`
 //! walks that list and returns the first path that exists on disk.  The
 //! chosen file is loaded with [`std::fs::read`] and registered under the
-//! name `"cjk"` in the egui [`FontDefinitions`]:
+//! name `"cjk"` in the egui `FontDefinitions`:
 //!
 //! - Inserted at the **front** of `FontFamily::Proportional` so Chinese
 //!   glyphs render with the system font while Latin glyphs still prefer

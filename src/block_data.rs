@@ -461,42 +461,12 @@ pub fn material_from_item_name(name: &str) -> Option<(ToolType, MaterialTier)> {
 ///
 /// Returns the slot index of the best tool (highest material priority), or
 /// `None` if no matching tool is found.
+#[deprecated(note = "use tool_select::find_tool_in_inventory instead")]
 pub fn find_best_tool_in_inventory(
     tool_type: &ToolType,
     inventory: &[Option<ItemStack>],
 ) -> Option<u8> {
-    let mut best_slot: Option<u8> = None;
-    let mut best_priority: Option<usize> = None;
-
-    for (slot, stack) in inventory.iter().enumerate() {
-        let stack = match stack {
-            Some(s) => s,
-            None => continue,
-        };
-
-        if let Some((found_tool, found_material)) = material_from_item_name(&stack.item_id) {
-            if &found_tool != tool_type {
-                continue;
-            }
-
-            let priority = MATERIAL_PRIORITY.iter().position(|m| m == &found_material);
-
-            match (best_priority, priority) {
-                (None, Some(p)) => {
-                    best_slot = Some(slot as u8);
-                    best_priority = Some(p);
-                }
-                (Some(best), Some(p)) if p < best => {
-                    // Lower index = higher priority
-                    best_slot = Some(slot as u8);
-                    best_priority = Some(p);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    best_slot
+    crate::tool_select::find_tool_in_inventory(tool_type, inventory).map(|(_, slot)| slot)
 }
 
 // ---------------------------------------------------------------------------
@@ -685,7 +655,11 @@ mod tests {
     #[test]
     fn test_find_best_tool_empty_inventory() {
         let inv: Vec<Option<ItemStack>> = vec![];
-        assert_eq!(find_best_tool_in_inventory(&ToolType::Pickaxe, &inv), None);
+        assert_eq!(
+            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &inv)
+                .map(|(_, slot)| slot),
+            None
+        );
     }
 
     #[test]
@@ -700,7 +674,11 @@ mod tests {
                 count: 1,
             }),
         ];
-        assert_eq!(find_best_tool_in_inventory(&ToolType::Pickaxe, &inv), None);
+        assert_eq!(
+            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &inv)
+                .map(|(_, slot)| slot),
+            None
+        );
     }
 
     #[test]
@@ -723,7 +701,8 @@ mod tests {
         ];
         // slot 3 = iron_pickaxe (higher priority than wooden at slot 1)
         assert_eq!(
-            find_best_tool_in_inventory(&ToolType::Pickaxe, &inv),
+            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &inv)
+                .map(|(_, slot)| slot),
             Some(3)
         );
     }
@@ -747,7 +726,8 @@ mod tests {
         // Diamond (index 1) > Iron (index 2) > Gold (index 5)
         // So slot 1 (diamond) is best
         assert_eq!(
-            find_best_tool_in_inventory(&ToolType::Shovel, &inv),
+            crate::tool_select::find_tool_in_inventory(&ToolType::Shovel, &inv)
+                .map(|(_, slot)| slot),
             Some(1)
         );
     }
@@ -766,7 +746,8 @@ mod tests {
         ];
         // Netherite (index 0) > Diamond (index 1)
         assert_eq!(
-            find_best_tool_in_inventory(&ToolType::Pickaxe, &inv),
+            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &inv)
+                .map(|(_, slot)| slot),
             Some(0)
         );
     }

@@ -4,11 +4,10 @@
 //! offline, `is_connected` returns `{"connected":false}` and all other
 //! query tools return `{"error":"Bot is currently offline"}`.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::json;
 
 use crate::error::BotError;
 use crate::state::SharedState;
@@ -48,6 +47,29 @@ pub fn get_inventory(state: &Arc<SharedState>) -> Result<String, BotError> {
         "held_item_slot": snapshot.self_player.held_item_slot,
     })
     .to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Nearby query input structs
+// ---------------------------------------------------------------------------
+
+/// Input for the `get_nearby_blocks` MCP tool.
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
+pub struct NearbyBlocksInput {
+    /// Chebyshev (square) radius around the bot to search. Range: 1..=100.
+    #[schemars(range(min = 1, max = 100))]
+    pub radius: u32,
+    /// Optional case-insensitive substring filter on block_type. If None or
+    /// empty, all block types are returned.
+    pub filter_type: Option<String>,
+}
+
+/// Input for the `get_nearby_entities` MCP tool.
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
+pub struct NearbyEntitiesInput {
+    /// Chebyshev (square) radius around the bot to search. Range: 1..=100.
+    #[schemars(range(min = 1, max = 100))]
+    pub radius: u32,
 }
 
 /// Get blocks near the bot within the given Chebyshev (square) radius.
@@ -164,35 +186,12 @@ pub fn get_server_info(state: &Arc<SharedState>) -> Result<String, BotError> {
 // ---------------------------------------------------------------------------
 
 /// Input for the `get_world_view` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct GetWorldViewInput {
+    /// Half-extent of the top-down view in blocks (1-32). The rendered image
+    /// is (2*radius+1) x (2*radius+1) pixels.
+    #[schemars(range(min = 1, max = 32))]
     pub radius: u8,
-}
-
-impl rmcp::schemars::JsonSchema for GetWorldViewInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("GetWorldViewInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        let map: Map<String, Value> = json!({
-            "type": "object",
-            "properties": {
-                "radius": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 32,
-                    "description": "Half-extent of the top-down view in blocks (1-32). The rendered image is (2*radius+1) x (2*radius+1) pixels."
-                }
-            },
-            "required": ["radius"],
-            "additionalProperties": false
-        })
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-        rmcp::schemars::Schema::from(map)
-    }
 }
 
 /// Render a top-down PNG of the world around the bot and return it as MCP
@@ -217,7 +216,7 @@ pub fn get_world_view(
     }
 
     let snapshot = state.read_snapshot();
-    let png_bytes = crate::mcp::render::render_topdown(&snapshot, radius);
+    let png_bytes = crate::mcp::render::render_topdown(&snapshot, radius)?;
     let encoded = crate::mcp::render::base64_encode(&png_bytes);
     Ok(rmcp::model::Content::image(encoded, "image/png"))
 }

@@ -3,8 +3,7 @@
 //! Reads lock-free from [`SharedState`] via [`ArcSwap::load`](arc_swap::ArcSwap::load)
 //! for the world snapshot, and uses short-lived read locks for config and stats.
 //!
-//! All user-visible strings are translated via the
-//! [`i18n`](crate::ui::i18n) layer.
+//! All user-visible strings are translated via the [`i18n`] layer.
 
 use egui::Ui;
 use std::sync::Arc;

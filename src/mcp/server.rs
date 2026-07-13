@@ -41,7 +41,7 @@ use crate::mcp::tools_item::{
 use crate::mcp::tools_movement::{
     FlyToInput, JumpInput, MoveToInput, SmartMoveInput, TeleportInput, WalkDirectionInput,
 };
-use crate::mcp::tools_query::GetWorldViewInput;
+use crate::mcp::tools_query::{GetWorldViewInput, NearbyBlocksInput, NearbyEntitiesInput};
 use crate::state::SharedState;
 
 // ---------------------------------------------------------------------------
@@ -71,13 +71,6 @@ impl McpBotServer {
 #[tool_router]
 impl McpBotServer {
     // ── Query tools (read_only) ──────────────────────────────
-    //
-    // NOTE: get_nearby_blocks and get_nearby_entities currently take no
-    // parameters due to a schemars version mismatch (Cargo.toml uses
-    // schemars 0.8, rmcp re-exports schemars 1.x).  Once the project
-    // upgrades to schemars 1.x, these tools should accept `radius: u32`
-    // and `filter_type: Option<String>` parameters.  For now sensible
-    // defaults (radius=10, no filter) are baked into the implementations.
 
     #[tool(
         description = "Get information about the bot's own player",
@@ -96,19 +89,25 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Get blocks near the bot's position (radius=10, no filter)",
+        description = "Get blocks near the bot's position. Optional filter_type does a case-insensitive substring match on block_type.",
         annotations(read_only_hint = true)
     )]
-    async fn get_nearby_blocks(&self) -> Result<String, BotError> {
-        crate::mcp::tools_query::get_nearby_blocks(&self.state, 10, None)
+    async fn get_nearby_blocks(
+        &self,
+        Parameters(input): Parameters<NearbyBlocksInput>,
+    ) -> Result<String, BotError> {
+        crate::mcp::tools_query::get_nearby_blocks(&self.state, input.radius, input.filter_type)
     }
 
     #[tool(
-        description = "Get entities near the bot's position (radius=10)",
+        description = "Get entities near the bot's position",
         annotations(read_only_hint = true)
     )]
-    async fn get_nearby_entities(&self) -> Result<String, BotError> {
-        crate::mcp::tools_query::get_nearby_entities(&self.state, 10)
+    async fn get_nearby_entities(
+        &self,
+        Parameters(input): Parameters<NearbyEntitiesInput>,
+    ) -> Result<String, BotError> {
+        crate::mcp::tools_query::get_nearby_entities(&self.state, input.radius)
     }
 
     #[tool(
@@ -718,11 +717,18 @@ mod tests {
             Err(BotError::Offline(_))
         ));
         assert!(matches!(
-            server.get_nearby_blocks().await,
+            server
+                .get_nearby_blocks(Parameters(NearbyBlocksInput {
+                    radius: 10,
+                    filter_type: None,
+                }))
+                .await,
             Err(BotError::Offline(_))
         ));
         assert!(matches!(
-            server.get_nearby_entities().await,
+            server
+                .get_nearby_entities(Parameters(NearbyEntitiesInput { radius: 10 }))
+                .await,
             Err(BotError::Offline(_))
         ));
         assert!(matches!(

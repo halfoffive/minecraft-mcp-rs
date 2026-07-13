@@ -2,31 +2,16 @@
 //!
 //! Each tool validates parameters, checks online status and container state,
 //! and dispatches a [`BotCommand`] through the bot command channel.
-//!
-//! # Parameter structs
-//!
-//! We implement [`rmcp::schemars::JsonSchema`] manually using schemars v1.2.1
-//! API (bundled by rmcp 1.7.0) to avoid version conflicts with the project's
-//! schemars v0.8 dependency.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
 use crate::command_validate::validate_block_pos;
 use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::{BlockPos, BotCommand};
-
-// ── Helper ──────────────────────────────────────────────────────────────────
-
-fn schema_from_json(v: Value) -> rmcp::schemars::Schema {
-    let map: Map<String, Value> = v.as_object().cloned().unwrap_or_default();
-    rmcp::schemars::Schema::from(map)
-}
 
 // ── Container state helpers ─────────────────────────────────────────────────
 
@@ -51,39 +36,14 @@ fn check_container_not_open(state: &SharedState) -> Result<(), BotError> {
 // ── open_container ──────────────────────────────────────────────────────────
 
 /// Input for the `open_container` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct OpenContainerInput {
+    /// X coordinate of the container to open.
     pub x: i32,
+    /// Y coordinate of the container to open.
     pub y: i32,
+    /// Z coordinate of the container to open.
     pub z: i32,
-}
-
-impl rmcp::schemars::JsonSchema for OpenContainerInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("OpenContainerInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "x": {
-                    "type": "integer",
-                    "description": "X coordinate of the container to open"
-                },
-                "y": {
-                    "type": "integer",
-                    "description": "Y coordinate of the container to open"
-                },
-                "z": {
-                    "type": "integer",
-                    "description": "Z coordinate of the container to open"
-                }
-            },
-            "required": ["x", "y", "z"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `open_container` MCP tool.
@@ -118,37 +78,13 @@ pub async fn handle_open_container(
 // ── take_from_container ─────────────────────────────────────────────────────
 
 /// Input for the `take_from_container` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct TakeFromContainerInput {
+    /// Container slot index (0-based) to take items from.
     pub slot: u8,
+    /// Number of items to take (default 1).
+    #[schemars(range(min = 1, max = 64))]
     pub count: Option<u8>,
-}
-
-impl rmcp::schemars::JsonSchema for TakeFromContainerInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("TakeFromContainerInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "slot": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Container slot index (0-based) to take items from"
-                },
-                "count": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 64,
-                    "description": "Number of items to take (default 1)"
-                }
-            },
-            "required": ["slot"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `take_from_container` MCP tool.
@@ -186,37 +122,13 @@ pub async fn handle_take_from_container(
 // ── put_into_container ──────────────────────────────────────────────────────
 
 /// Input for the `put_into_container` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct PutIntoContainerInput {
+    /// Container slot index (0-based) to put items into.
     pub slot: u8,
+    /// Number of items to put (default 1).
+    #[schemars(range(min = 1, max = 64))]
     pub count: Option<u8>,
-}
-
-impl rmcp::schemars::JsonSchema for PutIntoContainerInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("PutIntoContainerInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "slot": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Container slot index (0-based) to put items into"
-                },
-                "count": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 64,
-                    "description": "Number of items to put (default 1)"
-                }
-            },
-            "required": ["slot"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `put_into_container` MCP tool.
@@ -254,22 +166,8 @@ pub async fn handle_put_into_container(
 // ── close_container ─────────────────────────────────────────────────────────
 
 /// Input for the `close_container` MCP tool (no parameters needed).
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct CloseContainerInput {}
-
-impl rmcp::schemars::JsonSchema for CloseContainerInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("CloseContainerInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        }))
-    }
-}
 
 /// Handle `close_container` MCP tool.
 ///

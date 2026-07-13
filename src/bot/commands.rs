@@ -19,6 +19,7 @@ use crate::error::BotError;
 use crate::state::SharedState;
 use crate::tool_select::find_tool_in_inventory;
 use crate::types::{ActAction, ActResult, BlockPos, BotCommand, BotResult, Direction, GameMode};
+use crate::utils::to_snake_case;
 
 // ═══════════════════════════════════════════════════════════════
 // BotActions trait — abstracts azalea Client for testability
@@ -280,25 +281,6 @@ pub(crate) fn item_kind_to_id(kind: azalea::registry::builtin::ItemKind) -> Stri
     to_snake_case(&format!("{kind:?}"))
 }
 
-/// Naive CamelCase → snake_case conversion.
-///
-/// Inserts `_` before each uppercase letter (except at the start) and
-/// lowercases the result. Sufficient for azalea registry variant names.
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + 4);
-    for (i, ch) in s.chars().enumerate() {
-        if ch.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.push(ch.to_ascii_lowercase());
-        } else {
-            result.push(ch);
-        }
-    }
-    result
-}
-
 // ═══════════════════════════════════════════════════════════════
 // Direction → unit vector mapping
 // ═══════════════════════════════════════════════════════════════
@@ -471,6 +453,7 @@ impl<B: BotActions> CommandExecutor<B> {
             BotCommand::SwitchHotbarSlot(slot) => self.handle_switch_hotbar_slot(slot),
             BotCommand::DropItem(slot, count) => self.handle_drop_item(slot, count),
             BotCommand::UseItem => self.handle_use_item(),
+            BotCommand::UseItemWithSlot(slot) => self.handle_use_item_with_slot(slot),
             BotCommand::EquipTool(tool) => self.handle_equip_tool(tool),
 
             // ── Container ─────────────────────────────────────────
@@ -593,6 +576,17 @@ impl<B: BotActions> CommandExecutor<B> {
 
     fn handle_break_block(&self, pos: BlockPos) -> Result<BotResult, BotError> {
         trace!(?pos, "BreakBlock");
+        // Fail fast if the chunk containing the block is not loaded yet.
+        let chunk_x = pos.x >> 4;
+        let chunk_z = pos.z >> 4;
+        let snapshot = self.state.read_snapshot();
+        if !snapshot
+            .chunk_summary
+            .iter()
+            .any(|(cx, cz)| *cx == chunk_x && *cz == chunk_z)
+        {
+            return Err(BotError::ChunkNotLoaded(pos));
+        }
         self.bot.mine_block(&pos);
         Ok(BotResult {
             success: true,
@@ -699,6 +693,18 @@ impl<B: BotActions> CommandExecutor<B> {
         })
     }
 
+    /// Atomically switch to a hotbar slot and use the held item.
+    ///
+    /// Both steps run within a single command dispatch so no other command
+    /// can interleave between them (important under HTTP transport
+    /// concurrency, where separate `SwitchHotbarSlot` + `UseItem` commands
+    /// could be reordered or interleaved with other clients' commands).
+    fn handle_use_item_with_slot(&self, slot: u8) -> Result<BotResult, BotError> {
+        trace!(slot, "UseItemWithSlot");
+        self.handle_switch_hotbar_slot(slot)?;
+        self.handle_use_item()
+    }
+
     fn handle_equip_tool(&self, tool: crate::types::ToolType) -> Result<BotResult, BotError> {
         trace!(?tool, "EquipTool");
         // `Hand` means "no specific tool needed" — nothing to equip.
@@ -759,6 +765,13 @@ impl<B: BotActions> CommandExecutor<B> {
 
     fn handle_take_from_container(&self, slot: u8, count: u8) -> Result<BotResult, BotError> {
         trace!(slot, count, "TakeFromContainer");
+        // Fail fast if the player inventory has no free slots. This prevents
+        // shift-clicking a container item that would be dropped or lost.
+        let snapshot = self.state.read_snapshot();
+        if snapshot.self_player.inventory.len() >= 36 {
+            return Err(BotError::InventoryFull);
+        }
+        drop(snapshot);
         // Best-effort: shift-click the given menu slot. For a container slot
         // this moves the whole stack into the player's inventory. `count` is
         // treated as a hint; partial moves require a pickup+place flow which
@@ -825,6 +838,24 @@ impl<B: BotActions> CommandExecutor<B> {
 
     fn handle_attack_entity(&self, entity_id: u32) -> Result<BotResult, BotError> {
         trace!(entity_id, "AttackEntity");
+        // Fail fast if the target entity is outside a reasonable attack reach.
+        // The snapshot may be slightly stale, so the threshold is generous.
+        const MAX_ATTACK_REACH: f64 = 6.0;
+        let snapshot = self.state.read_snapshot();
+        if let Some(entity) = snapshot.entities.iter().find(|e| e.id == entity_id) {
+            let dx = (entity.position.x - snapshot.self_player.position.x) as f64;
+            let dy = (entity.position.y - snapshot.self_player.position.y) as f64;
+            let dz = (entity.position.z - snapshot.self_player.position.z) as f64;
+            let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+            if distance > MAX_ATTACK_REACH {
+                return Err(BotError::TooFar {
+                    target: entity.position,
+                    current: snapshot.self_player.position,
+                    max_distance: MAX_ATTACK_REACH,
+                });
+            }
+        }
+        drop(snapshot);
         self.bot.attack_entity(entity_id)?;
         Ok(BotResult {
             success: true,
@@ -1998,10 +2029,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_break_block() {
-        let (executor, sender, _state, log) = make_executor();
+        let (executor, sender, state, log) = make_executor();
         let handle = spawn_executor(executor);
 
+        // Seed the chunk summary so the target block is considered loaded.
         let pos = BlockPos::new(10, 64, 20);
+        let chunk_x = pos.x >> 4;
+        let chunk_z = pos.z >> 4;
+        state.update_snapshot(crate::types::WorldSnapshot {
+            chunk_summary: vec![(chunk_x, chunk_z)],
+            ..Default::default()
+        });
+
         let result = send_and_await(&sender, BotCommand::BreakBlock(pos)).await;
         assert!(result.is_ok());
 

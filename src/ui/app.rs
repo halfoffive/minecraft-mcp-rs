@@ -39,6 +39,12 @@ pub struct MinecraftApp {
     /// can process commands from the MCP server while connected. The receiver
     /// is leased out to the command executor on `Event::Spawn`.
     command_receiver: Arc<std::sync::Mutex<Option<BotCommandReceiver>>>,
+    /// Most recent egui context, refreshed each frame in `logic` so the bot
+    /// connection thread can call `request_repaint` and have the UI refresh
+    /// immediately on state changes (spawn, disconnect, death, etc.) instead
+    /// of waiting for the 1-second fallback repaint. `None` until the first
+    /// frame has run.
+    egui_ctx: Option<egui::Context>,
     /// Handle to the bot-connection OS thread (if running). Joined on Drop
     /// so the process exits cleanly when the window closes.
     bot_thread: Option<JoinHandle<()>>,
@@ -151,6 +157,7 @@ impl MinecraftApp {
             state,
             sender,
             command_receiver,
+            egui_ctx: None,
             bot_thread: None,
             mcp_handle: Some(mcp_handle),
             edit_config: None,
@@ -176,6 +183,7 @@ impl MinecraftApp {
         let state = Arc::clone(&self.state);
         let receiver = Arc::clone(&self.command_receiver);
         let sender = self.sender.clone();
+        let egui_ctx = self.egui_ctx.clone();
 
         let handle = std::thread::Builder::new()
             .name("bot-connection".into())
@@ -185,7 +193,7 @@ impl MinecraftApp {
                 let manager = ConnectionManager::new(config, Arc::clone(&state));
 
                 rt.block_on(async move {
-                    if let Err(e) = manager.connect(receiver, None, sender).await {
+                    if let Err(e) = manager.connect(receiver, egui_ctx, sender).await {
                         tracing::error!(error = %e, "bot connection task failed");
                     }
                 });
@@ -257,6 +265,12 @@ impl App for MinecraftApp {
     /// Called before each `ui` frame; used for non-painting logic such as
     /// requesting repaints and lazy-initialising edit buffers.
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Cache the egui context so `connect_bot` can hand a real `Context`
+        // to the bot connection thread, which in turn injects it into
+        // `BotState` so the event handlers can call `request_repaint` for
+        // immediate UI refreshes on spawn / disconnect / death.
+        self.egui_ctx = Some(ctx.clone());
+
         // Request a repaint once per second as a fallback so the uptime
         // counter stays fresh. State-change-driven repaints (via
         // `ctx.request_repaint()` from the event handler) cover the rest.

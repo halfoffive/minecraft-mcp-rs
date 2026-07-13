@@ -755,6 +755,7 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
         BotCommand::SwitchHotbarSlot(0),
         BotCommand::DropItem(0, 1),
         BotCommand::UseItem,
+        BotCommand::UseItemWithSlot(0),
         BotCommand::EquipTool(ToolType::Pickaxe),
         BotCommand::OpenContainer(BlockPos::new(0, 64, 0)),
         BotCommand::TakeFromContainer(0, 1),
@@ -770,12 +771,22 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
         BotCommand::QuerySelfInfo,
         BotCommand::QueryInventory,
         BotCommand::QueryChunkSummary,
+        // ── v2 foundation: extended capabilities ──────────────────
+        BotCommand::SmartMove(BlockPos::new(0, 64, 0)),
+        BotCommand::FlyTo(BlockPos::new(0, 64, 0)),
+        BotCommand::CollectItems(5),
+        BotCommand::QueryServerInfo,
+        BotCommand::QueryChatHistory,
+        BotCommand::QueryWorldView(4),
+        BotCommand::Act(ActAction::Move {
+            target: BlockPos::new(0, 64, 0),
+        }),
     ];
 
     assert_eq!(
         commands.len(),
-        25,
-        "should have exactly 25 BotCommand variants"
+        33,
+        "should have exactly 33 BotCommand variants (including v2 + UseItemWithSlot)"
     );
 
     for cmd in commands {
@@ -789,6 +800,37 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
         !json.to_lowercase().contains("craft_item"),
         "BotCommand serialization must not contain craft_item"
     );
+
+    // Verify all 6 ActAction sub-variants can be serialized into BotCommand::Act
+    let act_variants = vec![
+        ActAction::Move {
+            target: BlockPos::new(1, 64, 1),
+        },
+        ActAction::SmartMove {
+            target: BlockPos::new(2, 64, 2),
+        },
+        ActAction::Fly {
+            target: BlockPos::new(3, 64, 3),
+        },
+        ActAction::Mine {
+            block_pos: BlockPos::new(4, 64, 4),
+        },
+        ActAction::Attack { entity_id: 7 },
+        ActAction::CollectItems { radius: 8 },
+    ];
+    assert_eq!(
+        act_variants.len(),
+        6,
+        "ActAction should have exactly 6 sub-variants"
+    );
+    for action in act_variants {
+        let cmd = BotCommand::Act(action);
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(
+            !json.to_lowercase().contains("craft_item"),
+            "Act serialization must not contain craft_item"
+        );
+    }
 
     drop(sender);
     let variants = responder.await.expect("responder should finish");

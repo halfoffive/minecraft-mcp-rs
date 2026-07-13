@@ -17,102 +17,27 @@ use crate::types::{BotCommand, GameMode};
 
 // ---------------------------------------------------------------------------
 // Parameter structs (used by rmcp #[tool] macro in server.rs)
-//
-// We implement rmcp::schemars::JsonSchema manually because the project pins
-// schemars v0.8 for existing data types, but rmcp 1.7 depends on schemars
-// v1.2.1.  Derive macros would reference the wrong crate version.
 // ---------------------------------------------------------------------------
 
 /// Input for the `send_chat` tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct SendChatInput {
     /// The message to send to the server chat.
     pub message: String,
 }
 
-impl rmcp::schemars::JsonSchema for SendChatInput {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "SendChatInput".into()
-    }
-
-    fn json_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        rmcp::schemars::Schema::from(
-            json!({
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "The message to send to the server chat"
-                    }
-                },
-                "required": ["message"],
-                "additionalProperties": false
-            })
-            .as_object()
-            .unwrap()
-            .clone(),
-        )
-    }
-}
-
 /// Input for the `execute_command` tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct ExecuteCommandInput {
     /// The command to execute (with or without leading `/`).
     pub command: String,
 }
 
-impl rmcp::schemars::JsonSchema for ExecuteCommandInput {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "ExecuteCommandInput".into()
-    }
-
-    fn json_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        rmcp::schemars::Schema::from(
-            json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The command to execute (with or without leading /)"
-                    }
-                },
-                "required": ["command"],
-                "additionalProperties": false
-            })
-            .as_object()
-            .unwrap()
-            .clone(),
-        )
-    }
-}
-
 /// Input for the `set_game_mode` tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct SetGameModeInput {
     /// The game mode to set. One of: survival, creative, adventure, spectator.
     pub mode: String,
-}
-
-impl rmcp::schemars::JsonSchema for SetGameModeInput {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "SetGameModeInput".into()
-    }
-
-    fn json_schema(_: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        rmcp::schemars::Schema::from(json!({
-            "type": "object",
-            "properties": {
-                "mode": {
-                    "type": "string",
-                    "description": "Game mode to set. One of: survival, creative, adventure, spectator",
-                    "enum": ["survival", "creative", "adventure", "spectator"]
-                }
-            },
-            "required": ["mode"],
-            "additionalProperties": false
-        }).as_object().unwrap().clone())
-    }
 }
 
 // ---------------------------------------------------------------------------

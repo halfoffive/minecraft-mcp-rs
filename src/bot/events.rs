@@ -1,7 +1,7 @@
 //! Event processing from the Minecraft client (chat, move, damage, etc.).
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use azalea::ecs::component::Component;
@@ -22,11 +22,13 @@ use crate::types::{BlockPos, EntityEntry};
 // ---------------------------------------------------------------------------
 
 /// Pre-initialized shared state to inject into [`BotState`] before the bot
-/// starts. Set by [`crate::bot::connection::ConnectionManager::connect`].
+/// starts. Set by [`crate::bot::connection::ConnectionManager::connect`] and
+/// cleared on disconnect so a subsequent connection (or a test) sees a clean
+/// slot.
 ///
 /// If not set, [`BotState::default`] falls back to creating an isolated
 /// [`SharedState`] (useful for unit tests).
-pub(crate) static INJECTED_SHARED_STATE: OnceLock<Arc<SharedState>> = OnceLock::new();
+pub(crate) static INJECTED_SHARED_STATE: Mutex<Option<Arc<SharedState>>> = Mutex::new(None);
 
 /// Pre-initialized command receiver slot to inject into [`BotState`].
 ///
@@ -34,11 +36,14 @@ pub(crate) static INJECTED_SHARED_STATE: OnceLock<Arc<SharedState>> = OnceLock::
 /// [`ReceiverLease::take`] it on `Event::Spawn` and the command executor can
 /// run with it; when the executor is aborted the lease returns the receiver
 /// to this slot, allowing a future `Spawn` (reconnect) to re-acquire it.
-/// Set by [`crate::bot::connection::ConnectionManager::connect`].
-pub(crate) static INJECTED_COMMAND_RECEIVER: OnceLock<ReceiverSlot> = OnceLock::new();
+/// Set by [`crate::bot::connection::ConnectionManager::connect`] and cleared
+/// on disconnect.
+pub(crate) static INJECTED_COMMAND_RECEIVER: Mutex<Option<ReceiverSlot>> = Mutex::new(None);
 
 /// Pre-initialized egui context to inject into [`BotState`] (optional).
-pub(crate) static INJECTED_EGUI_CTX: OnceLock<Option<egui::Context>> = OnceLock::new();
+/// Set by [`crate::bot::connection::ConnectionManager::connect`] and cleared
+/// on disconnect.
+pub(crate) static INJECTED_EGUI_CTX: Mutex<Option<egui::Context>> = Mutex::new(None);
 
 /// Pre-initialized command sender to inject into [`BotState`] (optional).
 ///
@@ -46,8 +51,9 @@ pub(crate) static INJECTED_EGUI_CTX: OnceLock<Option<egui::Context>> = OnceLock:
 /// `Act::Mine` delegating to `CompoundOpExecutor` which sends `MoveTo` /
 /// `BreakBlock` back through the channel). `None` in unit tests where the
 /// executor's `handle_act` falls back to fire-and-forget behaviour.
-/// Set by [`crate::bot::connection::ConnectionManager::connect`].
-pub(crate) static INJECTED_COMMAND_SENDER: OnceLock<Option<BotCommandSender>> = OnceLock::new();
+/// Set by [`crate::bot::connection::ConnectionManager::connect`] and cleared
+/// on disconnect.
+pub(crate) static INJECTED_COMMAND_SENDER: Mutex<Option<BotCommandSender>> = Mutex::new(None);
 
 /// Pre-initialized snapshot interval to inject into [`BotState`].
 ///
@@ -99,18 +105,29 @@ pub struct BotState {
 impl Default for BotState {
     fn default() -> Self {
         let shared_state = INJECTED_SHARED_STATE
-            .get()
-            .cloned()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
             .unwrap_or_else(|| Arc::new(SharedState::new(crate::config::AppConfig::default())));
 
-        let command_receiver = INJECTED_COMMAND_RECEIVER.get().cloned().unwrap_or_else(|| {
-            let (_, receiver) = crate::channel::create_command_channel(1);
-            Arc::new(Mutex::new(Some(receiver)))
-        });
+        let command_receiver = INJECTED_COMMAND_RECEIVER
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_else(|| {
+                let (_, receiver) = crate::channel::create_command_channel(1);
+                Arc::new(Mutex::new(Some(receiver)))
+            });
 
-        let egui_ctx = INJECTED_EGUI_CTX.get().cloned().flatten();
+        let egui_ctx = INJECTED_EGUI_CTX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
-        let command_sender = INJECTED_COMMAND_SENDER.get().cloned().flatten();
+        let command_sender = INJECTED_COMMAND_SENDER
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         let snapshot_interval_ms = {
             let v = INJECTED_SNAPSHOT_INTERVAL_MS.load(Ordering::Relaxed);
@@ -283,6 +300,21 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     // prevents the per-tick `spawn_local` handle list from growing forever
     // across reconnects.
     abort_and_clear_tick_tasks(&state.tick_tasks).await;
+
+    // Clear the injected dependencies so the next connection (or a test in
+    // the same process) starts from a clean slot. With `OnceLock` the first
+    // `set` would silently win forever, leaking state across reconnects and
+    // between tests; `Mutex<Option<_>>` lets us reset here.
+    *INJECTED_SHARED_STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+    *INJECTED_COMMAND_RECEIVER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+    *INJECTED_EGUI_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *INJECTED_COMMAND_SENDER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
 
     // Tell azalea to end the client so ClientBuilder::start returns and the
     // connection loop can retry. Without this the bot thread may hang waiting

@@ -69,7 +69,8 @@ impl CompoundOpExecutor {
                         None
                     } else {
                         let item_id = item.get("item_id")?.as_str()?.to_string();
-                        let count = item.get("count")?.as_u64()? as u8;
+                        let count_raw = item.get("count")?.as_u64()?;
+                        let count = u8::try_from(count_raw).ok()?;
                         Some(ItemStack { item_id, count })
                     }
                 })
@@ -332,7 +333,7 @@ impl CompoundOpExecutor {
         let slot = inventory
             .iter()
             .position(|s| s.as_ref().is_some_and(|item| item.item_id == block_type))
-            .map(|i| i as u8);
+            .and_then(|i| u8::try_from(i).ok());
 
         if let Some(s) = slot {
             if s > 8 {

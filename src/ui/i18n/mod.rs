@@ -26,7 +26,7 @@
 //! 1. Add a variant to [`Language`] (and update [`Language::default`] if you
 //!    want to change the default).
 //! 2. Create `xx.rs` with a `lookup` function matching the same arm order as
-//!    [`en::lookup`].
+//!    `en::lookup`.
 //! 3. Add `pub mod xx;` below.
 //! 4. Add a dispatch arm in [`tr`].
 
@@ -47,10 +47,10 @@ pub mod zh_cn;
 /// choice survives restarts.  `Default` is [`Language::En`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub enum Language {
-    /// English (US) — the canonical source strings in [`en::lookup`].
+    /// English (US) — the canonical source strings in `en::lookup`.
     #[default]
     En,
-    /// Simplified Chinese (简体中文) — see [`zh_cn::lookup`].
+    /// Simplified Chinese (简体中文) — see `zh_cn::lookup`.
     ZhCn,
 }
 
@@ -60,8 +60,8 @@ pub enum Language {
 
 /// A translatable UI string identifier.
 ///
-/// Each variant maps to exactly one English string in [`en::lookup`] and one
-/// Simplified Chinese string in [`zh_cn::lookup`].  Translate via [`tr`].
+/// Each variant maps to exactly one English string in `en::lookup` and one
+/// Simplified Chinese string in `zh_cn::lookup`.  Translate via [`tr`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextKey {
     // ── Top-level / section headings ───────────────────────────────
@@ -230,7 +230,7 @@ static CURRENT: RwLock<Language> = RwLock::new(Language::En);
 
 /// Read the currently-active UI language.
 ///
-/// Acquires a short-lived read lock on [`CURRENT`].  Cheap to call every
+/// Acquires a short-lived read lock on `CURRENT`.  Cheap to call every
 /// frame from the egui render loop.
 pub fn current() -> Language {
     // The lock can only be poisoned if a writer panicked while holding it;
@@ -242,7 +242,7 @@ pub fn current() -> Language {
 
 /// Set the currently-active UI language.
 ///
-/// Acquires a short-lived write lock on [`CURRENT`].  Subsequent calls to
+/// Acquires a short-lived write lock on `CURRENT`.  Subsequent calls to
 /// [`tr`] will use the new language.
 pub fn set(lang: Language) {
     // Poisoning recovery: a previously-panicked writer would leave the lock
@@ -257,7 +257,7 @@ pub fn set(lang: Language) {
 
 /// Translate `key` using the currently-active language.
 ///
-/// Dispatches to [`en::lookup`] or [`zh_cn::lookup`].  Each language's
+/// Dispatches to `en::lookup` or `zh_cn::lookup`.  Each language's
 /// `lookup` is total (uses a catch-all `_ =>` arm that calls [`key_name`]),
 /// so this function can **never panic** — even if a new [`TextKey`] variant
 /// is added before every language file is updated.

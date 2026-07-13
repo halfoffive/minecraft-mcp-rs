@@ -93,11 +93,21 @@ impl ConnectionManager {
         command_sender: BotCommandSender,
     ) -> eyre::Result<()> {
         // Inject dependencies so BotState::default() picks them up when
-        // azalea initializes the state internally via Default.
-        let _ = events::INJECTED_SHARED_STATE.set(Arc::clone(&self.state));
-        let _ = events::INJECTED_COMMAND_RECEIVER.set(Arc::clone(&command_receiver));
-        let _ = events::INJECTED_EGUI_CTX.set(egui_ctx.clone());
-        let _ = events::INJECTED_COMMAND_SENDER.set(Some(command_sender));
+        // azalea initializes the state internally via Default. Using
+        // `Mutex<Option<_>>` (rather than `OnceLock`) so the values can be
+        // refreshed on each reconnect and cleared on disconnect.
+        *events::INJECTED_SHARED_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&self.state));
+        *events::INJECTED_COMMAND_RECEIVER
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&command_receiver));
+        *events::INJECTED_EGUI_CTX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = egui_ctx.clone();
+        *events::INJECTED_COMMAND_SENDER
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(command_sender);
         events::INJECTED_SNAPSHOT_INTERVAL_MS.store(
             self.config.snapshot_interval_ms,
             std::sync::atomic::Ordering::Relaxed,
