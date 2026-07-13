@@ -2,59 +2,25 @@
 //!
 //! Each tool validates inputs, checks online status, and dispatches a
 //! [`BotCommand`] through the bot command channel.
-//!
-//! # Parameter structs
-//!
-//! We implement [`rmcp::schemars::JsonSchema`] manually using schemars v1.2.1
-//! API (bundled by rmcp 1.7.0) to avoid version conflicts with the project's
-//! schemars v0.8 dependency.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 
 use crate::channel::BotCommandSender;
 use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::{BotCommand, ToolType};
 
-// ── Helper ──────────────────────────────────────────────────────────────────
-
-fn schema_from_json(v: Value) -> rmcp::schemars::Schema {
-    let map: Map<String, Value> = v.as_object().cloned().unwrap_or_default();
-    rmcp::schemars::Schema::from(map)
-}
-
 // ── switch_hotbar_slot ─────────────────────────────────────────────────────
 
 /// Input for the `switch_hotbar_slot` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct SwitchHotbarSlotInput {
+    /// Hotbar slot to activate (0-8).
+    #[schemars(range(min = 0, max = 8))]
     pub slot: u8,
-}
-
-impl rmcp::schemars::JsonSchema for SwitchHotbarSlotInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("SwitchHotbarSlotInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "slot": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 8,
-                    "description": "Hotbar slot to activate (0-8)"
-                }
-            },
-            "required": ["slot"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `switch_hotbar_slot` MCP tool.
@@ -86,38 +52,14 @@ pub async fn handle_switch_hotbar_slot(
 // ── drop_item ──────────────────────────────────────────────────────────────
 
 /// Input for the `drop_item` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct DropItemInput {
+    /// Inventory slot to drop from (0-35).
+    #[schemars(range(min = 0, max = 35))]
     pub slot: u8,
+    /// Number of items to drop (default 1).
+    #[schemars(range(min = 1, max = 64))]
     pub count: Option<u8>,
-}
-
-impl rmcp::schemars::JsonSchema for DropItemInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("DropItemInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "slot": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 35,
-                    "description": "Inventory slot to drop from (0-35)"
-                },
-                "count": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 64,
-                    "description": "Number of items to drop (default 1)"
-                }
-            },
-            "required": ["slot"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `drop_item` MCP tool.
@@ -155,30 +97,11 @@ pub async fn handle_drop_item(
 // ── use_item ───────────────────────────────────────────────────────────────
 
 /// Input for the `use_item` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct UseItemInput {
+    /// Optional hotbar slot (0-8). Uses currently held item if omitted.
+    #[schemars(range(min = 0, max = 8))]
     pub item_slot: Option<u8>,
-}
-
-impl rmcp::schemars::JsonSchema for UseItemInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("UseItemInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "item_slot": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 8,
-                    "description": "Optional hotbar slot (0-8). Uses currently held item if omitted."
-                }
-            },
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `use_item` MCP tool.
@@ -203,22 +126,13 @@ pub async fn handle_use_item(
         ));
     }
 
-    // Select the requested hotbar slot first so the held item matches.
-    if let Some(slot) = input.item_slot {
-        match sender
-            .send_command(BotCommand::SwitchHotbarSlot(slot))
-            .await
-        {
-            Ok(r) => {
-                if !r.success {
-                    return Err(BotError::Internal(r.message));
-                }
-            }
-            Err(e) => return Err(BotError::Internal(format!("Command failed: {e}"))),
-        }
-    }
-
-    let cmd = BotCommand::UseItem;
+    // When a slot is requested, send a single atomic UseItemWithSlot command
+    // so the switch + use cannot be interleaved with other commands under
+    // HTTP transport concurrency. Without a slot, fall back to UseItem.
+    let cmd = match input.item_slot {
+        Some(slot) => BotCommand::UseItemWithSlot(slot),
+        None => BotCommand::UseItem,
+    };
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
@@ -229,35 +143,12 @@ pub async fn handle_use_item(
 // ── equip_tool ─────────────────────────────────────────────────────────────
 
 /// Input for the `equip_tool` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct EquipToolInput {
+    /// Tool type. One of: pickaxe, axe, shovel, hoe, sword, shears, hand.
     pub tool_type: String,
+    /// Optional material tier (e.g. diamond, netherite, iron, stone, wood, gold).
     pub material_preference: Option<String>,
-}
-
-impl rmcp::schemars::JsonSchema for EquipToolInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("EquipToolInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "tool_type": {
-                    "type": "string",
-                    "description": "Tool type. One of: pickaxe, axe, shovel, hoe, sword, shears, hand",
-                    "enum": ["pickaxe", "axe", "shovel", "hoe", "sword", "shears", "hand"]
-                },
-                "material_preference": {
-                    "type": "string",
-                    "description": "Optional material tier (e.g. diamond, netherite, iron, stone, wood, gold)"
-                }
-            },
-            "required": ["tool_type"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Parse a tool type string into a [`ToolType`] (case-insensitive).
@@ -316,31 +207,12 @@ pub async fn handle_equip_tool(
 // ── collect_items ──────────────────────────────────────────────────────────
 
 /// Input for the `collect_items` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct CollectItemsInput {
+    /// Pickup radius in blocks (1-64). The bot walks toward dropped item
+    /// entities within this radius.
+    #[schemars(range(min = 1, max = 64))]
     pub radius: u32,
-}
-
-impl rmcp::schemars::JsonSchema for CollectItemsInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("CollectItemsInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "radius": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 64,
-                    "description": "Pickup radius in blocks (1-64). The bot walks toward dropped item entities within this radius."
-                }
-            },
-            "required": ["radius"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `collect_items` MCP tool.

@@ -2,40 +2,30 @@
 //!
 //! The `act` tool accepts an [`ActAction`] enum and dispatches it through the
 //! bot command channel as [`BotCommand::Act`]. The bot layer executes the
-//! action and returns a serialised [`ActResult`] (carrying nearby blocks,
+//! action and returns a serialised [`crate::types::ActResult`] (carrying nearby blocks,
 //! entities, and self info) so an LLM can iterate: act → observe → decide.
 //!
 //! # Parameter structs
 //!
-//! [`ActAction`] already derives `schemars::JsonSchema` in `types.rs`. Because
-//! the project and rmcp share a single schemars crate instance (1.2.1 — see
-//! `Cargo.lock`), the derived trait is the same as `rmcp::schemars::JsonSchema`,
-//! so we can derive the schema on [`ActInput`] directly instead of implementing
-//! it by hand.
+//! [`ActAction`] already derives `schemars::JsonSchema` in `types.rs`, and the
+//! project shares a single schemars crate instance with rmcp, so we can derive
+//! the schema on [`ActInput`] directly.
 
 use std::sync::Arc;
 
-use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
 use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::{ActAction, BotCommand};
 
-// ── Helper ──────────────────────────────────────────────────────────────────
-
-fn schema_map_from_json(v: Value) -> Map<String, Value> {
-    v.as_object().cloned().unwrap_or_default()
-}
-
 // ── act ─────────────────────────────────────────────────────────────────────
 
 /// Input for the unified `act` MCP tool.
 ///
 /// Wraps a single [`ActAction`] describing the action to execute.
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ActInput {
     /// The action to execute. One of: `move`, `smart_move`, `fly`, `mine`,
     /// `attack`, `collect_items`.
@@ -68,138 +58,14 @@ pub async fn handle_act(
     }
 }
 
-// ── Tool description constant ───────────────────────────────────────────────
-
-/// Description used by the `act` tool registration in `server.rs`.
-pub const ACT_DESCRIPTION: &str = "Unified action tool for iterative mining/exploration loops. \
-    Executes one action (move, smart_move, fly, mine, attack, collect_items) and returns the \
-    action result plus nearby blocks, entities, and self info. Designed for models to call \
-    repeatedly: act → observe surroundings → decide next act.";
-
-/// Builder function returning the rmcp `Tool` descriptor for `act`.
-///
-/// NOTE: The `act` tool is registered in `server.rs` via the `#[tool]` macro,
-/// so this builder is provided for external introspection / testing only.
-pub fn act_tool() -> rmcp::model::Tool {
-    let schema = schema_map_from_json(json!({
-        "type": "object",
-        "properties": {
-            "action": {
-                "$ref": "#/definitions/ActAction",
-                "description": "The action to execute (move/smart_move/fly/mine/attack/collect_items)"
-            }
-        },
-        "required": ["action"],
-        "additionalProperties": false,
-        "definitions": {
-            "BlockPos": {
-                "type": "object",
-                "properties": {
-                    "x": { "type": "integer" },
-                    "y": { "type": "integer" },
-                    "z": { "type": "integer" }
-                },
-                "required": ["x", "y", "z"]
-            },
-            "ActAction": {
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "title": "Move",
-                        "properties": {
-                            "Move": {
-                                "type": "object",
-                                "properties": {
-                                    "target": { "$ref": "#/definitions/BlockPos" }
-                                },
-                                "required": ["target"]
-                            }
-                        },
-                        "required": ["Move"]
-                    },
-                    {
-                        "type": "object",
-                        "title": "SmartMove",
-                        "properties": {
-                            "SmartMove": {
-                                "type": "object",
-                                "properties": {
-                                    "target": { "$ref": "#/definitions/BlockPos" }
-                                },
-                                "required": ["target"]
-                            }
-                        },
-                        "required": ["SmartMove"]
-                    },
-                    {
-                        "type": "object",
-                        "title": "Fly",
-                        "properties": {
-                            "Fly": {
-                                "type": "object",
-                                "properties": {
-                                    "target": { "$ref": "#/definitions/BlockPos" }
-                                },
-                                "required": ["target"]
-                            }
-                        },
-                        "required": ["Fly"]
-                    },
-                    {
-                        "type": "object",
-                        "title": "Mine",
-                        "properties": {
-                            "Mine": {
-                                "type": "object",
-                                "properties": {
-                                    "block_pos": { "$ref": "#/definitions/BlockPos" }
-                                },
-                                "required": ["block_pos"]
-                            }
-                        },
-                        "required": ["Mine"]
-                    },
-                    {
-                        "type": "object",
-                        "title": "Attack",
-                        "properties": {
-                            "Attack": {
-                                "type": "object",
-                                "properties": {
-                                    "entity_id": { "type": "integer", "minimum": 0 }
-                                },
-                                "required": ["entity_id"]
-                            }
-                        },
-                        "required": ["Attack"]
-                    },
-                    {
-                        "type": "object",
-                        "title": "CollectItems",
-                        "properties": {
-                            "CollectItems": {
-                                "type": "object",
-                                "properties": {
-                                    "radius": { "type": "integer", "minimum": 1 }
-                                },
-                                "required": ["radius"]
-                            }
-                        },
-                        "required": ["CollectItems"]
-                    }
-                ]
-            }
-        }
-    }));
-
-    rmcp::model::Tool::new("act", ACT_DESCRIPTION, schema)
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
+
+    use rmcp::schemars::JsonSchema;
+    use serde_json::Value;
 
     use super::*;
     use crate::channel::create_command_channel;
@@ -349,21 +215,6 @@ mod tests {
                 .unwrap_or(false)
         );
         assert!(json["message"].as_str().unwrap().contains("CollectItems"));
-    }
-
-    // ── act_tool builder ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_act_tool_builder() {
-        let tool = act_tool();
-        assert_eq!(tool.name.as_ref(), "act");
-        assert!(tool.description.is_some());
-        assert!(
-            tool.description
-                .as_ref()
-                .unwrap()
-                .contains("Unified action tool")
-        );
     }
 
     // ── ActInput schema ────────────────────────────────────────────────────

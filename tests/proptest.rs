@@ -4,11 +4,11 @@
 //! randomly-generated inputs.
 
 use minecraft_mcp_rs::block_data::{
-    ItemStack, MATERIAL_PRIORITY, MATERIAL_TIER_SPEED, best_tool_for_block,
-    find_best_tool_in_inventory, material_from_item_name,
+    ItemStack, MATERIAL_PRIORITY, MATERIAL_TIER_SPEED, best_tool_for_block, material_from_item_name,
 };
 use minecraft_mcp_rs::command_validate::validate_coordinates;
 use minecraft_mcp_rs::mining_calc::calculate_mine_time;
+use minecraft_mcp_rs::tool_select::find_tool_in_inventory;
 use minecraft_mcp_rs::types::{MaterialTier, ToolType};
 use proptest::prelude::*;
 
@@ -128,7 +128,7 @@ fn block_type_strategy() -> impl Strategy<Value = String> {
 
 proptest! {
     /// Property: For any inventory and any block type, the tool selected by
-    /// `find_best_tool_in_inventory` (if any) matches the requested tool type.
+    /// `find_tool_in_inventory` (if any) matches the requested tool type.
     #[test]
     fn prop_tool_selection_matches_type(
         inventory in inventory_strategy(),
@@ -139,7 +139,7 @@ proptest! {
         // If the expected tool is Hand, there is no "best tool" to find.
         prop_assume!(expected_tool != ToolType::Hand);
 
-        let best_slot = find_best_tool_in_inventory(&expected_tool, &inventory);
+        let best_slot = find_tool_in_inventory(&expected_tool, &inventory).map(|(_, slot)| slot);
 
         if let Some(slot) = best_slot {
             let slot = slot as usize;
@@ -176,7 +176,7 @@ proptest! {
         // Skip Hand since there's no tier comparison for it
         prop_assume!(tool_type != ToolType::Hand);
 
-        let best_slot = find_best_tool_in_inventory(&tool_type, &inventory);
+        let best_slot = find_tool_in_inventory(&tool_type, &inventory).map(|(_, slot)| slot);
 
         if let Some(best_slot) = best_slot {
             let best_stack = inventory[best_slot as usize].as_ref().unwrap();

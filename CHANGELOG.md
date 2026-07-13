@@ -94,6 +94,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **M13:** Bearer token comparison now uses constant-time
   `constant_time_token_eq` (byte-wise OR accumulator), closing the timing
   side-channel.
+- **R1:** `get_nearby_blocks` / `get_nearby_entities` are now parameterised
+  with `radius` (and an optional `filter_type` for blocks), restoring the
+  original API contract instead of the previous hardcoded `radius=10`.
+- **R2:** `break_block(use_best_tool=true)` now delegates to the full
+  compound mine flow by sending `BotCommand::Act(ActAction::Mine)`, matching
+  the behaviour of `act(Mine)`.
+- **R3:** Introduced `BotCommand::UseItemWithSlot(u8)` so the bot executor
+  can atomically switch hotbar slot and use the item, eliminating the race
+  where concurrent `use_item` calls interleaved their `SwitchHotbarSlot`
+  and `UseItem` commands.
+- **R4:** `WalkDirection.distance` is validated to `1..=1000` and the MCP
+  JSON schema now advertises `"maximum": 1000`.
+- **R5:** `AttackEntity.entity_id` is validated to `<= i32::MAX` before the
+  `u32 -> i32` cast used by azalea lookups.
+- **R6:** `query_inventory` and `execute_place_block` now bounds-check
+  values before casting to `u8`, returning clear errors instead of silently
+  truncating.
+- **R7:** `encode_png` propagates PNG encoder errors via `BotError::Internal`
+  instead of panicking with `.expect()`.
+- **R8:** `AppConfig::validate()` now rejects `mc_port == 0` and
+  `mcp_port == 0`.
+- **R9:** Integration test `test_all_bot_command_variants_exist_no_craft_item`
+  now enumerates all 33 `BotCommand` variants (including the new
+  `UseItemWithSlot`) and all 6 `ActAction` sub-variants.
+- **R10:** Previously-unused `BotError` variants are now returned from the
+  relevant handlers: `ChunkNotLoaded` from `handle_break_block`,
+  `TooFar` from `handle_attack_entity`, and `InventoryFull` from
+  `handle_take_from_container`. `ConnectionFailed` remains a typed error
+  for future connection-layer use.
+- **R11:** The four `OnceLock` injection globals in `bot/events.rs`
+  (`INJECTED_SHARED_STATE`, `INJECTED_COMMAND_RECEIVER`, `INJECTED_EGUI_CTX`,
+  `INJECTED_COMMAND_SENDER`) are now `Mutex<Option<T>>` and are cleared in
+  `handle_disconnect`, so reconnects and tests get fresh injection state.
+- **R12:** `INJECTED_EGUI_CTX` is now populated with the live egui
+  `Context` from `eframe::Frame`, allowing bot event handlers to request
+  immediate UI repaints.
+
+### Added
+
+- `BotCommand::UseItemWithSlot(u8)` — atomic switch-hotbar-slot-and-use-item
+  command.
+- `src/utils.rs` common utility module, currently exporting
+  `to_snake_case` used by the command executor and snapshot updater.
+
+### Changed
+
+- Replaced hand-written `impl rmcp::schemars::JsonSchema` in the seven MCP
+  tool modules (`tools_query`, `tools_movement`, `tools_block`, `tools_item`,
+  `tools_container`, `tools_combat`, `tools_chat`) with
+  `#[derive(Deserialize, rmcp::schemars::JsonSchema)]`. This removes a source
+  of schema drift when new fields are added.
+- `block_data::find_best_tool_in_inventory` is now `#[deprecated]` and
+  delegates to `tool_select::find_tool_in_inventory`; callers and tests were
+  updated to use the canonical implementation.
+
+### Removed
+
+- Dead `act_tool()` builder function and its `test_act_tool_builder` unit
+  test. Production tools are registered via the `#[tool]` macro + derive.
 
 ### Known Issues
 

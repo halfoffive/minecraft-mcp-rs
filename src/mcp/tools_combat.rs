@@ -3,58 +3,24 @@
 //! Each tool validates parameters, checks online status (and entity existence
 //! for attacks), then dispatches a [`BotCommand`] through the bot command
 //! channel.
-//!
-//! # Parameter structs
-//!
-//! We implement [`rmcp::schemars::JsonSchema`] manually using schemars v1.2.1
-//! API (bundled by rmcp 1.7.0) to avoid version conflicts with the project's
-//! schemars v0.8 dependency.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 
 use crate::channel::BotCommandSender;
 use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::BotCommand;
 
-// ── Helper ──────────────────────────────────────────────────────────────────
-
-fn schema_from_json(v: Value) -> rmcp::schemars::Schema {
-    let map: Map<String, Value> = v.as_object().cloned().unwrap_or_default();
-    rmcp::schemars::Schema::from(map)
-}
-
 // ── attack_entity ───────────────────────────────────────────────────────────
 
 /// Input for the `attack_entity` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct AttackEntityInput {
+    /// The Minecraft entity ID to attack.
     pub entity_id: u32,
-}
-
-impl rmcp::schemars::JsonSchema for AttackEntityInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("AttackEntityInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "entity_id": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "The Minecraft entity ID to attack"
-                }
-            },
-            "required": ["entity_id"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `attack_entity` MCP tool.
@@ -95,29 +61,10 @@ pub async fn handle_attack_entity(
 // ── shield_block ────────────────────────────────────────────────────────────
 
 /// Input for the `shield_block` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct ShieldBlockInput {
+    /// True to raise shield (start blocking), false to lower shield (stop blocking).
     pub blocking: bool,
-}
-
-impl rmcp::schemars::JsonSchema for ShieldBlockInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("ShieldBlockInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "blocking": {
-                    "type": "boolean",
-                    "description": "True to raise shield (start blocking), false to lower shield (stop blocking)"
-                }
-            },
-            "required": ["blocking"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `shield_block` MCP tool.

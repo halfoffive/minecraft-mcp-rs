@@ -1,6 +1,6 @@
 //! Simplified Chinese (简体中文) translations for the UI i18n layer.
 //!
-//! Mirrors [`super::en::lookup`] arm-for-arm with Simplified Chinese values.
+//! Mirrors `super::en::lookup` arm-for-arm with Simplified Chinese values.
 //! The catch-all arm falls back to [`super::key_name`] so the function is
 //! total even if a new variant is added before this file is updated.
 //!

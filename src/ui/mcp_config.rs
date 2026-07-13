@@ -1,7 +1,7 @@
 //! MCP Config panel: JSON snippet users can copy into their MCP client.
 //!
 //! Renders a read-only, pretty-printed JSON configuration whose shape
-//! depends on the selected [`McpTransport`](crate::config::McpTransport):
+//! depends on the selected [`McpTransport`]:
 //!
 //! - `Http` — emits a `url` + `headers.Authorization` block for remote
 //!   HTTP clients.

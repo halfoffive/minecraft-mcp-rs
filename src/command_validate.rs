@@ -53,15 +53,35 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
             Ok(())
         }
 
-        // Direction is verified by the type system — no runtime checks needed.
-        BotCommand::WalkDirection(_, _) => Ok(()),
+        // Direction is verified by the type system; distance is bounded to
+        // keep the pathfinder target within a sane range (1..=1000 blocks).
+        BotCommand::WalkDirection(_, distance) => {
+            if *distance == 0 || *distance > 1000 {
+                return Err(BotError::InvalidParams(format!(
+                    "distance must be 1..=1000, got {distance}"
+                )));
+            }
+            Ok(())
+        }
+
+        // AttackEntity: entity_id must fit in i32::MAX. azalea's entity
+        // lookups cast u32 → i32; values > i32::MAX would wrap to negative
+        // IDs and silently never match a real entity.
+        BotCommand::AttackEntity(entity_id) => {
+            if *entity_id > i32::MAX as u32 {
+                return Err(BotError::InvalidParams(format!(
+                    "entity_id must be <= i32::MAX ({}), got {entity_id}",
+                    i32::MAX
+                )));
+            }
+            Ok(())
+        }
 
         // Parameterless commands — always valid.
         BotCommand::Jump
         | BotCommand::UseItem
         | BotCommand::EquipTool(_)
         | BotCommand::CloseContainer
-        | BotCommand::AttackEntity(_)
         | BotCommand::ShieldBlock(_)
         | BotCommand::SetGameMode(_)
         | BotCommand::QuerySelfInfo
@@ -73,6 +93,16 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
             if *slot > 8 {
                 return Err(BotError::InvalidParams(format!(
                     "Hotbar slot must be 0-8, got {slot}"
+                )));
+            }
+            Ok(())
+        }
+
+        // Atomic switch + use item: same slot bounds as SwitchHotbarSlot.
+        BotCommand::UseItemWithSlot(slot) => {
+            if *slot > 8 {
+                return Err(BotError::InvalidParams(format!(
+                    "item_slot must be 0..=8, got {slot}"
                 )));
             }
             Ok(())
@@ -954,6 +984,7 @@ mod tests {
             BotCommand::SwitchHotbarSlot(_) => 1,
             BotCommand::DropItem(_, _) => 1,
             BotCommand::UseItem => 1,
+            BotCommand::UseItemWithSlot(_) => 1,
             BotCommand::EquipTool(_) => 1,
             BotCommand::OpenContainer(_) => 1,
             BotCommand::TakeFromContainer(_, _) => 1,
@@ -1009,6 +1040,7 @@ mod tests {
             BotCommand::SwitchHotbarSlot(0),
             BotCommand::DropItem(0, 1),
             BotCommand::UseItem,
+            BotCommand::UseItemWithSlot(0),
             BotCommand::EquipTool(ToolType::Pickaxe),
             BotCommand::OpenContainer(BlockPos::new(0, 0, 0)),
             BotCommand::TakeFromContainer(0, 1),

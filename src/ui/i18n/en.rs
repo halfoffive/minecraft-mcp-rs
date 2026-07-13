@@ -1,6 +1,6 @@
 //! English (US) source strings for the UI i18n layer.
 //!
-//! This is the **canonical** language: every [`TextKey`](super::TextKey)
+//! This is the **canonical** language: every [`TextKey`]
 //! variant maps to a literal here, and the catch-all arm falls back to
 //! [`super::key_name`] so the function is total even if a new variant is
 //! added before this file is updated.

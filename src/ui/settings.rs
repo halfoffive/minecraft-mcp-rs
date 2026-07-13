@@ -6,8 +6,7 @@
 //! persisted to [`SharedState`] when the user clicks **Connect**.  The
 //! **Disconnect** button sets the bot offline.
 //!
-//! All user-visible strings are translated via the
-//! [`i18n`](crate::ui::i18n) layer.
+//! All user-visible strings are translated via the [`i18n`] layer.
 
 use egui::{DragValue, TextEdit, Ui};
 

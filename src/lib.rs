@@ -19,6 +19,7 @@ pub mod snapshot;
 pub mod state;
 pub mod tool_select;
 pub mod types;
+pub mod utils;
 pub mod bot {
     pub mod commands;
     pub mod connection;

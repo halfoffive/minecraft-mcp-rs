@@ -11,6 +11,7 @@ use std::io::Cursor;
 use base64::Engine;
 use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage};
 
+use crate::error::BotError;
 use crate::types::WorldSnapshot;
 
 // ═══════════════════════════════════════════════════════════════
@@ -26,7 +27,7 @@ use crate::types::WorldSnapshot;
 ///
 /// Blocks outside the radius, or with no recorded block at a given pixel,
 /// are left transparent (alpha = 0).
-pub fn render_topdown(snapshot: &WorldSnapshot, radius: u8) -> Vec<u8> {
+pub fn render_topdown(snapshot: &WorldSnapshot, radius: u8) -> Result<Vec<u8>, BotError> {
     let r = radius as i32;
     let size = (2 * r + 1) as u32;
     let mut img: RgbaImage = ImageBuffer::new(size, size);
@@ -117,14 +118,14 @@ pub fn color_map(block_type: &str) -> Rgba<u8> {
 
 /// Encode an RGBA image buffer as PNG bytes.
 ///
-/// Panics only if the underlying PNG encoder fails (which should not happen
-/// for an in-memory `RgbaImage`).
-pub fn encode_png(img: &RgbaImage) -> Vec<u8> {
+/// Returns an error if the underlying PNG encoder fails (which should not
+/// happen for an in-memory `RgbaImage`).
+pub fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, BotError> {
     let mut buf = Vec::new();
     DynamicImage::ImageRgba8(img.clone())
         .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
-        .expect("PNG encode should succeed for in-memory RgbaImage");
-    buf
+        .map_err(|e| BotError::Internal(format!("PNG encode failed: {e}")))?;
+    Ok(buf)
 }
 
 /// Base64-encode bytes for embedding in MCP image content.
@@ -196,7 +197,7 @@ mod tests {
     #[test]
     fn test_render_topdown_returns_valid_png() {
         let snap = snapshot_with_surroundings();
-        let bytes = render_topdown(&snap, 4);
+        let bytes = render_topdown(&snap, 4).expect("render should succeed");
         assert!(bytes.len() > 8, "PNG output should be non-trivial");
         assert!(
             bytes.starts_with(&PNG_MAGIC),
@@ -208,8 +209,8 @@ mod tests {
     #[test]
     fn test_render_topdown_size_scales_with_radius() {
         let snap = snapshot_with_surroundings();
-        let small = render_topdown(&snap, 1);
-        let large = render_topdown(&snap, 8);
+        let small = render_topdown(&snap, 1).expect("render should succeed");
+        let large = render_topdown(&snap, 8).expect("render should succeed");
         // Larger radius → more pixels → larger encoded PNG (typically).
         // We can't assert exact sizes because PNG compression varies, but
         // the larger image should encode more pixel data.

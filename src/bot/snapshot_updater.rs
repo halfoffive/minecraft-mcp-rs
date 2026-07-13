@@ -14,6 +14,7 @@ use crate::bot::commands::item_kind_to_id;
 use crate::snapshot::{DirtyTracker, SnapshotBuilder};
 use crate::state::SharedState;
 use crate::types::{BlockEntry, BlockPos, GameMode, InventorySlot, SelfPlayer, WorldSnapshot};
+use crate::utils::to_snake_case;
 
 // ═══════════════════════════════════════════════════════════════
 // SnapshotUpdater
@@ -301,21 +302,6 @@ fn block_state_to_name(block_state: azalea::block::BlockState) -> String {
     let block_kind = azalea::registry::Block::from(block_state);
     let debug_name = format!("{block_kind:?}");
     to_snake_case(&debug_name)
-}
-
-fn to_snake_case(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + 4);
-    for (i, ch) in s.chars().enumerate() {
-        if ch.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.push(ch.to_ascii_lowercase());
-        } else {
-            result.push(ch);
-        }
-    }
-    result
 }
 
 fn azalea_gamemode_to_ours(gm: azalea::core::game_type::GameMode) -> GameMode {

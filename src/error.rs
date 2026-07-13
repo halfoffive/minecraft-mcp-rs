@@ -28,6 +28,10 @@ pub enum BotError {
     Offline(String),
 
     /// A connection attempt failed.
+    ///
+    /// Currently the connection loop in `ConnectionManager::connect` reports
+    /// failures via `SharedState::last_error` instead of `BotError`, so this
+    /// variant is reserved for future use (e.g. MCP-level connection helpers).
     ConnectionFailed(String),
 
     /// A bot command timed out.

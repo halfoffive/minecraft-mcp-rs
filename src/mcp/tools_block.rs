@@ -3,24 +3,16 @@
 //! Each tool validates coordinates through [`validate_block_pos`], checks
 //! online status, and dispatches a [`BotCommand`] through the bot command
 //! channel.
-//!
-//! # Parameter structs
-//!
-//! We implement [`rmcp::schemars::JsonSchema`] manually using schemars v1.2.1
-//! API (bundled by rmcp 1.7.0) to avoid version conflicts with the project's
-//! schemars v0.8 dependency.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
 
 use crate::channel::BotCommandSender;
 use crate::command_validate::validate_block_pos;
 use crate::error::BotError;
 use crate::state::SharedState;
-use crate::types::{BlockPos, BotCommand};
+use crate::types::{ActAction, BlockPos, BotCommand};
 
 // ── Tool descriptions (with Creative-mode hint) ───────────────────────────
 
@@ -30,22 +22,15 @@ pub const CREATIVE_MODE_HINT: &str =
     "In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
 
 /// Full description for the `break_block` MCP tool.
-pub const BREAK_BLOCK_DESCRIPTION: &str = "Break a block at the given position. In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
+pub const BREAK_BLOCK_DESCRIPTION: &str = "Break a block at the given position. If use_best_tool is true, runs the full compound mine flow (tool selection, movement, mining, verification) equivalent to act(Mine). In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
 
 /// Full description for the `place_block` MCP tool.
 pub const PLACE_BLOCK_DESCRIPTION: &str = "Place a block at the given position. In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
 
-// ── Helper ──────────────────────────────────────────────────────────────────
-
-fn schema_from_json(v: Value) -> rmcp::schemars::Schema {
-    let map: Map<String, Value> = v.as_object().cloned().unwrap_or_default();
-    rmcp::schemars::Schema::from(map)
-}
-
 // ── break_block ────────────────────────────────────────────────────────────
 
 /// Input for the `break_block` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct BreakBlockInput {
     pub x: i32,
     pub y: i32,
@@ -53,44 +38,12 @@ pub struct BreakBlockInput {
     pub use_best_tool: Option<bool>,
 }
 
-impl rmcp::schemars::JsonSchema for BreakBlockInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("BreakBlockInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "x": {
-                    "type": "integer",
-                    "description": "X coordinate of the block to break"
-                },
-                "y": {
-                    "type": "integer",
-                    "description": "Y coordinate of the block to break"
-                },
-                "z": {
-                    "type": "integer",
-                    "description": "Z coordinate of the block to break"
-                },
-                "use_best_tool": {
-                    "type": "boolean",
-                    "description": "If true, automatically equip the best tool for the block before mining (compound mine_block flow)"
-                }
-            },
-            "required": ["x", "y", "z"],
-            "additionalProperties": false
-        }))
-    }
-}
-
 /// Handle `break_block` MCP tool.
 ///
-/// Validates coordinates, checks online status, then sends
-/// [`BotCommand::BreakBlock`]. When `use_best_tool` is `true`, the
-/// response includes a flag so the bot executor can trigger the compound
-/// mine_block flow (tool selection → movement → break).
+/// Validates coordinates, checks online status, then sends either
+/// [`BotCommand::BreakBlock`] (raw) or `BotCommand::Act(ActAction::Mine)`
+/// (full compound mine flow) depending on `use_best_tool`. When
+/// `use_best_tool` is `true`, the behavior is equivalent to `act(Mine)`.
 ///
 /// In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.
 pub async fn handle_break_block(
@@ -109,20 +62,15 @@ pub async fn handle_break_block(
         ));
     }
 
-    let cmd = BotCommand::BreakBlock(BlockPos::new(input.x, input.y, input.z));
+    let pos = BlockPos::new(input.x, input.y, input.z);
+    let cmd = if input.use_best_tool == Some(true) {
+        BotCommand::Act(ActAction::Mine { block_pos: pos })
+    } else {
+        BotCommand::BreakBlock(pos)
+    };
     match sender.send_command(cmd).await {
-        Ok(result) => {
-            let mut json = serde_json::to_value(&result)
-                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))?;
-            if let Some(obj) = json.as_object_mut() {
-                obj.insert(
-                    "use_best_tool".to_string(),
-                    Value::Bool(input.use_best_tool.unwrap_or(false)),
-                );
-            }
-            serde_json::to_string(&json)
-                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
-        }
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
         Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
     }
 }
@@ -130,46 +78,12 @@ pub async fn handle_break_block(
 // ── place_block ────────────────────────────────────────────────────────────
 
 /// Input for the `place_block` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct PlaceBlockInput {
     pub x: i32,
     pub y: i32,
     pub z: i32,
     pub item_slot: u8,
-}
-
-impl rmcp::schemars::JsonSchema for PlaceBlockInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("PlaceBlockInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "x": {
-                    "type": "integer",
-                    "description": "X coordinate to place the block at"
-                },
-                "y": {
-                    "type": "integer",
-                    "description": "Y coordinate to place the block at"
-                },
-                "z": {
-                    "type": "integer",
-                    "description": "Z coordinate to place the block at"
-                },
-                "item_slot": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 8,
-                    "description": "Hotbar slot (0-8) containing the block to place"
-                }
-            },
-            "required": ["x", "y", "z", "item_slot"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `place_block` MCP tool.
@@ -218,46 +132,12 @@ pub async fn handle_place_block(
 // ── use_item_on_block ──────────────────────────────────────────────────────
 
 /// Input for the `use_item_on_block` MCP tool.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct UseItemOnBlockInput {
     pub x: i32,
     pub y: i32,
     pub z: i32,
     pub item_slot: Option<u8>,
-}
-
-impl rmcp::schemars::JsonSchema for UseItemOnBlockInput {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("UseItemOnBlockInput")
-    }
-
-    fn json_schema(_gen: &mut rmcp::schemars::SchemaGenerator) -> rmcp::schemars::Schema {
-        schema_from_json(json!({
-            "type": "object",
-            "properties": {
-                "x": {
-                    "type": "integer",
-                    "description": "X coordinate of the block to interact with"
-                },
-                "y": {
-                    "type": "integer",
-                    "description": "Y coordinate of the block to interact with"
-                },
-                "z": {
-                    "type": "integer",
-                    "description": "Z coordinate of the block to interact with"
-                },
-                "item_slot": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 8,
-                    "description": "Optional hotbar slot (0-8) to select before using. Uses currently held item if omitted."
-                }
-            },
-            "required": ["x", "y", "z"],
-            "additionalProperties": false
-        }))
-    }
 }
 
 /// Handle `use_item_on_block` MCP tool.
@@ -302,6 +182,8 @@ pub async fn handle_use_item_on_block(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
     use crate::channel::create_command_channel;
     use crate::config::AppConfig;
@@ -382,8 +264,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_break_block_with_best_tool() {
-        let (state, sender) = make_echo_channel();
+        let state = Arc::new(SharedState::new(AppConfig::default()));
         make_online(&state);
+        let (sender, mut receiver) = create_command_channel(4);
+
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            assert!(
+                matches!(
+                    wrapped.command,
+                    BotCommand::Act(ActAction::Mine { block_pos })
+                        if block_pos == BlockPos::new(10, 64, -5)
+                ),
+                "expected Act(Mine) for use_best_tool=true, got: {:?}",
+                wrapped.command
+            );
+            wrapped
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "mining".into(),
+                    data: None,
+                }))
+                .expect("should respond");
+        });
+
         let input = BreakBlockInput {
             x: 10,
             y: 64,
@@ -391,14 +296,36 @@ mod tests {
             use_best_tool: Some(true),
         };
         let result = handle_break_block(&state, &sender, input).await.unwrap();
-        let json: Value = serde_json::from_str(&result).expect("valid JSON");
-        assert_eq!(json.get("use_best_tool"), Some(&Value::Bool(true)));
+        let _: Value = serde_json::from_str(&result).expect("valid JSON");
+        responder.await.expect("responder should finish");
     }
 
     #[tokio::test]
     async fn test_break_block_with_best_tool_false() {
-        let (state, sender) = make_echo_channel();
+        let state = Arc::new(SharedState::new(AppConfig::default()));
         make_online(&state);
+        let (sender, mut receiver) = create_command_channel(4);
+
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            assert!(
+                matches!(
+                    wrapped.command,
+                    BotCommand::BreakBlock(pos) if pos == BlockPos::new(10, 64, -5)
+                ),
+                "expected BreakBlock for use_best_tool=false, got: {:?}",
+                wrapped.command
+            );
+            wrapped
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "broken".into(),
+                    data: None,
+                }))
+                .expect("should respond");
+        });
+
         let input = BreakBlockInput {
             x: 10,
             y: 64,
@@ -406,8 +333,8 @@ mod tests {
             use_best_tool: Some(false),
         };
         let result = handle_break_block(&state, &sender, input).await.unwrap();
-        let json: Value = serde_json::from_str(&result).expect("valid JSON");
-        assert_eq!(json.get("use_best_tool"), Some(&Value::Bool(false)));
+        let _: Value = serde_json::from_str(&result).expect("valid JSON");
+        responder.await.expect("responder should finish");
     }
 
     // ── place_block ────────────────────────────────────────────────

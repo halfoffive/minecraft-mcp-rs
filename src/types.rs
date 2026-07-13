@@ -154,6 +154,12 @@ pub enum BotCommand {
     DropItem(u8, u8),
     /// Use the currently held item.
     UseItem,
+    /// Atomically switch to a hotbar slot (0-8) and use the held item.
+    ///
+    /// Combines `SwitchHotbarSlot` + `UseItem` into a single command so the
+    /// two steps cannot be interleaved with other commands under HTTP
+    /// transport concurrency.
+    UseItemWithSlot(u8),
     /// Equip a tool type.
     EquipTool(ToolType),
     /// Open a container at the given position.
@@ -503,6 +509,7 @@ mod tests {
             BotCommand::SwitchHotbarSlot(_) => 1,
             BotCommand::DropItem(_, _) => 1,
             BotCommand::UseItem => 1,
+            BotCommand::UseItemWithSlot(_) => 1,
             BotCommand::EquipTool(_) => 1,
             BotCommand::OpenContainer(_) => 1,
             BotCommand::TakeFromContainer(_, _) => 1,
@@ -530,13 +537,13 @@ mod tests {
 
     #[test]
     fn test_bot_command_variant_count() {
-        // 25 original variants + 7 v2 foundation variants = 32 total.
+        // 26 original variants + 7 v2 foundation variants = 33 total.
         let cmds = all_bot_commands();
         // Verify each variant returns 1 from the exhaustive match
         for cmd in &cmds {
             assert_eq!(require_all_variants(cmd), 1);
         }
-        assert_eq!(cmds.len(), 32);
+        assert_eq!(cmds.len(), 33);
     }
 
     #[test]
@@ -847,6 +854,7 @@ mod tests {
             BotCommand::SwitchHotbarSlot(0),
             BotCommand::DropItem(0, 1),
             BotCommand::UseItem,
+            BotCommand::UseItemWithSlot(0),
             BotCommand::EquipTool(ToolType::Pickaxe),
             BotCommand::OpenContainer(BlockPos::new(0, 0, 0)),
             BotCommand::TakeFromContainer(0, 1),

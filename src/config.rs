@@ -124,6 +124,12 @@ impl AppConfig {
         if self.ai_username.is_empty() {
             return Err("ai_username must not be empty".into());
         }
+        if self.mc_port == 0 {
+            return Err("mc_port must not be 0".into());
+        }
+        if self.mcp_port == 0 {
+            return Err("mcp_port must not be 0".into());
+        }
         if self.chunk_scan_radius < 1 || self.chunk_scan_radius > 16 {
             return Err(format!(
                 "chunk_scan_radius must be between 1 and 16, got {}",
