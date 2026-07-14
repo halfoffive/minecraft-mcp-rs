@@ -256,14 +256,14 @@ mod tests {
 
     fn setup() -> (Arc<SharedState>, BotCommandSender) {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         (state, sender)
     }
 
     /// Create a channel where the receiver echoes back a successful BotResult.
     fn make_echo_channel() -> (Arc<SharedState>, BotCommandSender) {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, mut receiver) = create_command_channel(4);
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
         tokio::spawn(async move {
             while let Some(wrapped) = receiver.recv().await {
@@ -350,6 +350,29 @@ mod tests {
         assert!(
             matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("greater than 0"))
         );
+    }
+
+    /// Alias of `test_drop_item_zero_count` for spec clarity: the MCP layer
+    /// must reject `count=0` with `BotError::InvalidParams` **before** any
+    /// bot-side validation, so callers get a fast, accurate error.
+    #[tokio::test]
+    async fn test_drop_item_count_zero_rejected_at_mcp_layer() {
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = DropItemInput {
+            slot: 5,
+            count: Some(0),
+        };
+        let result = handle_drop_item(&state, &sender, input).await;
+        match result {
+            Err(BotError::InvalidParams(msg)) => {
+                assert!(
+                    msg.to_lowercase().contains("count"),
+                    "msg should mention count, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidParams for count=0, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -512,7 +535,7 @@ mod tests {
     async fn test_collect_items_sends_correct_command() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
-        let (sender, mut receiver) = create_command_channel(4);
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
         let responder = tokio::spawn(async move {
             let wrapped = receiver.recv().await.expect("should receive command");

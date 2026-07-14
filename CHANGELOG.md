@@ -7,6 +7,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — P0 (project correctness)
+
+- **u32→i32 溢出 (P0-#1):** added `clamp_to_i32` helper in `src/mcp/mod.rs`;
+  every `radius` (and similar) parameter passed into azalea is now explicitly
+  clamped from `u32` to `i32` before the cast. `test_radius_clamp_overflow`
+  covers `radius = 5_000_000_000_u32` → `i32::MAX`. Affected handlers:
+  `get_nearby_blocks` / `get_nearby_entities` / `handle_act` action distance
+  parameters.
+- **`handle_act` 输入验证 (P0-#2):** new `command_validate::validate_act_action`
+  rejects out-of-range coordinates (`y = 9999` → `InvalidParams`,
+  `y = -100` → `InvalidParams`) and `attack.entity_id > i32::MAX as u32` before
+  the command reaches the bot executor. `test_act_input_validation` covers the
+  boundary cases.
+- **状态机 skip_equip 转换 (P0-#3 + P1-#6):** `MineBlockOperation` now has a
+  `ToolAlreadyInInventory` event. The transition table adds
+  `(MovingToTarget, ToolAlreadyInInventory) → Mining`, so when the inventory
+  already contains the required tool the bot skips the equip detour. Also
+  fixes the `needs_move_to_hotbar = true` path: `tool_type` is preserved
+  across the hotbar-move step (was being reset, which produced 11.25s
+  hand-mining times instead of the correct 1-2s with iron pickaxe). Regression
+  tests: `test_mine_block_skip_equip_when_tool_in_inventory` and
+  `test_mine_block_preserves_tool_type_when_hotbar_move_needed`.
+- **proptest valid_tools 缺变体 (P0-#4):** `tests/proptest.rs::valid_tools`
+  array now contains all 7 `ToolType` variants (Pickaxe, Axe, Shovel, Hoe,
+  Sword, Shears, Hand). 100-iteration run with `--test-threads=1` passes with
+  zero false positives.
+- **rmcp build.rs git config 副作用 (P0-#5):** `patches/rmcp/build.rs` and
+  the `build = "build.rs"` line in `patches/rmcp/Cargo.toml` are removed.
+  `scripts/install-hooks.sh` added as a no-op stub (documented in README).
+  `cargo build` no longer mutates the user's `core.hooksPath`. Verified with
+  `cargo update -p rmcp` that crates.io 1.8.0 is used directly with no
+  patches required.
+
+### Fixed — P1 (UX / reliability)
+
+- **动态超时 (P1-#10):** `BotCommandSender` no longer stores a `timeout:
+  Duration` field; `send_command` reads `SharedState::command_timeout_secs`
+  on every call (UI changes take effect immediately). The `as_secs()`
+  truncation bug (sub-second timeouts rounded to 0) is fixed by preserving
+  the `Duration` value end-to-end instead of converting to `u64` seconds.
+  `RealBotClient::goto` uses `sender.timeout()` instead of re-reading the
+  config. Tests: `test_send_command_uses_latest_timeout` and the sub-second
+  timeout preservation test.
+- **ReceiverLease 重试 (P1-#9):** `handle_spawn` now retries
+  `ReceiverLease::take` with `yield_now` + `100ms` sleep for up to ~10
+  attempts on fast-reconnect paths where the slot is briefly empty. After
+  the 100ms budget the executor falls back to a "no executor" warn path
+  instead of failing the spawn. Test:
+  `test_receiver_lease_take_retries_during_reconnect`.
+- **goto 早返回 + notify 兜底 (P1-#11):** `RealBotClient::goto` now races the
+  `pathfinder_finished` notify against a 50ms fallback re-check of the bot's
+  actual position; if both miss, the original `timeout_dur` path reports
+  `PathfindingFailed` as before. Test:
+  `test_goto_falls_back_to_position_check`.
+- **Disconnect 不提前 set_online(false) (P1-#12):** the Disconnect button
+  callback in `src/ui/settings.rs` no longer calls `set_online(false)`
+  directly — that flag is owned by the bot ECS (`handle_disconnect`). The
+  button just sets `disconnect_requested` and waits. `is_online() == true`
+  for up to ~100ms after the click while the ECS tears down.
+- **BotError::Offline → -32000 SERVICE_UNAVAILABLE (P1-#13):** the
+  `From<BotError> for ErrorData` and `IntoCallToolResult for BotError` impls
+  now map `BotError::Offline(_)` to JSON-RPC code `-32000` (not the
+  previous `-32603 InternalError`) with
+  `data: serde_json::json!({"reason": "bot_disconnected"})`. MCP clients
+  can now distinguish "bot is gone" from "input is invalid" and from
+  "internal server error". Tests: new
+  `test_into_mcp_error_offline_uses_service_unavailable` and the updated
+  `test_into_mcp_error_offline`.
+- **connect_bot 防御性 join (P1-#14):** `MinecraftApp::connect_bot` now
+  extracts a `join_with_timeout(handle, 1s)` helper. When a previous
+  `JoinHandle` is still alive on a second Connect, the UI waits up to 1
+  second for the old thread to finish (the bot thread already self-joins
+  on disconnect; this just covers the edge case). Test:
+  `test_connect_bot_joins_old_thread`.
+- **Chunk 预检放宽 (P1-#7):** `handle_break_block` no longer depends on
+  `partial_instance.chunk_summary` (which is `None` for partial chunks
+  that still contain the target block). The precheck now uses
+  `block_index.get(&pos).is_some()` as the authoritative signal. Test:
+  `test_break_block_loaded_chunk_not_rejected` with a 1-block snapshot.
+- **execute_place_block 邻居扫描 (P1-#8):** `execute_place_block` now calls
+  `compound_ops::find_standable_neighbor` to pick a standable MoveTo target
+  adjacent to the placement position, then issues `use_item_on_block`. The
+  bot no longer pathfinds into the block it is about to place (which used
+  to fail with "no path" on a wall-adjacent placement). Test:
+  `test_place_block_finds_neighbor`.
+
+### Added — CI gate (Phase 1 基础设施)
+
+- **CI 门禁加 test + clippy + fmt:** `.github/workflows/build.yml` and
+  `.github/workflows/release.yml` now run a separate `lint` job on
+  `ubuntu-latest` that executes `cargo test --locked --all-targets`,
+  `cargo clippy --locked --all-targets -- -D warnings`, and
+  `cargo fmt --check`. The release workflow's `release` job depends on
+  both `build` and `lint` so a failing lint blocks the GitHub Release.
+  No more "green CI but locally broken" surprises.
+
+## [Unreleased] - Phase 2
+
+### Added — Harvest Level enforcement (H-1)
+
+- **`block_data::HARVEST_LEVEL: HashMap<&str, u8>`** maps a block's required
+  harvest tier: `Wood=0, Stone=1, Iron=2, Diamond=3, Netherite=4`.
+  Covers `Stone` / `Cobblestone` (→Iron, 2), `IronOre` / `DeepslateIronOre`
+  (→Stone, 1), `DiamondOre` / `DeepslateDiamondOre` (→Iron, 2),
+  `Obsidian` / `AncientDebris` (→Diamond, 3), `NetheriteBlock` (→Netherite, 4).
+- **`tool_select::find_tool_in_inventory` gains a
+  `required_harvest_level: u8` parameter.** Any tool whose own
+  `ToolMaterialTier < required` returns `None` (no longer optimistically
+  selected). When `None` is returned, the caller surfaces
+  `BotError::ToolNotFound { alternatives: ["IronPickaxe"] }` (or the
+  appropriate next tier) so the LLM can instruct the player to upgrade.
+  Tests: `test_harvest_level_wood_cant_mine_diamond` (asserts `None` +
+  alternatives) and `test_harvest_level_diamond_mine_diamond_ore`
+  (asserts `Some(DiamondPickaxe)`).
+
+### Changed — `find_standable_neighbor` scans 8 directions (M-4 升级)
+
+- **`compound_ops::find_standable_neighbor`** now scans 8 horizontal
+  neighbours (4 cardinal + 4 diagonal) × 3 Y levels, priority
+  same-Y → y+1 → y-1. Previously only the 4 cardinal directions were
+  considered, which missed the common "next to a wall, only a diagonal
+  tile is standable" case. Test:
+  `test_find_standable_neighbor_8_directions` and proptest coverage
+  (`prop_standable_neighbor_*`).
+
+### Changed — `execute_mine_block` reads through `block_index` (M-12 合规)
+
+- **`src/bot/ops.rs` Step 2** (look up the target block's `block_type` to
+  choose a tool) and **Step 10** (verify the block was actually broken)
+  now go through `snapshot.block_index.get(&pos)` — the O(1) HashMap
+  lookup — rather than `Vec::iter().find()`. With a 5000-block snapshot
+  the mine path is now < 1 ms per call. Test:
+  `test_mine_block_uses_block_index`.
+
+### Changed — Container slot upper bound unified to 54 (index 53)
+
+- **`src/command_validate.rs` slot upper bound** raised from `50` to `53`
+  (0-indexed, matching vanilla chest/large-chest row layout: 9 slots per
+  row × 6 rows = 54 total, indices 0..=53). The MCP JSON schema for
+  `take_from_container` / `put_into_container` now advertises
+  `maximum: 53`. Tests: `test_take_from_container_slot_53_accepted` and
+  `test_take_from_container_slot_54_rejected`.
+
+### Added — incremental test coverage
+
+- **`test_command_timeout_responder_alive_but_slow`** in
+  `tests/integration.rs` and `test_command_timeout_returns_error` in
+  `src/channel.rs::tests` — both assert that a slow but still-alive
+  responder produces `BotError::CommandTimeout`, not `Offline`.
+- **`test_connect_resets_injections_each_iteration`** in
+  `src/bot/connection.rs::tests` — mocks `ClientBuilder::start` for two
+  reconnect iterations and asserts all four `INJECTED_*` globals are
+  `Some` on the second round.
+- **`prop_standable_neighbor_*`** in `tests/proptest.rs` — 1000 random
+  snapshots with Y extremes, diagonal-only standable positions, and
+  empty snapshots. All run in < 2 s with 0 failures.
+
+### Added — MCP zero-RTT validation
+
+- `handle_drop_item` now rejects `count == 0` at the MCP layer
+  (`InvalidParams`) instead of letting the bot executor fail later.
+- `handle_send_chat` rejects empty `message` at the MCP layer.
+- `handle_act` validates `attack.entity_id ≤ i32::MAX` at the MCP
+  layer. Clients get a clear, immediate error rather than a delayed
+  bot-side "entity not found".
+
 ## [1.0.2] - 2026-07-14
 
 Release notes now include a bilingual (English / 简体中文) download table

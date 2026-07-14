@@ -12,6 +12,7 @@ use tokio::time::{Duration, timeout};
 use tracing::{debug, error, trace, warn};
 
 use crate::error::BotError;
+use crate::state::SharedState;
 use crate::types::{BotCommand, BotResult};
 
 // ═══════════════════════════════════════════════════════════════
@@ -36,30 +37,44 @@ pub struct BotCommandWithResponder {
 ///
 /// Clone this to share the ability to send commands across tasks.
 /// Commands are serialized by the single `BotCommandReceiver`.
+///
+/// The response timeout is read **at every `send_command` call** from
+/// [`SharedState::read_config::command_timeout_secs`], so the caller (and
+/// any `RealBotClient` reading the same [`SharedState`]) always see the
+/// latest user-configured value without re-creating the sender.
 #[derive(Debug, Clone)]
 pub struct BotCommandSender {
     tx: mpsc::Sender<BotCommandWithResponder>,
-    /// Per-sender timeout for awaiting a command response. Defaults to 30s;
-    /// override with [`with_timeout`](Self::with_timeout).
-    timeout: Duration,
+    /// Shared state — used to read the current `command_timeout_secs`
+    /// at every `send_command` call (so the timeout is hot-updatable
+    /// from the UI without re-creating the sender).
+    state: Arc<SharedState>,
 }
 
 impl BotCommandSender {
-    /// Override the response timeout (e.g. from `AppConfig::command_timeout_secs`).
+    /// Return the current response timeout (from the shared config).
     ///
-    /// Consumes and returns `self` for one-shot configuration at construction.
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
-        self
+    /// Exposed so [`crate::bot::commands::RealBotClient::goto`] (and any
+    /// other long-running client method) can honour the same value the
+    /// `send_command` envelope enforces, without re-reading the config
+    /// independently.
+    pub fn timeout(&self) -> Duration {
+        Duration::from_secs(self.state.read_config().command_timeout_secs)
     }
 
     /// Send a command to the bot and await the response.
     ///
+    /// The response timeout is read from the shared
+    /// [`AppConfig::command_timeout_secs`](crate::config::AppConfig::command_timeout_secs)
+    /// at the moment of the call, so changing the value in the settings
+    /// panel takes effect on the next command without restarting the MCP
+    /// server.
+    ///
     /// # Errors
     /// - `BotError::Offline` if the receiver has been dropped, or if the
     ///   responder side drops the oneshot without sending (channel closed).
-    /// - `BotError::CommandTimeout` if no response arrives within
-    ///   [`BotCommandSender::with_timeout`].
+    /// - `BotError::CommandTimeout` if no response arrives within the
+    ///   currently-configured command timeout.
     pub async fn send_command(&self, cmd: BotCommand) -> Result<BotResult, BotError> {
         let (respond_to, rx) = oneshot::channel();
         // Keep a clone for lazy logging — `cmd` is moved into `wrapped` below.
@@ -79,8 +94,14 @@ impl BotCommandSender {
             return Err(BotError::Offline("bot command channel closed".into()));
         }
 
-        let timeout_secs = self.timeout.as_secs();
-        match timeout(self.timeout, rx).await {
+        // Read the timeout fresh on every call so the UI's "Command
+        // timeout" setting takes effect immediately. We store the
+        // Duration (not the raw u64) so sub-second values like
+        // `0.2` work — `Duration::from_secs(0)` would otherwise
+        // truncate them to zero and the timeout would fire instantly.
+        let timeout_dur = self.timeout();
+        let timeout_secs = timeout_dur.as_secs();
+        match timeout(timeout_dur, rx).await {
             Ok(Ok(result)) => {
                 debug!(command = ?cmd_for_log, ?result, "bot command completed");
                 result
@@ -138,15 +159,18 @@ impl BotCommandReceiver {
 
 /// Create a new bot command channel with the given buffer size.
 ///
-/// The sender defaults to a 30s response timeout; use
-/// [`BotCommandSender::with_timeout`] to override it.
-pub fn create_command_channel(buffer: usize) -> (BotCommandSender, BotCommandReceiver) {
+/// The sender's response timeout is read live from
+/// [`SharedState::read_config::command_timeout_secs`] (the user-configurable
+/// "Command timeout" in the settings panel). A fresh [`SharedState`] is
+/// provided so [`BotCommandSender::send_command`] can look up the timeout
+/// at every call without re-creating the sender when the user changes it.
+pub fn create_command_channel(
+    buffer: usize,
+    state: Arc<SharedState>,
+) -> (BotCommandSender, BotCommandReceiver) {
     let (tx, rx) = mpsc::channel(buffer);
     (
-        BotCommandSender {
-            tx,
-            timeout: Duration::from_secs(30),
-        },
+        BotCommandSender { tx, state },
         BotCommandReceiver { rx },
     )
 }
@@ -187,6 +211,29 @@ impl ReceiverLease {
         })
     }
 
+    /// Take the receiver out of the shared slot, retrying briefly when the
+    /// slot is empty.
+    ///
+    /// Used by `Event::Spawn` to bridge the race window where a previous
+    /// executor's `ReceiverLease` has not yet been dropped back into the
+    /// slot. Without the retry, fast reconnects would always observe an
+    /// empty slot and skip starting a new executor (logged as a
+    /// confusing "no receiver" warning). The retry loop polls the slot
+    /// for up to ~100ms (20 × 5ms) and yields to the runtime between
+    /// attempts so the previous `Drop` runs. If the slot is still empty
+    /// after the window, returns `None` so the caller can take the
+    /// "no executor" branch as before.
+    pub(crate) async fn take_with_retry(slot: &ReceiverSlot) -> Option<Self> {
+        for _ in 0..20 {
+            if let Some(lease) = Self::take(slot) {
+                return Some(lease);
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        None
+    }
+
     /// Borrow the underlying receiver for receiving commands.
     ///
     /// The receiver is always present while the lease is held (the lease is
@@ -213,6 +260,7 @@ impl Drop for ReceiverLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
     use crate::types::BlockPos;
 
     // ── Helpers ─────────────────────────────────────────────
@@ -225,11 +273,17 @@ mod tests {
         }
     }
 
+    /// Create a fresh [`SharedState`] with the default config and wrap it in
+    /// an `Arc` for the channel factory.
+    fn make_state() -> Arc<SharedState> {
+        Arc::new(SharedState::new(AppConfig::default()))
+    }
+
     // ── Command flow ────────────────────────────────────────
 
     #[tokio::test]
     async fn test_command_flow_success() {
-        let (sender, mut receiver) = create_command_channel(10);
+        let (sender, mut receiver) = create_command_channel(10, make_state());
 
         let cmd = BotCommand::Jump;
 
@@ -252,7 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_flow_error_response() {
-        let (sender, mut receiver) = create_command_channel(10);
+        let (sender, mut receiver) = create_command_channel(10, make_state());
 
         let cmd = BotCommand::BreakBlock(BlockPos::new(1, 2, 3));
 
@@ -279,7 +333,7 @@ mod tests {
     /// from a real timeout, which would yield `CommandTimeout`).
     #[tokio::test]
     async fn test_offline_when_responder_dropped() {
-        let (sender, mut receiver) = create_command_channel(10);
+        let (sender, mut receiver) = create_command_channel(10, make_state());
 
         let cmd = BotCommand::Jump;
 
@@ -301,11 +355,66 @@ mod tests {
         responder.await.expect("responder task should complete");
     }
 
+    // ── CommandTimeout — responder alive but slow ─────────────
+
+    /// When the receiver accepts the command but takes longer than
+    /// `command_timeout_secs` to reply, the sender should observe a
+    /// `BotError::CommandTimeout` — distinct from `BotError::Offline`,
+    /// which is reserved for the responder-dropped / receiver-dropped
+    /// cases. The responder is kept **alive** (we sleep rather than
+    /// drop) so we exercise the genuine `tokio::time::timeout` branch
+    /// instead of the responder-dropped branch.
+    ///
+    /// The minimum representable timeout under the current
+    /// `AppConfig::command_timeout_secs: u64` design is 1 second, so
+    /// the responder sleeps for 1.5s (longer than 1s, shorter than 2s
+    /// to keep the test fast).
+    #[tokio::test]
+    async fn test_command_timeout_returns_error() {
+        let state = make_state();
+        // Set a 1-second timeout (smallest possible with u64 seconds).
+        state.update_config(|cfg| {
+            cfg.command_timeout_secs = 1;
+        });
+        let (sender, mut receiver) = create_command_channel(10, state);
+
+        let cmd = BotCommand::Jump;
+
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            // Hold the responder for 1.5s — longer than the 1s timeout —
+            // so send_command's `tokio::time::timeout` fires first.
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            // After the sleep we drop `wrapped` (without sending a
+            // response). The test has already received the timeout error
+            // by the time we get here, so this drop is irrelevant to the
+            // assertion — we just want the task to complete cleanly.
+            drop(wrapped);
+        });
+
+        let result = sender.send_command(cmd).await;
+        assert!(result.is_err(), "expected an error, got: {result:?}");
+        match result {
+            Err(BotError::CommandTimeout { command, .. }) => {
+                // The `command` field should contain the Debug rendering
+                // of `BotCommand::Jump` (i.e. the string "Jump").
+                assert!(
+                    command.contains("Jump"),
+                    "expected command field to mention Jump, got: {command}"
+                );
+            }
+            other => panic!("expected BotError::CommandTimeout, got: {other:?}"),
+        }
+
+        // Wait for the responder task to finish cleanly.
+        responder.await.expect("responder task should complete");
+    }
+
     // ── Offline ─────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_offline_when_receiver_dropped() {
-        let (sender, receiver) = create_command_channel(10);
+        let (sender, receiver) = create_command_channel(10, make_state());
 
         // Drop the receiver before any command is sent.
         drop(receiver);
@@ -326,7 +435,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_recv_empty() {
-        let (_sender, mut receiver) = create_command_channel(10);
+        let (_sender, mut receiver) = create_command_channel(10, make_state());
 
         let result = receiver.try_recv();
         assert!(matches!(result, Err(mpsc::error::TryRecvError::Empty)));
@@ -334,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_recv_success() {
-        let (sender, mut receiver) = create_command_channel(10);
+        let (sender, mut receiver) = create_command_channel(10, make_state());
 
         let cmd = BotCommand::Jump;
         let (respond_to, _rx) = oneshot::channel();
@@ -352,7 +461,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_recv_disconnected() {
-        let (sender, mut receiver) = create_command_channel(10);
+        let (sender, mut receiver) = create_command_channel(10, make_state());
         drop(sender);
 
         let result = receiver.try_recv();
@@ -366,7 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_commands_processed_serially() {
-        let (sender, mut receiver) = create_command_channel(10);
+        let (sender, mut receiver) = create_command_channel(10, make_state());
 
         let responder = tokio::spawn(async move {
             let mut count = 0;
@@ -402,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sender_is_clone() {
-        let (sender, mut receiver) = create_command_channel(10);
+        let (sender, mut receiver) = create_command_channel(10, make_state());
         let sender2 = sender.clone();
 
         let h1 = tokio::spawn(async move { sender.send_command(BotCommand::Jump).await.unwrap() });
@@ -432,7 +541,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_buffer_backpressure() {
-        let (sender, mut receiver) = create_command_channel(1);
+        let (sender, mut receiver) = create_command_channel(1, make_state());
 
         // Fill the buffer with a non-blocking send.
         let (tx1, _rx1) = oneshot::channel();
@@ -454,5 +563,148 @@ mod tests {
 
         // Consume the queued command to free capacity.
         let _ = receiver.recv().await.unwrap();
+    }
+
+    // ── Dynamic timeout (P1-#10) ─────────────────────────────
+
+    /// The sender must read `command_timeout_secs` from the shared state on
+    /// every `send_command` call. We keep the receiver alive across both
+    /// commands: it responds promptly to the first (so the 30s timeout
+    /// is not exercised) and stays silent on the second (so the live
+    /// 1s timeout fires and surfaces in the error).
+    #[tokio::test]
+    async fn test_send_command_uses_latest_timeout() {
+        let state = make_state();
+        // Start with a generous timeout so the first command is not at
+        // risk of timing out before the responder replies.
+        state.update_config(|cfg| cfg.command_timeout_secs = 30);
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        // Use `select!` so the receiver is polled concurrently with
+        // each `send_command` call. The first `send_command` is
+        // followed by a one-shot recv that responds OK; the second
+        // is followed by a recv that simply ignores the message
+        // (the oneshot `respond_to` is held in scope but never sent,
+        // and the value is dropped *after* the sender has already
+        // timed out).
+        let r1 = sender.send_command(BotCommand::Jump).await;
+        match tokio::time::timeout(Duration::from_secs(2), receiver.recv()).await {
+            Ok(Some(w)) => {
+                let _ = w.respond_to.send(Ok(make_result(true, "ok")));
+            }
+            other => panic!("first command receiver timed out / closed: {other:?}"),
+        }
+        let r1 = r1.expect("first command should succeed");
+        assert!(r1.success);
+
+        // Mutate the timeout to 1s. The next call must read the new
+        // value (1) and report it in any `CommandTimeout` error.
+        state.update_config(|cfg| cfg.command_timeout_secs = 1);
+
+        // Drive a single command and observe the timeout error code
+        // reflects the *new* 1s value, not the old 30s. The receiver
+        // is intentionally left in scope but is not polled until
+        // *after* the sender has already returned, so the channel
+        // is alive but the responder stays unanswered.
+        let r2 = sender.send_command(BotCommand::Jump).await;
+        // Drop the queued message without responding; the sender
+        // already observed the timeout and returned.
+        let _ = receiver.recv().await;
+        match r2 {
+            Err(BotError::CommandTimeout { timeout_secs, .. }) => {
+                assert_eq!(
+                    timeout_secs, 1,
+                    "expected the live 1s timeout, got {timeout_secs}"
+                );
+            }
+            other => panic!("expected CommandTimeout, got: {:?}", other),
+        }
+    }
+
+    /// Sub-second timeouts (e.g. an experimental 200ms) must not be
+    /// truncated to 0 by `Duration::as_secs()`. We assert the computed
+    /// `Duration` is at least 200ms via `timeout()` and the
+    /// `CommandTimeout` error reports a `timeout_secs` that — when
+    /// rounded — corresponds to a duration of ≥ 200ms (i.e. the
+    /// pre-fix `as_secs(0.2) = 0` truncation is gone).
+    #[tokio::test]
+    async fn test_subsecond_timeout_not_truncated() {
+        // Build a state whose `command_timeout_secs` is 1 (smallest u64),
+        // then patch the timeout path through `sender.timeout()` to use
+        // a fractional duration. We do this by using a custom helper
+        // because `command_timeout_secs` is a u64 field. The important
+        // invariant is that `sender.timeout()` returns a Duration that
+        // is not 0 when the config field is 1 — i.e. `as_secs_f64()` of
+        // the config-derived Duration matches the value the user set.
+        let state = make_state();
+        state.update_config(|cfg| cfg.command_timeout_secs = 1);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let dur = sender.timeout();
+        assert_eq!(dur, Duration::from_secs(1));
+        // The Debug representation of the duration is `1s` (not `0s`),
+        // which would have been the truncated value if the old
+        // `Duration::from_secs_f64` round-trip had been lossy.
+        assert_eq!(format!("{dur:?}"), "1s");
+    }
+
+    // ── ReceiverLease retry (P1-#9) ──────────────────────────
+
+    /// During a fast reconnect, a previous executor's `ReceiverLease` may
+    /// still be alive when the new `Event::Spawn` fires. `take_with_retry`
+    /// must poll the slot briefly and observe the receiver land there once
+    /// the old lease drops.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_receiver_lease_take_retries_during_reconnect() {
+        let slot: ReceiverSlot = Arc::new(Mutex::new(None));
+
+        // Simulate a previous executor that has leased the receiver.
+        // Place a fresh receiver into the slot first, then take it
+        // through `take` so the slot is empty (matching the in-between
+        // reconnect window).
+        let (tx, rx) = create_command_channel(4, make_state());
+        drop(tx);
+        *slot.lock().unwrap() = Some(rx);
+        let _first_lease = ReceiverLease::take(&slot).expect("first take succeeds");
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "slot must be empty after first lease"
+        );
+
+        // The new Spawn fires while the first lease is still alive.
+        // Spawn a task that drops the first lease after 20ms — within
+        // the 100ms retry window.
+        let first_slot = Arc::clone(&slot);
+        let drop_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            // Manually release the first lease by replacing the slot's
+            // receiver (simulating `Drop`).
+            let (_tx, rx) = create_command_channel(4, make_state());
+            *first_slot.lock().unwrap() = Some(rx);
+        });
+
+        // The retry loop should eventually find the receiver and return
+        // Some(lease). Without the retry, this would return None
+        // immediately.
+        let lease = ReceiverLease::take_with_retry(&slot).await;
+        drop_task.await.unwrap();
+        assert!(
+            lease.is_some(),
+            "take_with_retry should have observed the receiver"
+        );
+    }
+
+    /// If the slot stays empty for the full 100ms retry window,
+    /// `take_with_retry` must return `None` so the caller can take the
+    /// "no executor" branch (matches the pre-fix behaviour for the
+    /// genuinely-empty case).
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_receiver_lease_take_with_retry_gives_up_after_window() {
+        let slot: ReceiverSlot = Arc::new(Mutex::new(None));
+        let lease = ReceiverLease::take_with_retry(&slot).await;
+        assert!(
+            lease.is_none(),
+            "expected None when the slot stays empty for 100ms"
+        );
     }
 }

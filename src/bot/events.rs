@@ -116,7 +116,10 @@ impl Default for BotState {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .unwrap_or_else(|| {
-                let (_, receiver) = crate::channel::create_command_channel(1);
+                let (_, receiver) = crate::channel::create_command_channel(
+                    1,
+                    Arc::new(SharedState::new(crate::config::AppConfig::default())),
+                );
                 Arc::new(Mutex::new(Some(receiver)))
             });
 
@@ -163,7 +166,7 @@ impl Default for BotState {
 pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::Result<()> {
     match event {
         Event::Spawn => {
-            handle_spawn(bot, &state);
+            handle_spawn(bot, &state).await;
         }
         Event::Disconnect(_) => {
             handle_disconnect(bot, &state).await;
@@ -201,7 +204,12 @@ pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::R
 // Event helpers
 // ---------------------------------------------------------------------------
 
-fn handle_spawn(bot: Client, state: &BotState) {
+/// Start the command executor and store the bot's ECS handle.
+///
+/// Made `async` so it can call `ReceiverLease::take_with_retry`, which
+/// needs to `await` between polls. The `handle_event` function calls
+/// this with `.await` so the runtime can drive the retry loop.
+async fn handle_spawn(bot: Client, state: &BotState) {
     state.shared_state.set_online(true);
 
     // Store the ECS handle so request_disconnect can trigger shutdown by
@@ -237,14 +245,36 @@ fn handle_spawn(bot: Client, state: &BotState) {
     }
 
     // Lease the command receiver and start a new executor driving it.
-    match ReceiverLease::take(&state.command_receiver) {
+    match ReceiverLease::take_with_retry(&state.command_receiver).await {
         Some(lease) => {
             let shared_state = Arc::clone(&state.shared_state);
-            let command_sender = state.command_sender.clone();
-            let client = RealBotClient::new(bot, Arc::clone(&shared_state));
+            // Clone the sender outside the async move closure so the
+            // closure doesn't borrow `state` (which lives longer than
+            // the closure but the borrow checker doesn't know that
+            // here — see E0521). The sender is needed by both
+            // `RealBotClient` (for `sender.timeout()` lookups in
+            // `goto` so the pathfinder timeout stays in lock-step with
+            // the command-channel timeout) and `CommandExecutor` (for
+            // recursive compound-op dispatch). `BotState::command_sender`
+            // is `Option<BotCommandSender>` (None in unit tests where
+            // there is no `McpBotServer` injecting a sender); in
+            // production `connection.rs` always sets it to `Some`,
+            // and `Event::Spawn` only fires after that injection, so
+            // the unwrap is safe at runtime. The `Option<...>` is
+            // passed through to `CommandExecutor` unchanged.
+            let command_sender_opt = state.command_sender.clone();
+            let command_sender: BotCommandSender = command_sender_opt.clone().expect(
+                "Event::Spawn fires only after ConnectionManager injects \
+                 a Some(BotCommandSender) into BotState",
+            );
+            let client =
+                RealBotClient::new(bot, Arc::clone(&shared_state), command_sender);
             let handle = tokio::task::spawn_local(async move {
-                let mut executor =
-                    CommandExecutor::new_for_lease(client, shared_state, command_sender);
+                let mut executor = CommandExecutor::new_for_lease(
+                    client,
+                    shared_state,
+                    command_sender_opt,
+                );
                 executor.run_with_lease(lease).await;
             });
             *state
@@ -255,9 +285,9 @@ fn handle_spawn(bot: Client, state: &BotState) {
         }
         None => {
             warn!(
-                "Spawn fired but no command receiver was available — executor \
-                 not started (this is expected if a previous executor is still \
-                 shutting down)"
+                "Spawn fired but no command receiver was available after \
+                 100ms retry window — executor not started (this is expected \
+                 if the previous executor is still shutting down)"
             );
         }
     }

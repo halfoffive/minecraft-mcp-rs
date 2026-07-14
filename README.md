@@ -325,6 +325,27 @@ transport. Default filter: `minecraft_mcp_rs=debug, azalea=warn`.
 
   `tests/proptest.rs` 中的属性测试使用 `proptest` crate。
 
+### Development hooks
+
+Currently a no-op stub. Once the project ships pre-commit / commit-msg hooks
+(planned: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test --locked`, and a Conventional Commits linter), you will opt in
+with:
+
+```bash
+bash scripts/install-hooks.sh
+```
+
+Until then this script does not touch `git config core.hooksPath` — running
+`git config --get core.hooksPath` after `cargo build` should report an error,
+confirming no global side effects are configured.
+
+当前 `scripts/install-hooks.sh` 为占位实现。计划中会加入 pre-commit（`cargo fmt --check`、
+`cargo clippy --all-targets -- -D warnings`、`cargo test --locked`）与 commit-msg
+（Conventional Commits 检查）钩子，届时执行 `bash scripts/install-hooks.sh` 即可启用。
+在那之前脚本不会修改 `git config core.hooksPath`，所以 `cargo build` 之后跑
+`git config --get core.hooksPath` 应报错，表示没有任何全局副作用被设置。
+
 ## License
 
 MIT

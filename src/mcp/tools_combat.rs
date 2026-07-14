@@ -110,7 +110,7 @@ mod tests {
 
     fn setup() -> (Arc<SharedState>, BotCommandSender) {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         (state, sender)
     }
 
@@ -121,7 +121,7 @@ mod tests {
     /// Create a channel where the receiver echoes back a successful BotResult.
     fn make_echo_channel() -> (Arc<SharedState>, BotCommandSender) {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, mut receiver) = create_command_channel(4);
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
         tokio::spawn(async move {
             while let Some(wrapped) = receiver.recv().await {
@@ -225,7 +225,7 @@ mod tests {
         // Verify blocking=false is propagated as BotCommand::ShieldBlock(false).
         let state = Arc::new(SharedState::new(AppConfig::default()));
         make_online(&state);
-        let (sender, mut receiver) = create_command_channel(4);
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
         let responder = tokio::spawn(async move {
             let wrapped = receiver.recv().await.expect("should receive command");

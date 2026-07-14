@@ -13,7 +13,6 @@
 edition = "2024"
 name = "rmcp"
 version = "1.8.0"
-build = "build.rs"
 autolib = false
 autobins = false
 autoexamples = false

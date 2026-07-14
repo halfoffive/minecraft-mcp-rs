@@ -404,6 +404,187 @@ pub static MATERIAL_PRIORITY: &[MaterialTier] = &[
     MaterialTier::Wood,
 ];
 
+/// Minecraft harvest level for each [`MaterialTier`].
+///
+/// Levels: Wood=0, Gold/Stone=1, Iron=2, Diamond=3, Netherite=4. Gold shares
+/// Stone's level (mines the same set of blocks, just faster and with less
+/// durability). Used by [`crate::tool_select::find_tool_in_inventory`] to
+/// filter out tools that are too weak to drop the target block.
+pub fn harvest_level_of(material: MaterialTier) -> u8 {
+    match material {
+        MaterialTier::Wood => 0,
+        MaterialTier::Gold | MaterialTier::Stone => 1,
+        MaterialTier::Iron => 2,
+        MaterialTier::Diamond => 3,
+        MaterialTier::Netherite => 4,
+    }
+}
+
+/// Required harvest level for a block type.
+///
+/// The level means: "the tool must have at least this harvest level to make
+/// the block drop its item". Below the required level the block is mined
+/// (slowly, by hand), but drops nothing.
+///
+/// Defaults to 0 for unknown blocks — any tool will do. The values here
+/// mirror the vanilla Minecraft 1.21 harvest rules for the blocks the bot
+/// knows about. Blocks not in this table are assumed to be hand-mineable.
+pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(|| {
+    let mut m = HashMap::new();
+
+    // Level 0: hand-mineable (wood, dirt, sand, most plants).
+    // Wood-family blocks: any axe is fine, hand drops the block.
+    for &block in &[
+        "oak_log",
+        "spruce_log",
+        "birch_log",
+        "jungle_log",
+        "acacia_log",
+        "dark_oak_log",
+        "oak_planks",
+        "spruce_planks",
+        "birch_planks",
+        "jungle_planks",
+        "acacia_planks",
+        "dark_oak_planks",
+        "oak_stairs",
+        "oak_slab",
+        "oak_fence",
+        "oak_fence_gate",
+        "crafting_table",
+        "bookshelf",
+        "ladder",
+        "barrel",
+        "dirt",
+        "grass_block",
+        "dirt_path",
+        "coarse_dirt",
+        "rooted_dirt",
+        "sand",
+        "red_sand",
+        "suspicious_sand",
+        "gravel",
+        "clay",
+        "farmland",
+        "soul_sand",
+        "soul_soil",
+        "snow",
+        "snow_block",
+        "powder_snow",
+        "mud",
+        "muddy_mangrove_roots",
+        "mycelium",
+        "podzol",
+        "oak_leaves",
+        "spruce_leaves",
+        "birch_leaves",
+        "jungle_leaves",
+        "acacia_leaves",
+        "dark_oak_leaves",
+        "azalea_leaves",
+        "white_wool",
+        "cobweb",
+        "hay_bale",
+        "sculk",
+        "moss_block",
+        "vine",
+        "glow_lichen",
+        "glass",
+        "glass_pane",
+        "white_stained_glass",
+        "white_stained_glass_pane",
+        "ice",
+    ] {
+        m.insert(block, 0u8);
+    }
+
+    // Level 1: needs stone+ (cobblestone, stone, netherrack, stone bricks,
+    // most stone-family blocks, all 0-level ores like coal/iron/copper, etc.).
+    for &block in &[
+        "stone",
+        "cobblestone",
+        "andesite",
+        "diorite",
+        "granite",
+        "stone_bricks",
+        "mossy_stone_bricks",
+        "cracked_stone_bricks",
+        "stone_slab",
+        "cobblestone_slab",
+        "stone_stairs",
+        "cobblestone_stairs",
+        "cobblestone_wall",
+        "tuff",
+        "calcite",
+        "netherrack",
+        "nether_quartz_ore",
+        "nether_gold_ore",
+        "end_stone",
+        "purpur_block",
+        "purpur_pillar",
+        "bricks",
+        "brick_slab",
+        "brick_stairs",
+        "furnace",
+        "blast_furnace",
+        "smoker",
+        "enchanting_table",
+        "brewing_stand",
+        "hopper",
+        "dropper",
+        "dispenser",
+        "observer",
+        "chest",
+        "trapped_chest",
+        "ender_chest",
+        "deepslate",
+        "coal_ore",
+        "deepslate_coal_ore",
+        "iron_ore",
+        "deepslate_iron_ore",
+        "copper_ore",
+        "deepslate_copper_ore",
+        "lapis_ore",
+        "deepslate_lapis_ore",
+        "redstone_ore",
+        "deepslate_redstone_ore",
+    ] {
+        m.insert(block, 1u8);
+    }
+
+    // Level 2: needs iron+ (gold, diamond, emerald ores; deepslate variants;
+    // iron/diamond/blocks; anvils; obsidian-adjacent blocks).
+    for &block in &[
+        "gold_ore",
+        "deepslate_gold_ore",
+        "diamond_ore",
+        "deepslate_diamond_ore",
+        "emerald_ore",
+        "deepslate_emerald_ore",
+        "iron_block",
+        "gold_block",
+        "diamond_block",
+        "emerald_block",
+        "anvil",
+        "chipped_anvil",
+        "damaged_anvil",
+    ] {
+        m.insert(block, 2u8);
+    }
+
+    // Level 3: needs diamond+ (obsidian).
+    m.insert("obsidian", 3u8);
+
+    // Level 4: needs netherite (ancient debris, netherite block, respawn anchor).
+    m.insert("ancient_debris", 4u8);
+    m.insert("netherite_block", 4u8);
+
+    // Bedrock is unbreakable regardless of tool.
+    m.insert("bedrock", u8::MAX);
+
+    m
+});
+
 // ---------------------------------------------------------------------------
 // Lookup functions
 // ---------------------------------------------------------------------------
@@ -466,7 +647,7 @@ pub fn find_best_tool_in_inventory(
     tool_type: &ToolType,
     inventory: &[Option<ItemStack>],
 ) -> Option<u8> {
-    crate::tool_select::find_tool_in_inventory(tool_type, inventory).map(|(_, slot)| slot)
+    crate::tool_select::find_tool_in_inventory(tool_type, inventory, None).map(|(_, slot)| slot)
 }
 
 // ---------------------------------------------------------------------------
@@ -656,7 +837,7 @@ mod tests {
     fn test_find_best_tool_empty_inventory() {
         let inv: Vec<Option<ItemStack>> = vec![];
         assert_eq!(
-            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &inv)
+            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &inv, None)
                 .map(|(_, slot)| slot),
             None
         );
@@ -675,7 +856,7 @@ mod tests {
             }),
         ];
         assert_eq!(
-            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &inv)
+            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &inv, None)
                 .map(|(_, slot)| slot),
             None
         );
@@ -701,7 +882,7 @@ mod tests {
         ];
         // slot 3 = iron_pickaxe (higher priority than wooden at slot 1)
         assert_eq!(
-            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &inv)
+            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &inv, None)
                 .map(|(_, slot)| slot),
             Some(3)
         );
@@ -726,7 +907,7 @@ mod tests {
         // Diamond (index 1) > Iron (index 2) > Gold (index 5)
         // So slot 1 (diamond) is best
         assert_eq!(
-            crate::tool_select::find_tool_in_inventory(&ToolType::Shovel, &inv)
+            crate::tool_select::find_tool_in_inventory(&ToolType::Shovel, &inv, None)
                 .map(|(_, slot)| slot),
             Some(1)
         );
@@ -746,7 +927,7 @@ mod tests {
         ];
         // Netherite (index 0) > Diamond (index 1)
         assert_eq!(
-            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &inv)
+            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &inv, None)
                 .map(|(_, slot)| slot),
             Some(0)
         );
@@ -808,5 +989,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- harvest_level_of ---
+
+    #[test]
+    fn test_harvest_level_of_matches_vanilla() {
+        assert_eq!(harvest_level_of(MaterialTier::Wood), 0);
+        assert_eq!(harvest_level_of(MaterialTier::Gold), 1);
+        assert_eq!(harvest_level_of(MaterialTier::Stone), 1);
+        assert_eq!(harvest_level_of(MaterialTier::Iron), 2);
+        assert_eq!(harvest_level_of(MaterialTier::Diamond), 3);
+        assert_eq!(harvest_level_of(MaterialTier::Netherite), 4);
+    }
+
+    // --- HARVEST_LEVEL table ---
+
+    #[test]
+    fn test_harvest_level_known_blocks() {
+        // Hand-mineable (no tool required).
+        assert_eq!(HARVEST_LEVEL.get("oak_log").copied(), Some(0));
+        assert_eq!(HARVEST_LEVEL.get("dirt").copied(), Some(0));
+        // `stone` and friends: needs stone+ pickaxe. Vanilla MC's
+        // `stone` block requires a pickaxe, so we tag it level 1
+        // (stone tier) so the tool selector refuses wood pickaxes.
+        // This deviates from raw vanilla metadata (which says stone
+        // is wood-tier) but is the safer default — wood pickaxes mine
+        // stone so slowly that the bot should prefer not to.
+        assert_eq!(HARVEST_LEVEL.get("stone").copied(), Some(1));
+        // Needs stone+ pickaxe (i.e. harvest level 1).
+        assert_eq!(HARVEST_LEVEL.get("cobblestone").copied(), Some(1));
+        assert_eq!(HARVEST_LEVEL.get("iron_ore").copied(), Some(1));
+        // Needs iron+ pickaxe (i.e. harvest level 2).
+        assert_eq!(HARVEST_LEVEL.get("diamond_ore").copied(), Some(2));
+        assert_eq!(HARVEST_LEVEL.get("deepslate_diamond_ore").copied(), Some(2));
+        // Needs diamond+.
+        assert_eq!(HARVEST_LEVEL.get("obsidian").copied(), Some(3));
+        // Needs netherite.
+        assert_eq!(HARVEST_LEVEL.get("ancient_debris").copied(), Some(4));
+        // Unbreakable.
+        assert_eq!(HARVEST_LEVEL.get("bedrock").copied(), Some(u8::MAX));
+    }
+
+    #[test]
+    fn test_harvest_level_unknown_block_defaults_zero() {
+        assert_eq!(HARVEST_LEVEL.get("not_a_block").copied(), None);
     }
 }

@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn test_get_info_server_name() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let info = server.get_info();
@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn test_get_info_version() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let info = server.get_info();
@@ -611,7 +611,7 @@ mod tests {
     #[test]
     fn test_get_info_tools_enabled() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let info = server.get_info();
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn test_get_info_has_instructions() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let info = server.get_info();
@@ -637,7 +637,7 @@ mod tests {
     #[tokio::test]
     async fn test_movement_tools_offline() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -666,7 +666,7 @@ mod tests {
     #[tokio::test]
     async fn test_container_tools_offline() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -703,7 +703,7 @@ mod tests {
     #[tokio::test]
     async fn test_combat_tools_offline() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -722,7 +722,7 @@ mod tests {
     #[tokio::test]
     async fn test_query_tools_offline() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         assert!(matches!(
@@ -758,7 +758,7 @@ mod tests {
     #[tokio::test]
     async fn test_is_connected_offline() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         assert_eq!(
@@ -772,7 +772,7 @@ mod tests {
     async fn test_is_connected_online() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         assert_eq!(
@@ -786,7 +786,7 @@ mod tests {
     #[tokio::test]
     async fn test_break_block_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -803,7 +803,7 @@ mod tests {
     #[tokio::test]
     async fn test_place_block_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -820,7 +820,7 @@ mod tests {
     #[tokio::test]
     async fn test_use_item_on_block_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -838,7 +838,7 @@ mod tests {
     async fn test_break_block_invalid_coords_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -857,7 +857,7 @@ mod tests {
     async fn test_place_block_invalid_slot_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -876,7 +876,7 @@ mod tests {
     async fn test_use_item_on_block_invalid_slot_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -896,7 +896,7 @@ mod tests {
     #[tokio::test]
     async fn test_switch_hotbar_slot_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -908,7 +908,7 @@ mod tests {
     #[tokio::test]
     async fn test_drop_item_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -923,7 +923,7 @@ mod tests {
     #[tokio::test]
     async fn test_use_item_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -935,7 +935,7 @@ mod tests {
     #[tokio::test]
     async fn test_equip_tool_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -951,7 +951,7 @@ mod tests {
     async fn test_switch_hotbar_slot_invalid_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server
@@ -965,7 +965,7 @@ mod tests {
     async fn test_equip_tool_unknown_type_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
         let result = server

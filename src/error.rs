@@ -160,8 +160,24 @@ impl Display for BotError {
 impl From<BotError> for ErrorData {
     fn from(err: BotError) -> Self {
         let (code, data) = match &err {
-            BotError::Offline(_)
-            | BotError::ConnectionFailed(_)
+            // `Offline` is mapped to a custom JSON-RPC server error
+            // (-32000) rather than `INTERNAL_ERROR` (-32603) so MCP
+            // clients can distinguish "the bot is not connected, retry
+            // after connecting" from genuine server-side bugs. The
+            // `data.reason` field carries a machine-readable string
+            // for clients that want to surface it in the UI.
+            BotError::Offline(_) => (
+                // JSON-RPC reserves -32000..=-32099 for
+                // implementation-defined server errors. `ErrorCode` is a
+                // public tuple struct (no `new` constructor), so we
+                // build the value directly. -32000 is the standard
+                // "server error" slot; we keep `reason` in `data` so
+                // clients can still discriminate the cause.
+                ErrorCode(-32000),
+                Some(serde_json::json!({ "reason": "bot_disconnected" })),
+            ),
+
+            BotError::ConnectionFailed(_)
             | BotError::CommandTimeout { .. }
             | BotError::ChunkNotLoaded(_)
             | BotError::InventoryFull
@@ -406,8 +422,21 @@ mod tests {
     fn test_into_mcp_error_offline() {
         let err = BotError::Offline("bot is offline".into());
         let mcp: ErrorData = err.into();
-        assert_eq!(mcp.code, ErrorCode::INTERNAL_ERROR);
+        // BotError::Offline maps to a custom JSON-RPC server error
+        // (-32000) — NOT INTERNAL_ERROR (-32603) — so MCP clients can
+        // distinguish "the bot is not connected" from genuine
+        // server-side bugs. The human-readable message is unchanged
+        // (clients surface it as `error.message`).
+        assert_eq!(mcp.code.0, -32000);
         assert_eq!(mcp.message.as_ref(), "Bot is offline: bot is offline");
+        // The `data` payload carries a machine-readable `reason` for
+        // clients that want to render a tailored UI hint (e.g. a
+        // "Connect the bot" call-to-action).
+        let data = mcp
+            .data
+            .as_ref()
+            .expect("Offline must carry a structured data payload");
+        assert_eq!(data["reason"], "bot_disconnected");
     }
 
     #[test]

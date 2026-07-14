@@ -44,6 +44,16 @@ pub enum OperationEvent {
     Arrived,
     /// The required tool/item is now equipped.
     ToolEquipped,
+    /// The required tool is already present in the bot's inventory
+    /// (hotbar or main inventory) but cannot be auto-switched to from
+    /// `EquippingTool` (e.g. it lives in the main inventory, slot 9-35,
+    /// and `SwitchHotbarSlot` only accepts 0-8). The state machine should
+    /// skip the equipping step and proceed directly to executing the main
+    /// action, mining with whatever the bot is already holding.
+    ///
+    /// Added by Task 1.5 (P0-#3 + P1-#6) so the executor can detect this
+    /// condition and skip a guaranteed-failed `EquipTool` round-trip.
+    ToolAlreadyInInventory,
     /// The main action has been initiated.
     ActionStarted,
     /// The block has been broken.
@@ -60,6 +70,23 @@ pub enum OperationEvent {
 // Standable-neighbour lookup
 // ═══════════════════════════════════════════════════════════════
 
+/// Horizontal neighbour offsets scanned by [`find_standable_neighbor`].
+///
+/// Eight directions: 4 orthogonal (±1 along a single axis) plus 4 diagonal
+/// (±1 along both X and Z). Diagonals matter when a block is wedged in a
+/// corner where only one diagonal neighbour is reachable (e.g. inside a
+/// 1-block-wide gap between two walls).
+const STANDABLE_OFFSETS_XZ: [(i32, i32); 8] = [
+    (-1, -1),
+    (-1, 0),
+    (-1, 1),
+    (0, -1),
+    (0, 1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
+];
+
 /// Find a standable position adjacent to `target` (±1 X/Z, same Y or ±1 Y).
 ///
 /// A position is standable if the block at that position is air (or absent
@@ -67,18 +94,21 @@ pub enum OperationEvent {
 /// solid (non-air). Returns `None` if no such position exists in the
 /// snapshot.
 ///
-/// Looks up blocks via `WorldSnapshot::block_index` — O(1) per check.
-pub(crate) fn find_standable_neighbor(
+/// Scans 8 horizontal neighbours (4 orthogonal + 4 diagonal) × 3 Y levels
+/// (priority: same Y first, then y+1, then y-1). Diagonals are necessary
+/// when the target is wedged in a 1-block gap where only a diagonal cell
+/// is reachable. Looks up blocks via `WorldSnapshot::block_index` — O(1)
+/// per check.
+pub fn find_standable_neighbor(
     snapshot: &crate::types::WorldSnapshot,
     target: crate::types::BlockPos,
 ) -> Option<crate::types::BlockPos> {
-    // Check 4 horizontal neighbours at 3 Y levels (y-1, y, y+1).
+    // Check 8 horizontal neighbours at 3 Y levels (y-1, y, y+1).
     // Priority: same Y first, then y+1 (step up), then y-1 (step down).
     let offsets_y: [i32; 3] = [0, 1, -1];
-    let offsets_xz: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
     for &dy in &offsets_y {
-        for &(dx, dz) in &offsets_xz {
+        for &(dx, dz) in &STANDABLE_OFFSETS_XZ {
             let pos = crate::types::BlockPos::new(target.x + dx, target.y + dy, target.z + dz);
             let below = crate::types::BlockPos::new(pos.x, pos.y - 1, pos.z);
 
@@ -130,6 +160,14 @@ impl MineBlockOperation {
             (OperationState::Idle, OperationEvent::Start) => OperationState::MovingToTarget,
             (OperationState::MovingToTarget, OperationEvent::Arrived) => {
                 OperationState::EquippingTool
+            }
+            // Task 1.5 (P0-#3 + P1-#6): when the best tool is in the bot's
+            // inventory but cannot be auto-equipped (e.g. main-inventory
+            // slot, where `SwitchHotbarSlot` only accepts 0-8), skip the
+            // `EquippingTool` step and go straight to executing the action.
+            // The bot will mine with whatever it is already holding.
+            (OperationState::MovingToTarget, OperationEvent::ToolAlreadyInInventory) => {
+                OperationState::ExecutingAction
             }
             (OperationState::EquippingTool, OperationEvent::ToolEquipped) => {
                 OperationState::ExecutingAction
@@ -393,13 +431,14 @@ mod tests {
             OperationEvent::Start,
             OperationEvent::Arrived,
             OperationEvent::ToolEquipped,
+            OperationEvent::ToolAlreadyInInventory,
             OperationEvent::ActionStarted,
             OperationEvent::BlockBroken,
             OperationEvent::BlockPlaced,
             OperationEvent::ContainerOpened,
             OperationEvent::Failed(test_err()),
         ];
-        assert_eq!(events.len(), 8);
+        assert_eq!(events.len(), 9);
     }
 
     #[test]
@@ -529,6 +568,343 @@ mod tests {
         );
     }
 
+    /// The 4 orthogonal neighbours are all solid; only the SE diagonal is
+    /// air with a solid floor. The function must return the diagonal cell
+    /// (1, 64, 1) — a case the old 4-direction scan would have missed.
+    #[test]
+    fn test_find_standable_neighbor_8_directions() {
+        use crate::types::BlockEntry;
+
+        let target = BlockPos::new(0, 64, 0);
+
+        let mut blocks = vec![BlockEntry {
+            position: target,
+            block_type: "stone".into(),
+            block_state: None,
+        }];
+
+        // Fill all 4 orthogonal neighbours with solid stone (so the old
+        // 4-direction scan would find nothing).
+        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            blocks.push(BlockEntry {
+                position: BlockPos::new(target.x + dx, target.y, target.z + dz),
+                block_type: "stone".into(),
+                block_state: None,
+            });
+            blocks.push(BlockEntry {
+                position: BlockPos::new(target.x + dx, target.y - 1, target.z + dz),
+                block_type: "stone".into(),
+                block_state: None,
+            });
+        }
+
+        // The SE diagonal (1, 64, 1) is air with stone below.
+        blocks.push(BlockEntry {
+            position: BlockPos::new(1, 64, 1),
+            block_type: "air".into(),
+            block_state: None,
+        });
+        blocks.push(BlockEntry {
+            position: BlockPos::new(1, 63, 1),
+            block_type: "stone".into(),
+            block_state: None,
+        });
+
+        let snapshot = make_snapshot_with_blocks(blocks);
+        assert_eq!(
+            find_standable_neighbor(&snapshot, target),
+            Some(BlockPos::new(1, 64, 1))
+        );
+    }
+
+    /// All 4 orthogonal neighbours are solid and all 4 diagonals are
+    /// air — but only ONE diagonal has a solid block below it. The function
+    /// must still find that diagonal.
+    #[test]
+    fn test_find_standable_neighbor_finds_only_standable_diagonal() {
+        use crate::types::BlockEntry;
+
+        let target = BlockPos::new(0, 64, 0);
+
+        let mut blocks = vec![BlockEntry {
+            position: target,
+            block_type: "stone".into(),
+            block_state: None,
+        }];
+
+        // All 4 orthogonal neighbours are solid (no standable cells there).
+        for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            blocks.push(BlockEntry {
+                position: BlockPos::new(target.x + dx, target.y, target.z + dz),
+                block_type: "stone".into(),
+                block_state: None,
+            });
+            blocks.push(BlockEntry {
+                position: BlockPos::new(target.x + dx, target.y - 1, target.z + dz),
+                block_type: "stone".into(),
+                block_state: None,
+            });
+        }
+
+        // 3 of 4 diagonals: air but no floor → not standable.
+        for (dx, dz) in [(-1, -1), (-1, 1), (1, -1)] {
+            blocks.push(BlockEntry {
+                position: BlockPos::new(target.x + dx, target.y, target.z + dz),
+                block_type: "air".into(),
+                block_state: None,
+            });
+            // Below these: also air (no floor).
+            blocks.push(BlockEntry {
+                position: BlockPos::new(target.x + dx, target.y - 1, target.z + dz),
+                block_type: "air".into(),
+                block_state: None,
+            });
+        }
+
+        // 4th diagonal: air with stone floor → the only standable cell.
+        blocks.push(BlockEntry {
+            position: BlockPos::new(1, 64, 1),
+            block_type: "air".into(),
+            block_state: None,
+        });
+        blocks.push(BlockEntry {
+            position: BlockPos::new(1, 63, 1),
+            block_type: "stone".into(),
+            block_state: None,
+        });
+
+        let snapshot = make_snapshot_with_blocks(blocks);
+        assert_eq!(
+            find_standable_neighbor(&snapshot, target),
+            Some(BlockPos::new(1, 64, 1))
+        );
+    }
+
+    /// All 8 directions scanned; only y+1 yields a standable cell. The Y
+    /// priority must reach the upper level after exhausting y=0.
+    #[test]
+    fn test_find_standable_neighbor_y_priority_preserved() {
+        use crate::types::BlockEntry;
+
+        // Target at (0, 64, 0). All same-Y neighbours are solid (including
+        // diagonals). The NW corner at y+1 is air with stone below.
+        let target = BlockPos::new(0, 64, 0);
+        let mut blocks = vec![BlockEntry {
+            position: target,
+            block_type: "stone".into(),
+            block_state: None,
+        }];
+
+        for &(dx, dz) in &STANDABLE_OFFSETS_XZ {
+            // Solid at the same Y — not standable.
+            blocks.push(BlockEntry {
+                position: BlockPos::new(target.x + dx, target.y, target.z + dz),
+                block_type: "stone".into(),
+                block_state: None,
+            });
+        }
+
+        // At y+1 (65): NW diagonal (-1, 65, -1) is air with stone below.
+        blocks.push(BlockEntry {
+            position: BlockPos::new(target.x - 1, target.y + 1, target.z - 1),
+            block_type: "air".into(),
+            block_state: None,
+        });
+        blocks.push(BlockEntry {
+            position: BlockPos::new(target.x - 1, target.y, target.z - 1),
+            block_type: "stone".into(),
+            block_state: None,
+        });
+
+        let snapshot = make_snapshot_with_blocks(blocks);
+        assert_eq!(
+            find_standable_neighbor(&snapshot, target),
+            Some(BlockPos::new(target.x - 1, target.y + 1, target.z - 1))
+        );
+    }
+
+    /// When no neighbour (orthogonal or diagonal, at any Y) is standable,
+    /// the function returns `None` instead of panicking.
+    #[test]
+    fn test_find_standable_neighbor_returns_none_when_no_candidate() {
+        use crate::types::BlockEntry;
+
+        let target = BlockPos::new(0, 64, 0);
+
+        // Fill the entire 3×3×3 area around the target with stone — no
+        // standable cell exists anywhere.
+        let mut blocks = vec![BlockEntry {
+            position: target,
+            block_type: "stone".into(),
+            block_state: None,
+        }];
+        for dy in -1..=1 {
+            for (dx, dz) in STANDABLE_OFFSETS_XZ.iter().copied() {
+                blocks.push(BlockEntry {
+                    position: BlockPos::new(target.x + dx, target.y + dy, target.z + dz),
+                    block_type: "stone".into(),
+                    block_state: None,
+                });
+            }
+        }
+
+        let snapshot = make_snapshot_with_blocks(blocks);
+        assert_eq!(find_standable_neighbor(&snapshot, target), None);
+    }
+
+    /// Empty snapshot — no blocks at all — should return `None` cleanly
+    /// (every cell is "absent", treated as air, but no floor exists either).
+    #[test]
+    fn test_find_standable_neighbor_empty_snapshot() {
+        let target = BlockPos::new(0, 64, 0);
+        let snapshot = make_snapshot_with_blocks(vec![]);
+        assert_eq!(find_standable_neighbor(&snapshot, target), None);
+    }
+
+    // ── proptest ────────────────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// A standable-neighbour is always within 1 block of the target on
+        /// both the X and Z axes, and within 1 block on the Y axis.
+        /// Without this invariant, the bot would pathfind to far-away cells.
+        #[test]
+        fn prop_standable_neighbor_within_unit_radius(
+            tx in -1000i32..1000,
+            ty in -1000i32..1000,
+            tz in -1000i32..1000,
+            seed in any::<u64>(),
+        ) {
+            use crate::types::BlockEntry;
+            let target = BlockPos::new(tx, ty, tz);
+            // Deterministic but varied layout: place "stone" at every cell
+            // (x, y, z) where hash(x, y, z) % 3 == 0, otherwise leave air.
+            let mut blocks = vec![BlockEntry {
+                position: target,
+                block_type: "stone".into(),
+                block_state: None,
+            }];
+            for &(dx, dz) in &STANDABLE_OFFSETS_XZ {
+                for &dy in &[-1, 0, 1] {
+                    let pos = BlockPos::new(target.x + dx, target.y + dy, target.z + dz);
+                    let is_solid = (seed
+                        .wrapping_add((pos.x as u64).wrapping_mul(2654435761))
+                        .wrapping_add((pos.y as u64).wrapping_mul(40503))
+                        .wrapping_add((pos.z as u64).wrapping_mul(16777619)))
+                        % 3
+                        == 0;
+                    blocks.push(BlockEntry {
+                        position: pos,
+                        block_type: if is_solid { "stone" } else { "air" }.into(),
+                        block_state: None,
+                    });
+                    if !is_solid {
+                        // Floor at y-1: always present so the cell is standable.
+                        let below = BlockPos::new(pos.x, pos.y - 1, pos.z);
+                        if !blocks.iter().any(|b| b.position == below) {
+                            blocks.push(BlockEntry {
+                                position: below,
+                                block_type: "stone".into(),
+                                block_state: None,
+                            });
+                        }
+                    }
+                }
+            }
+            let snapshot = make_snapshot_with_blocks(blocks);
+            if let Some(p) = find_standable_neighbor(&snapshot, target) {
+                prop_assert!((p.x - target.x).abs() <= 1);
+                prop_assert!((p.y - target.y).abs() <= 1);
+                prop_assert!((p.z - target.z).abs() <= 1);
+            }
+        }
+
+        /// Y priority: a standable cell at the same Y as the target is
+        /// always preferred over one at y+1 or y-1.
+        #[test]
+        fn prop_standable_neighbor_y_priority(
+            tx in -100i32..100,
+            ty in 0i32..200,
+            tz in -100i32..100,
+        ) {
+            use crate::types::BlockEntry;
+            let target = BlockPos::new(tx, ty, tz);
+            // Only y+1 has a standable cell; the same-Y ring is solid stone.
+            let mut blocks = vec![BlockEntry {
+                position: target,
+                block_type: "stone".into(),
+                block_state: None,
+            }];
+            for &(dx, dz) in &STANDABLE_OFFSETS_XZ {
+                // Same-Y ring: solid (not standable).
+                blocks.push(BlockEntry {
+                    position: BlockPos::new(target.x + dx, target.y, target.z + dz),
+                    block_type: "stone".into(),
+                    block_state: None,
+                });
+                // y+1 cell: air with stone floor (standable).
+                blocks.push(BlockEntry {
+                    position: BlockPos::new(target.x + dx, target.y + 1, target.z + dz),
+                    block_type: "air".into(),
+                    block_state: None,
+                });
+                blocks.push(BlockEntry {
+                    position: BlockPos::new(target.x + dx, target.y, target.z + dz),
+                    block_type: "stone".into(),
+                    block_state: None,
+                });
+            }
+            let snapshot = make_snapshot_with_blocks(blocks);
+            let found = find_standable_neighbor(&snapshot, target);
+            prop_assert!(found.is_some(), "should find a y+1 standable cell");
+            // The Y priority dictates y=0 first, but here y=0 is fully solid.
+            // So we should fall through to y+1.
+            let pos = found.unwrap();
+            prop_assert!(pos.y > target.y, "y+1 is the only standable ring, got y={}", pos.y);
+        }
+
+        /// An empty snapshot always returns `None` (no floor anywhere).
+        #[test]
+        fn prop_standable_neighbor_empty_snapshot(
+            tx in -1000i32..1000,
+            ty in -1000i32..1000,
+            tz in -1000i32..1000,
+        ) {
+            let target = BlockPos::new(tx, ty, tz);
+            let snapshot = make_snapshot_with_blocks(vec![]);
+            prop_assert_eq!(find_standable_neighbor(&snapshot, target), None);
+        }
+
+        /// When all 8 horizontal neighbours at all 3 Y levels are solid
+        /// stone, the function must return `None` rather than panicking.
+        #[test]
+        fn prop_standable_neighbor_buried(
+            tx in -100i32..100,
+            ty in 0i32..200,
+            tz in -100i32..100,
+        ) {
+            use crate::types::BlockEntry;
+            let target = BlockPos::new(tx, ty, tz);
+            let mut blocks = vec![BlockEntry {
+                position: target,
+                block_type: "stone".into(),
+                block_state: None,
+            }];
+            for &dy in &[-1, 0, 1] {
+                for &(dx, dz) in &STANDABLE_OFFSETS_XZ {
+                    blocks.push(BlockEntry {
+                        position: BlockPos::new(target.x + dx, target.y + dy, target.z + dz),
+                        block_type: "stone".into(),
+                        block_state: None,
+                    });
+                }
+            }
+            let snapshot = make_snapshot_with_blocks(blocks);
+            prop_assert_eq!(find_standable_neighbor(&snapshot, target), None);
+        }
+    }
+
     // ── MineBlockOperation: happy path ──────────────────────
 
     #[test]
@@ -648,6 +1024,63 @@ mod tests {
         let op = MineBlockOperation::new(test_pos(), ToolType::Pickaxe);
         let state = op.advance(OperationState::Idle, OperationEvent::Arrived);
         assert_eq!(state, OperationState::Idle);
+    }
+
+    // ── MineBlockOperation: ToolAlreadyInInventory skip (Task 1.5) ─
+
+    #[test]
+    fn test_mine_block_skip_equip_when_tool_in_inventory() {
+        // Task 1.5 (P0-#3): when the best tool is already in the bot's
+        // inventory (but cannot be auto-equipped), the state machine
+        // should transition from `MovingToTarget` to `ExecutingAction`
+        // via the new `ToolAlreadyInInventory` event — skipping the
+        // `EquippingTool` step entirely.
+        let op = MineBlockOperation::new(test_pos(), ToolType::Pickaxe);
+        let mut state = OperationState::Idle;
+
+        state = op.advance(state, OperationEvent::Start);
+        assert_eq!(state, OperationState::MovingToTarget);
+
+        // Tool is in inventory but cannot be hotbar-switched: skip equip.
+        state = op.advance(state, OperationEvent::ToolAlreadyInInventory);
+        assert_eq!(state, OperationState::ExecutingAction);
+
+        // Continue with the rest of the happy path.
+        state = op.advance(state, OperationEvent::ActionStarted);
+        assert_eq!(state, OperationState::WaitingForResult);
+
+        state = op.advance(state, OperationEvent::BlockBroken);
+        assert_eq!(state, OperationState::Completed);
+    }
+
+    #[test]
+    fn test_mine_block_tool_already_inventory_only_valid_from_moving() {
+        // `ToolAlreadyInInventory` should only be valid from `MovingToTarget`.
+        // From any other state, the transition is invalid (state stays put).
+        let op = MineBlockOperation::new(test_pos(), ToolType::Pickaxe);
+
+        // Idle: invalid, stays Idle.
+        let state = op.advance(OperationState::Idle, OperationEvent::ToolAlreadyInInventory);
+        assert_eq!(state, OperationState::Idle);
+
+        // EquippingTool: invalid, stays put.
+        let state = op.advance(
+            OperationState::EquippingTool,
+            OperationEvent::ToolAlreadyInInventory,
+        );
+        assert_eq!(state, OperationState::EquippingTool);
+
+        // ExecutingAction: invalid, stays put.
+        let state = op.advance(
+            OperationState::ExecutingAction,
+            OperationEvent::ToolAlreadyInInventory,
+        );
+        assert_eq!(state, OperationState::ExecutingAction);
+
+        // Failed: sticky.
+        let failed = OperationState::Failed(test_err());
+        let state = op.advance(failed.clone(), OperationEvent::ToolAlreadyInInventory);
+        assert_eq!(state, failed);
     }
 
     // ── PlaceBlockOperation: happy path ─────────────────────

@@ -41,9 +41,10 @@ fn main() {
     // honour the user's saved language from the very first frame.
     minecraft_mcp_rs::ui::i18n::set(config.language);
     let state = Arc::new(SharedState::new(config.clone()));
-    let (sender, receiver) = channel::create_command_channel(64);
-    // Honour the user-configurable command timeout (editable in the UI).
-    let sender = sender.with_timeout(std::time::Duration::from_secs(config.command_timeout_secs));
+    // Wire the shared state into the channel so `BotCommandSender` can
+    // hot-read `command_timeout_secs` from the UI on every send — the
+    // sender no longer holds a stale `Duration` of its own.
+    let (sender, receiver) = channel::create_command_channel(64, Arc::clone(&state));
     // Wrap the receiver in a shared slot (Arc<Mutex<Option<_>>>) so the
     // azalea event handler can lease it on `Event::Spawn` and return it to
     // the slot when the executor is aborted on disconnect. This keeps the
