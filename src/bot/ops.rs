@@ -1,24 +1,31 @@
 //! Bot compound operation executor.
 //!
 //! Orchestrates multi-step operations (mine, place, open, equip) by driving
-//! the pure state machines from [`crate::compound_ops`] and issuing
-//! [`BotCommand`]s through the command channel.
+//! the pure state machines from [`crate::compound_ops`] and dispatching
+//! [`BotCommand`]s directly through [`CommandExecutor::dispatch`].
+//!
+//! Sub-commands are dispatched via a `&CommandExecutor` reference rather than
+//! through the [`crate::channel::BotCommandSender`] channel. The channel's
+//! only consumer is [`CommandExecutor::run_with_lease`], which processes one
+//! command at a time — so a compound operation that sends sub-commands
+//! through the same channel would block forever waiting for a consumer that
+//! is already awaiting the outer `dispatch` call (re-entrant deadlock).
+//! Dispatching directly via `&CommandExecutor` bypasses the channel entirely:
+//! sub-command handlers run inline on the same call stack.
 
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, trace, warn};
 
 use crate::block_data::ItemStack;
 use crate::block_data::best_tool_for_block;
-use crate::channel::BotCommandSender;
+use crate::bot::commands::{BotActions, CommandExecutor};
 use crate::compound_ops::{
     EquipToolOperation, MineBlockOperation, OpenContainerOperation, OperationEvent, OperationState,
     PlaceBlockOperation,
 };
 use crate::error::BotError;
 use crate::mining_calc::calculate_mine_time;
-use crate::state::SharedState;
 use crate::tool_select::{find_tool_in_inventory, select_tool_for_block};
 use crate::types::{BlockPos, BotCommand, BotResult, MaterialTier, ToolType};
 
@@ -38,27 +45,30 @@ use crate::types::{BlockPos, BotCommand, BotResult, MaterialTier, ToolType};
 /// High-level executor for compound bot operations.
 ///
 /// Each method drives a state machine from [`crate::compound_ops`] by
-/// translating states into [`BotCommand`]s sent through the command channel,
-/// waiting for responses, and advancing the machine.
+/// translating states into [`BotCommand`]s dispatched directly through
+/// [`CommandExecutor::dispatch`], and advancing the machine based on the
+/// results.
+///
+/// All methods are associated functions taking `&CommandExecutor<B>` as the
+/// first parameter. The executor holds no state of its own — it is a unit
+/// struct that exists only as a namespace for the compound-operation logic.
+/// Sub-commands are dispatched via the `&CommandExecutor` reference (not the
+/// [`crate::channel::BotCommandSender`] channel) to avoid re-entrant
+/// deadlock when the executor is already inside `run_with_lease` consuming
+/// the outer command.
 #[derive(Debug, Clone)]
-pub struct CompoundOpExecutor {
-    sender: BotCommandSender,
-    state: Arc<SharedState>,
-}
+pub struct CompoundOpExecutor;
 
 impl CompoundOpExecutor {
-    /// Create a new executor bound to a command sender and shared state.
-    pub fn new(sender: BotCommandSender, state: Arc<SharedState>) -> Self {
-        Self { sender, state }
-    }
-
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    /// Query the bot's inventory by sending [`BotCommand::QueryInventory`].
-    async fn query_inventory(&self) -> Result<Vec<Option<ItemStack>>, BotError> {
-        let result = self.sender.send_command(BotCommand::QueryInventory).await?;
+    /// Query the bot's inventory by dispatching [`BotCommand::QueryInventory`].
+    async fn query_inventory<B: BotActions>(
+        executor: &CommandExecutor<B>,
+    ) -> Result<Vec<Option<ItemStack>>, BotError> {
+        let result = executor.dispatch(BotCommand::QueryInventory).await?;
         let data = result.data.unwrap_or(serde_json::Value::Null);
 
         if let Some(arr) = data.as_array() {
@@ -99,21 +109,21 @@ impl CompoundOpExecutor {
     /// 9. Wait for mining completion (sleep calculated from [`mining_calc`](crate::mining_calc)).
     /// 10. Verify the block is broken.
     /// 11. Return success or failure.
-    pub async fn execute_mine_block(
-        &self,
+    pub(crate) async fn execute_mine_block<B: BotActions>(
+        executor: &CommandExecutor<B>,
         pos: BlockPos,
         use_best_tool: bool,
     ) -> Result<BotResult, BotError> {
         trace!(?pos, use_best_tool, "execute_mine_block start");
 
         // Step 1: Check online
-        if !self.state.is_online() {
+        if !executor.state.is_online() {
             warn!("bot offline, cannot mine block");
             return Err(BotError::Offline("bot is not connected".into()));
         }
 
         // Step 2: Query block type
-        let snapshot = self.state.read_snapshot();
+        let snapshot = executor.state.read_snapshot();
         let block_type = snapshot
             .blocks
             .iter()
@@ -133,7 +143,7 @@ impl CompoundOpExecutor {
         let mut skip_equip = false;
 
         if use_best_tool && required_tool != ToolType::Hand {
-            let inventory = self.query_inventory().await?;
+            let inventory = Self::query_inventory(executor).await?;
             let selection = select_tool_for_block(&block_type, &inventory);
 
             // Step 4: Tool needed but not in inventory
@@ -177,8 +187,8 @@ impl CompoundOpExecutor {
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
             match op.current_action(&state) {
                 Some(BotCommand::MoveTo(target)) => {
-                    trace!(?target, "sending MoveTo");
-                    let result = self.sender.send_command(BotCommand::MoveTo(target)).await?;
+                    trace!(?target, "dispatching MoveTo");
+                    let result = executor.dispatch(BotCommand::MoveTo(target)).await?;
                     if !result.success {
                         state = op.advance(
                             state,
@@ -192,8 +202,8 @@ impl CompoundOpExecutor {
                     state = op.advance(state, OperationEvent::Arrived);
                 }
                 Some(BotCommand::EquipTool(t)) => {
-                    trace!(?t, "sending EquipTool");
-                    let result = self.sender.send_command(BotCommand::EquipTool(t)).await?;
+                    trace!(?t, "dispatching EquipTool");
+                    let result = executor.dispatch(BotCommand::EquipTool(t)).await?;
                     if !result.success {
                         state = op.advance(
                             state,
@@ -207,8 +217,8 @@ impl CompoundOpExecutor {
                     state = op.advance(state, OperationEvent::ToolEquipped);
                 }
                 Some(BotCommand::BreakBlock(bp)) => {
-                    trace!(?bp, "sending BreakBlock");
-                    let result = self.sender.send_command(BotCommand::BreakBlock(bp)).await?;
+                    trace!(?bp, "dispatching BreakBlock");
+                    let result = executor.dispatch(BotCommand::BreakBlock(bp)).await?;
                     if !result.success {
                         state = op.advance(
                             state,
@@ -243,7 +253,7 @@ impl CompoundOpExecutor {
                     sleep(Duration::from_secs_f64(mine_time)).await;
 
                     // Step 10: Verify block broken
-                    let new_snapshot = self.state.read_snapshot();
+                    let new_snapshot = executor.state.read_snapshot();
                     // A post-mine snapshot may contain an "air" entry at this
                     // position; treat that as "block gone" rather than "still
                     // present" so successful mining isn't reported as failure.
@@ -302,19 +312,20 @@ impl CompoundOpExecutor {
     /// 3. Walk near the target.
     /// 4. Place the block.
     /// 5. Verify the block was placed.
-    pub async fn execute_place_block(
-        &self,
+    #[allow(dead_code)] // part of the CompoundOpExecutor API; not yet wired into handle_act
+    pub(crate) async fn execute_place_block<B: BotActions>(
+        executor: &CommandExecutor<B>,
         pos: BlockPos,
         block_type: String,
     ) -> Result<BotResult, BotError> {
         trace!(?pos, %block_type, "execute_place_block start");
 
-        if !self.state.is_online() {
+        if !executor.state.is_online() {
             return Err(BotError::Offline("bot is not connected".into()));
         }
 
         // Step 1: Find item in inventory
-        let inventory = self.query_inventory().await?;
+        let inventory = Self::query_inventory(executor).await?;
         let has_item = inventory
             .iter()
             .any(|slot| slot.as_ref().is_some_and(|item| item.item_id == block_type));
@@ -341,9 +352,7 @@ impl CompoundOpExecutor {
                     "{block_type} is in main inventory slot {s}; move it to a hotbar slot (0-8) before placing"
                 )));
             }
-            self.sender
-                .send_command(BotCommand::SwitchHotbarSlot(s))
-                .await?;
+            executor.dispatch(BotCommand::SwitchHotbarSlot(s)).await?;
         }
 
         // Build state machine
@@ -358,7 +367,7 @@ impl CompoundOpExecutor {
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
             match op.current_action(&state) {
                 Some(BotCommand::MoveTo(target)) => {
-                    let result = self.sender.send_command(BotCommand::MoveTo(target)).await?;
+                    let result = executor.dispatch(BotCommand::MoveTo(target)).await?;
                     if !result.success {
                         state = op.advance(
                             state,
@@ -372,9 +381,8 @@ impl CompoundOpExecutor {
                     state = op.advance(state, OperationEvent::Arrived);
                 }
                 Some(BotCommand::PlaceBlock(target, bt)) => {
-                    let result = self
-                        .sender
-                        .send_command(BotCommand::PlaceBlock(target, bt))
+                    let result = executor
+                        .dispatch(BotCommand::PlaceBlock(target, bt))
                         .await?;
                     if !result.success {
                         state = op.advance(
@@ -386,7 +394,7 @@ impl CompoundOpExecutor {
 
                     // Verify block placed
                     sleep(Duration::from_millis(200)).await;
-                    let new_snapshot = self.state.read_snapshot();
+                    let new_snapshot = executor.state.read_snapshot();
                     let placed = new_snapshot
                         .blocks
                         .iter()
@@ -429,10 +437,14 @@ impl CompoundOpExecutor {
     /// 2. Send `OpenContainer` command.
     /// 3. Return success (container handle storage is handled by the lower-level
     ///    command handler).
-    pub async fn execute_open_container(&self, pos: BlockPos) -> Result<BotResult, BotError> {
+    #[allow(dead_code)] // part of the CompoundOpExecutor API; not yet wired into handle_act
+    pub(crate) async fn execute_open_container<B: BotActions>(
+        executor: &CommandExecutor<B>,
+        pos: BlockPos,
+    ) -> Result<BotResult, BotError> {
         trace!(?pos, "execute_open_container start");
 
-        if !self.state.is_online() {
+        if !executor.state.is_online() {
             return Err(BotError::Offline("bot is not connected".into()));
         }
 
@@ -444,7 +456,7 @@ impl CompoundOpExecutor {
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
             match op.current_action(&state) {
                 Some(BotCommand::MoveTo(target)) => {
-                    let result = self.sender.send_command(BotCommand::MoveTo(target)).await?;
+                    let result = executor.dispatch(BotCommand::MoveTo(target)).await?;
                     if !result.success {
                         state = op.advance(
                             state,
@@ -458,10 +470,7 @@ impl CompoundOpExecutor {
                     state = op.advance(state, OperationEvent::Arrived);
                 }
                 Some(BotCommand::OpenContainer(target)) => {
-                    let result = self
-                        .sender
-                        .send_command(BotCommand::OpenContainer(target))
-                        .await?;
+                    let result = executor.dispatch(BotCommand::OpenContainer(target)).await?;
                     if !result.success {
                         state =
                             op.advance(state, OperationEvent::Failed(BotError::ContainerTimeout));
@@ -501,15 +510,19 @@ impl CompoundOpExecutor {
     /// 2. Move to hotbar if needed (by switching to the slot).
     /// 3. Drive the `EquipToolOperation` state machine.
     /// 4. Return success.
-    pub async fn execute_equip_tool(&self, tool_type: ToolType) -> Result<BotResult, BotError> {
+    #[allow(dead_code)] // part of the CompoundOpExecutor API; not yet wired into handle_act
+    pub(crate) async fn execute_equip_tool<B: BotActions>(
+        executor: &CommandExecutor<B>,
+        tool_type: ToolType,
+    ) -> Result<BotResult, BotError> {
         trace!(?tool_type, "execute_equip_tool start");
 
-        if !self.state.is_online() {
+        if !executor.state.is_online() {
             return Err(BotError::Offline("bot is not connected".into()));
         }
 
         // Step 1: Find best tool
-        let inventory = self.query_inventory().await?;
+        let inventory = Self::query_inventory(executor).await?;
         let found = find_tool_in_inventory(&tool_type, &inventory);
 
         if found.is_none() && tool_type != ToolType::Hand {
@@ -544,7 +557,7 @@ impl CompoundOpExecutor {
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
             match op.current_action(&state) {
                 Some(BotCommand::EquipTool(t)) => {
-                    let result = self.sender.send_command(BotCommand::EquipTool(t)).await?;
+                    let result = executor.dispatch(BotCommand::EquipTool(t)).await?;
                     if !result.success {
                         state = op.advance(
                             state,
@@ -583,13 +596,168 @@ impl CompoundOpExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channel::create_command_channel;
     use crate::config::AppConfig;
+    use crate::state::SharedState;
     use crate::types::{BlockEntry, GameMode, SelfPlayer, WorldSnapshot};
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    // ── Helpers ───────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════
+    // Mock bot — implements BotActions by mutating SharedState
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Shared configurable state for the mock bot.
+    ///
+    /// All fields use interior mutability so `BotActions` methods (which take
+    /// `&self`) can mutate behavior. The mock is held by value inside
+    /// `CommandExecutor<MockBot>`, so all configuration must live behind
+    /// `Arc` to be observable from the test after the executor is built.
+    struct MockBotState {
+        inventory: Mutex<Vec<Option<ItemStack>>>,
+        /// If `true` (default), `goto` succeeds and updates player position.
+        /// If `false`, `goto` returns `Err(PathfindingFailed)`.
+        goto_succeeds: AtomicBool,
+        /// If `true` (default), `mine_block` replaces the block with an "air"
+        /// entry. If `false`, the block is left untouched — simulates a
+        /// mining interruption where the block is still present after mining
+        /// time elapses.
+        mine_removes_block: AtomicBool,
+        /// Block type that `block_interact` should "place" into the snapshot.
+        /// Set by tests that exercise `execute_place_block`; `None` means
+        /// `block_interact` is a no-op (no block is added).
+        next_place_type: Mutex<Option<String>>,
+    }
+
+    impl MockBotState {
+        fn new(inventory: Vec<Option<ItemStack>>) -> Self {
+            Self {
+                inventory: Mutex::new(inventory),
+                goto_succeeds: AtomicBool::new(true),
+                mine_removes_block: AtomicBool::new(true),
+                next_place_type: Mutex::new(None),
+            }
+        }
+    }
+
+    /// Mock bot that implements [`BotActions`] by updating [`SharedState`].
+    ///
+    /// - `goto` updates `self_player.position` in the snapshot (configurable
+    ///   to fail with `PathfindingFailed` via `goto_succeeds`).
+    /// - `mine_block` replaces the block with an "air" entry (configurable
+    ///   to leave the block via `mine_removes_block`, simulating a mining
+    ///   interruption).
+    /// - `block_interact` adds a pre-configured block type (`next_place_type`)
+    ///   to the snapshot, mirroring a successful block placement.
+    /// - `inventory_entries` returns the test inventory.
+    /// - `switch_hotbar_slot` updates `held_item_slot` in the snapshot.
+    /// - Other methods are no-ops or return defaults.
+    struct MockBot {
+        state: Arc<SharedState>,
+        mock: Arc<MockBotState>,
+    }
+
+    impl BotActions for MockBot {
+        async fn goto(&self, pos: &BlockPos) -> Result<(), BotError> {
+            if !self.mock.goto_succeeds.load(Ordering::SeqCst) {
+                return Err(BotError::PathfindingFailed {
+                    target: *pos,
+                    reason: "mock pathfinding failure".into(),
+                });
+            }
+            let snap = (*self.state.read_snapshot()).clone();
+            self.state.update_snapshot(WorldSnapshot {
+                self_player: SelfPlayer {
+                    position: *pos,
+                    ..snap.self_player
+                },
+                ..snap
+            });
+            Ok(())
+        }
+
+        async fn jump(&self) {}
+
+        fn teleport(&self, _pos: &BlockPos) {}
+
+        fn switch_hotbar_slot(&self, slot: u8) {
+            let snap = (*self.state.read_snapshot()).clone();
+            self.state.update_snapshot(WorldSnapshot {
+                self_player: SelfPlayer {
+                    held_item_slot: slot,
+                    ..snap.self_player
+                },
+                ..snap
+            });
+        }
+
+        fn drop_item(&self, _slot: u8, _count: u8) {}
+
+        fn start_use_item(&self) {}
+
+        fn chat(&self, _message: &str) {}
+
+        fn attack_entity(&self, _entity_id: u32) -> Result<(), BotError> {
+            Ok(())
+        }
+
+        fn set_crouching(&self, _crouching: bool) {}
+
+        fn mine_block(&self, pos: &BlockPos) {
+            if !self.mock.mine_removes_block.load(Ordering::SeqCst) {
+                // Simulate mining interruption: leave the block in place so
+                // the post-mine verification detects "block still present".
+                return;
+            }
+            // Replace the block with an "air" entry, mirroring a real
+            // server's post-mine snapshot.
+            let mut snap = (*self.state.read_snapshot()).clone();
+            for b in snap.blocks.iter_mut() {
+                if b.position == *pos {
+                    b.block_type = "air".into();
+                }
+            }
+            self.state.update_snapshot(snap);
+        }
+
+        fn block_interact(&self, pos: &BlockPos) {
+            let bt = self.mock.next_place_type.lock().unwrap().clone();
+            if let Some(bt) = bt {
+                let mut snap = (*self.state.read_snapshot()).clone();
+                let exists = snap.blocks.iter().any(|b| b.position == *pos);
+                if exists {
+                    for b in snap.blocks.iter_mut() {
+                        if b.position == *pos {
+                            b.block_type = bt.clone();
+                        }
+                    }
+                } else {
+                    snap.blocks.push(BlockEntry {
+                        position: *pos,
+                        block_type: bt,
+                        block_state: None,
+                    });
+                }
+                self.state.update_snapshot(snap);
+            }
+        }
+
+        async fn open_container(&self, _pos: &BlockPos) -> Result<(), BotError> {
+            Ok(())
+        }
+
+        fn inventory_entries(&self) -> Vec<Option<ItemStack>> {
+            self.mock.inventory.lock().unwrap().clone()
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Snapshot helpers
+    // ═══════════════════════════════════════════════════════════════
 
     fn make_snapshot_with_block(pos: BlockPos, block_type: &str) -> WorldSnapshot {
+        let chunk_x = pos.x >> 4;
+        let chunk_z = pos.z >> 4;
         WorldSnapshot {
             blocks: vec![BlockEntry {
                 position: pos,
@@ -608,7 +776,8 @@ mod tests {
                 inventory: Vec::new(),
             },
             timestamp: 1,
-            chunk_summary: vec![],
+            // Include the chunk so `handle_break_block` considers it loaded.
+            chunk_summary: vec![(chunk_x, chunk_z)],
             commands_enabled: None,
         }
     }
@@ -633,133 +802,57 @@ mod tests {
         }
     }
 
-    fn inventory_json(items: &[Option<ItemStack>]) -> serde_json::Value {
-        let arr: Vec<serde_json::Value> = items
-            .iter()
-            .map(|slot| match slot {
-                Some(item) => serde_json::json!({
-                    "item_id": item.item_id,
-                    "count": item.count,
-                }),
-                None => serde_json::Value::Null,
-            })
-            .collect();
-        serde_json::Value::Array(arr)
-    }
-
-    /// Spawn a mock responder that replies to commands and optionally mutates
-    /// the shared snapshot.
-    fn spawn_mock_responder(
-        mut receiver: crate::channel::BotCommandReceiver,
-        inventory: Vec<Option<ItemStack>>,
-        mut snapshot: WorldSnapshot,
-        state: Arc<SharedState>,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            while let Some(wrapped) = receiver.recv().await {
-                let result = match &wrapped.command {
-                    BotCommand::QueryInventory => Ok(BotResult {
-                        success: true,
-                        message: "inventory".into(),
-                        data: Some(inventory_json(&inventory)),
-                    }),
-                    BotCommand::MoveTo(pos) => {
-                        snapshot.self_player.position = *pos;
-                        state.update_snapshot(snapshot.clone());
-                        Ok(BotResult {
-                            success: true,
-                            message: "moved".into(),
-                            data: None,
-                        })
-                    }
-                    BotCommand::BreakBlock(pos) => {
-                        snapshot.blocks.retain(|b| b.position != *pos);
-                        state.update_snapshot(snapshot.clone());
-                        Ok(BotResult {
-                            success: true,
-                            message: "mining started".into(),
-                            data: None,
-                        })
-                    }
-                    BotCommand::PlaceBlock(pos, bt) => {
-                        snapshot.blocks.push(BlockEntry {
-                            position: *pos,
-                            block_type: bt.clone(),
-                            block_state: None,
-                        });
-                        state.update_snapshot(snapshot.clone());
-                        Ok(BotResult {
-                            success: true,
-                            message: "placed".into(),
-                            data: None,
-                        })
-                    }
-                    BotCommand::OpenContainer(_) => Ok(BotResult {
-                        success: true,
-                        message: "opened".into(),
-                        data: None,
-                    }),
-                    BotCommand::SwitchHotbarSlot(slot) => {
-                        snapshot.self_player.held_item_slot = *slot;
-                        state.update_snapshot(snapshot.clone());
-                        Ok(BotResult {
-                            success: true,
-                            message: "switched".into(),
-                            data: None,
-                        })
-                    }
-                    BotCommand::EquipTool(tool) => {
-                        // Simulate the bot finding and switching to the best
-                        // tool of the requested type in the inventory.
-                        if let Some((_, slot)) = find_tool_in_inventory(tool, &inventory) {
-                            snapshot.self_player.held_item_slot = slot;
-                            state.update_snapshot(snapshot.clone());
-                        }
-                        Ok(BotResult {
-                            success: true,
-                            message: format!("equipped {:?}", tool),
-                            data: None,
-                        })
-                    }
-                    _ => Ok(BotResult {
-                        success: true,
-                        message: "ok".into(),
-                        data: None,
-                    }),
-                };
-                let _ = wrapped.respond_to.send(result);
-            }
-        })
-    }
-
+    /// Set up a test executor backed by a [`MockBot`].
+    ///
+    /// Returns `(executor, mock_state, shared_state)`. Tests can configure
+    /// mock behavior by mutating `mock_state` (e.g. set `goto_succeeds` to
+    /// `false` to simulate pathfinding failure, or `mine_removes_block` to
+    /// `false` to simulate a mining interruption).
     fn setup(
         inventory: Vec<Option<ItemStack>>,
         snapshot: WorldSnapshot,
     ) -> (
-        CompoundOpExecutor,
-        tokio::task::JoinHandle<()>,
+        CommandExecutor<MockBot>,
+        Arc<MockBotState>,
         Arc<SharedState>,
     ) {
-        let (sender, receiver) = create_command_channel(10);
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        state.update_snapshot(snapshot.clone());
+        state.update_snapshot(snapshot);
         state.set_online(true);
-        let executor = CompoundOpExecutor::new(sender, Arc::clone(&state));
-        let handle = spawn_mock_responder(receiver, inventory, snapshot, Arc::clone(&state));
-        (executor, handle, state)
+        let mock_state = Arc::new(MockBotState::new(inventory));
+        let bot = MockBot {
+            state: Arc::clone(&state),
+            mock: Arc::clone(&mock_state),
+        };
+        let executor = CommandExecutor::new_for_lease(bot, Arc::clone(&state), None);
+        (executor, mock_state, state)
     }
+
+    /// Build an offline executor (no snapshot, online=false) for tests that
+    /// only check the offline guard.
+    fn offline_executor() -> CommandExecutor<MockBot> {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        state.set_online(false);
+        let mock_state = Arc::new(MockBotState::new(vec![]));
+        let bot = MockBot {
+            state: Arc::clone(&state),
+            mock: Arc::clone(&mock_state),
+        };
+        CommandExecutor::new_for_lease(bot, Arc::clone(&state), None)
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // execute_mine_block tests
+    // ═══════════════════════════════════════════════════════════════
 
     // ── execute_mine_block: offline ───────────────────────────────────────
 
     #[tokio::test]
     async fn test_mine_block_offline() {
-        let (sender, _receiver) = create_command_channel(10);
-        let state = Arc::new(SharedState::new(AppConfig::default()));
-        state.set_online(false);
-        let executor = CompoundOpExecutor::new(sender, state);
+        let executor = offline_executor();
 
         let pos = BlockPos::new(10, 64, 20);
-        let result = executor.execute_mine_block(pos, false).await;
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, false).await;
 
         assert!(result.is_err());
         assert!(matches!(result, Err(BotError::Offline(_))));
@@ -769,10 +862,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_mine_block_not_found() {
-        let (executor, _handle, _state) = setup(vec![], make_empty_snapshot());
+        let (executor, _mock, _state) = setup(vec![], make_empty_snapshot());
 
         let pos = BlockPos::new(10, 64, 20);
-        let result = executor.execute_mine_block(pos, false).await;
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, false).await;
 
         assert!(result.is_err());
         assert!(matches!(result, Err(BotError::BlockNotFound(_))));
@@ -784,9 +877,9 @@ mod tests {
     async fn test_mine_block_happy_path_hand() {
         let pos = BlockPos::new(10, 64, 20);
         let snapshot = make_snapshot_with_block(pos, "dirt");
-        let (executor, _handle, _state) = setup(vec![], snapshot);
+        let (executor, _mock, _state) = setup(vec![], snapshot);
 
-        let result = executor.execute_mine_block(pos, false).await;
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, false).await;
 
         assert!(result.is_ok());
         let bot_result = result.unwrap();
@@ -807,18 +900,26 @@ mod tests {
                 count: 1,
             }),
         ];
-        let (executor, _handle, state) = setup(inventory, snapshot);
+        let (executor, _mock, state) = setup(inventory, snapshot);
 
-        let result = executor.execute_mine_block(pos, true).await;
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, true).await;
 
         assert!(result.is_ok(), "expected success, got: {:?}", result);
         let bot_result = result.unwrap();
         assert!(bot_result.success);
         assert!(bot_result.message.contains("Mined stone"));
 
-        // Verify the block was removed from snapshot
+        // Verify the block was replaced with "air" in the snapshot.
         let final_snapshot = state.read_snapshot();
-        assert!(!final_snapshot.blocks.iter().any(|b| b.position == pos));
+        assert!(
+            final_snapshot
+                .blocks
+                .iter()
+                .any(|b| b.position == pos && b.block_type == "air"),
+            "expected block at {:?} to be replaced with air, got blocks: {:?}",
+            pos,
+            final_snapshot.blocks
+        );
     }
 
     // ── execute_mine_block: tool not found ────────────────────────────────
@@ -827,88 +928,37 @@ mod tests {
     async fn test_mine_block_tool_not_found() {
         let pos = BlockPos::new(10, 64, 20);
         let snapshot = make_snapshot_with_block(pos, "stone");
-        let (executor, _handle, _state) = setup(vec![], snapshot);
+        let (executor, _mock, _state) = setup(vec![], snapshot);
 
-        let result = executor.execute_mine_block(pos, true).await;
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, true).await;
 
         assert!(result.is_err());
         assert!(matches!(result, Err(BotError::ToolNotFound { .. })));
     }
 
-    // ── execute_mine_block: mining interrupted (BreakBlock fails) ───────
+    // ── execute_mine_block: mining interrupted (block remains) ───────────
 
     #[tokio::test]
     async fn test_mine_block_mining_interrupted() {
+        // The mock leaves the block in place after mining (simulating an
+        // interruption). The post-mine verification detects "block still
+        // present" and fails with MiningInterrupted.
         let pos = BlockPos::new(10, 64, 20);
-        let snapshot = make_snapshot_with_block(pos, "obsidian");
-        let inventory = vec![Some(ItemStack {
-            item_id: "diamond_pickaxe".into(),
-            count: 1,
-        })];
-        let (sender, mut receiver) = create_command_channel(10);
-        let state = Arc::new(SharedState::new(AppConfig::default()));
-        state.update_snapshot(snapshot.clone());
-        state.set_online(true);
-        let executor = CompoundOpExecutor::new(sender, Arc::clone(&state));
+        let snapshot = make_snapshot_with_block(pos, "stone");
+        let inventory = vec![
+            None,
+            Some(ItemStack {
+                item_id: "iron_pickaxe".into(),
+                count: 1,
+            }),
+        ];
+        let (executor, mock, _state) = setup(inventory, snapshot);
+        mock.mine_removes_block.store(false, Ordering::SeqCst);
 
-        // Custom mock: BreakBlock returns failure to simulate mining interruption.
-        let responder = tokio::spawn(async move {
-            while let Some(wrapped) = receiver.recv().await {
-                let result = match &wrapped.command {
-                    BotCommand::QueryInventory => Ok(BotResult {
-                        success: true,
-                        message: "inventory".into(),
-                        data: Some(inventory_json(&inventory)),
-                    }),
-                    BotCommand::MoveTo(target) => {
-                        let snap = (*state.read_snapshot()).clone();
-                        state.update_snapshot(WorldSnapshot {
-                            self_player: SelfPlayer {
-                                position: *target,
-                                ..snap.self_player.clone()
-                            },
-                            ..snap
-                        });
-                        Ok(BotResult {
-                            success: true,
-                            message: "moved".into(),
-                            data: None,
-                        })
-                    }
-                    BotCommand::BreakBlock(_) => Ok(BotResult {
-                        success: false,
-                        message: "mining interrupted by creeper".into(),
-                        data: None,
-                    }),
-                    BotCommand::SwitchHotbarSlot(_) => Ok(BotResult {
-                        success: true,
-                        message: "switched".into(),
-                        data: None,
-                    }),
-                    BotCommand::EquipTool(_) => Ok(BotResult {
-                        success: true,
-                        message: "equipped".into(),
-                        data: None,
-                    }),
-                    _ => Ok(BotResult {
-                        success: true,
-                        message: "ok".into(),
-                        data: None,
-                    }),
-                };
-                let _ = wrapped.respond_to.send(result);
-            }
-        });
-
-        let result = executor.execute_mine_block(pos, true).await;
-
-        // Drop executor so the sender channel closes, allowing the mock to exit.
-        drop(executor);
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, true).await;
 
         assert!(result.is_err());
         assert!(matches!(result, Err(BotError::MiningInterrupted { .. })));
-
-        responder.await.unwrap();
     }
 
     // ── execute_mine_block: air entry after mining counts as broken ────────
@@ -927,97 +977,43 @@ mod tests {
                 count: 1,
             }),
         ];
-        let (sender, mut receiver) = create_command_channel(10);
-        let state = Arc::new(SharedState::new(AppConfig::default()));
-        state.update_snapshot(snapshot.clone());
-        state.set_online(true);
-        let executor = CompoundOpExecutor::new(sender, Arc::clone(&state));
+        let (executor, _mock, _state) = setup(inventory, snapshot);
 
-        let responder = tokio::spawn(async move {
-            while let Some(wrapped) = receiver.recv().await {
-                let result = match &wrapped.command {
-                    BotCommand::QueryInventory => Ok(BotResult {
-                        success: true,
-                        message: "inventory".into(),
-                        data: Some(inventory_json(&inventory)),
-                    }),
-                    BotCommand::MoveTo(target) => {
-                        let snap = (*state.read_snapshot()).clone();
-                        state.update_snapshot(WorldSnapshot {
-                            self_player: SelfPlayer {
-                                position: *target,
-                                ..snap.self_player.clone()
-                            },
-                            ..snap
-                        });
-                        Ok(BotResult {
-                            success: true,
-                            message: "moved".into(),
-                            data: None,
-                        })
-                    }
-                    BotCommand::EquipTool(tool) => {
-                        // Simulate the bot finding and switching to the best
-                        // tool of the requested type in the inventory.
-                        if let Some((_, slot)) = find_tool_in_inventory(tool, &inventory) {
-                            let mut snap = (*state.read_snapshot()).clone();
-                            snap.self_player.held_item_slot = slot;
-                            state.update_snapshot(snap);
-                        }
-                        Ok(BotResult {
-                            success: true,
-                            message: format!("equipped {:?}", tool),
-                            data: None,
-                        })
-                    }
-                    BotCommand::BreakBlock(bp) => {
-                        // Replace the block with an "air" entry, mirroring a
-                        // real server's post-mine snapshot.
-                        let mut snap = (*state.read_snapshot()).clone();
-                        for b in snap.blocks.iter_mut() {
-                            if b.position == *bp {
-                                b.block_type = "air".into();
-                            }
-                        }
-                        state.update_snapshot(snap);
-                        Ok(BotResult {
-                            success: true,
-                            message: "mining started".into(),
-                            data: None,
-                        })
-                    }
-                    _ => Ok(BotResult {
-                        success: true,
-                        message: "ok".into(),
-                        data: None,
-                    }),
-                };
-                let _ = wrapped.respond_to.send(result);
-            }
-        });
-
-        let result = executor.execute_mine_block(pos, true).await;
-        drop(executor);
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, true).await;
 
         assert!(result.is_ok(), "expected success, got: {:?}", result);
         let bot_result = result.unwrap();
         assert!(bot_result.success);
         assert!(bot_result.message.contains("Mined stone"));
-
-        responder.await.unwrap();
     }
+
+    // ── execute_mine_block: pathfinding fails ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_mine_block_pathfinding_fails() {
+        let pos = BlockPos::new(10, 64, 20);
+        let snapshot = make_snapshot_with_block(pos, "stone");
+        let (executor, mock, _state) = setup(vec![], snapshot);
+        mock.goto_succeeds.store(false, Ordering::SeqCst);
+
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, false).await;
+
+        assert!(result.is_err());
+        assert!(matches!(result, Err(BotError::PathfindingFailed { .. })));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // execute_place_block tests
+    // ═══════════════════════════════════════════════════════════════
 
     // ── execute_place_block: offline ──────────────────────────────────────
 
     #[tokio::test]
     async fn test_place_block_offline() {
-        let (sender, _receiver) = create_command_channel(10);
-        let state = Arc::new(SharedState::new(AppConfig::default()));
-        state.set_online(false);
-        let executor = CompoundOpExecutor::new(sender, state);
+        let executor = offline_executor();
 
         let pos = BlockPos::new(10, 64, 20);
-        let result = executor.execute_place_block(pos, "stone".into()).await;
+        let result = CompoundOpExecutor::execute_place_block(&executor, pos, "stone".into()).await;
 
         assert!(result.is_err());
         assert!(matches!(result, Err(BotError::Offline(_))));
@@ -1029,9 +1025,9 @@ mod tests {
     async fn test_place_block_no_item() {
         let pos = BlockPos::new(10, 64, 20);
         let snapshot = make_empty_snapshot();
-        let (executor, _handle, _state) = setup(vec![], snapshot);
+        let (executor, _mock, _state) = setup(vec![], snapshot);
 
-        let result = executor.execute_place_block(pos, "stone".into()).await;
+        let result = CompoundOpExecutor::execute_place_block(&executor, pos, "stone".into()).await;
 
         assert!(result.is_err());
         assert!(matches!(result, Err(BotError::ToolNotFound { .. })));
@@ -1047,9 +1043,11 @@ mod tests {
             item_id: "stone".into(),
             count: 64,
         })];
-        let (executor, _handle, state) = setup(inventory, snapshot);
+        let (executor, mock, state) = setup(inventory, snapshot);
+        // Pre-configure the mock so `block_interact` places a "stone" block.
+        *mock.next_place_type.lock().unwrap() = Some("stone".into());
 
-        let result = executor.execute_place_block(pos, "stone".into()).await;
+        let result = CompoundOpExecutor::execute_place_block(&executor, pos, "stone".into()).await;
 
         assert!(result.is_ok(), "expected success, got: {:?}", result);
         let bot_result = result.unwrap();
@@ -1066,17 +1064,18 @@ mod tests {
         );
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // execute_open_container tests
+    // ═══════════════════════════════════════════════════════════════
+
     // ── execute_open_container: offline ───────────────────────────────────
 
     #[tokio::test]
     async fn test_open_container_offline() {
-        let (sender, _receiver) = create_command_channel(10);
-        let state = Arc::new(SharedState::new(AppConfig::default()));
-        state.set_online(false);
-        let executor = CompoundOpExecutor::new(sender, state);
+        let executor = offline_executor();
 
         let pos = BlockPos::new(10, 64, 20);
-        let result = executor.execute_open_container(pos).await;
+        let result = CompoundOpExecutor::execute_open_container(&executor, pos).await;
 
         assert!(result.is_err());
         assert!(matches!(result, Err(BotError::Offline(_))));
@@ -1088,9 +1087,9 @@ mod tests {
     async fn test_open_container_happy_path() {
         let pos = BlockPos::new(10, 64, 20);
         let snapshot = make_empty_snapshot();
-        let (executor, _handle, _state) = setup(vec![], snapshot);
+        let (executor, _mock, _state) = setup(vec![], snapshot);
 
-        let result = executor.execute_open_container(pos).await;
+        let result = CompoundOpExecutor::execute_open_container(&executor, pos).await;
 
         assert!(result.is_ok(), "expected success, got: {:?}", result);
         let bot_result = result.unwrap();
@@ -1098,16 +1097,17 @@ mod tests {
         assert!(bot_result.message.contains("Opened container"));
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // execute_equip_tool tests
+    // ═══════════════════════════════════════════════════════════════
+
     // ── execute_equip_tool: offline ─────────────────────────────────────
 
     #[tokio::test]
     async fn test_equip_tool_offline() {
-        let (sender, _receiver) = create_command_channel(10);
-        let state = Arc::new(SharedState::new(AppConfig::default()));
-        state.set_online(false);
-        let executor = CompoundOpExecutor::new(sender, state);
+        let executor = offline_executor();
 
-        let result = executor.execute_equip_tool(ToolType::Pickaxe).await;
+        let result = CompoundOpExecutor::execute_equip_tool(&executor, ToolType::Pickaxe).await;
 
         assert!(result.is_err());
         assert!(matches!(result, Err(BotError::Offline(_))));
@@ -1118,9 +1118,9 @@ mod tests {
     #[tokio::test]
     async fn test_equip_tool_not_found() {
         let snapshot = make_empty_snapshot();
-        let (executor, _handle, _state) = setup(vec![], snapshot);
+        let (executor, _mock, _state) = setup(vec![], snapshot);
 
-        let result = executor.execute_equip_tool(ToolType::Pickaxe).await;
+        let result = CompoundOpExecutor::execute_equip_tool(&executor, ToolType::Pickaxe).await;
 
         assert!(result.is_err());
         assert!(matches!(result, Err(BotError::ToolNotFound { .. })));
@@ -1135,21 +1135,21 @@ mod tests {
             item_id: "diamond_pickaxe".into(),
             count: 1,
         })];
-        let (executor, _handle, state) = setup(inventory, snapshot);
+        let (executor, _mock, state) = setup(inventory, snapshot);
 
-        let result = executor.execute_equip_tool(ToolType::Pickaxe).await;
+        let result = CompoundOpExecutor::execute_equip_tool(&executor, ToolType::Pickaxe).await;
 
         assert!(result.is_ok(), "expected success, got: {:?}", result);
         let bot_result = result.unwrap();
         assert!(bot_result.success);
         assert!(bot_result.message.contains("Equipped Pickaxe"));
 
-        // Verify held slot was updated
+        // Verify held slot was updated (diamond_pickaxe is at slot 0)
         let final_snapshot = state.read_snapshot();
         assert_eq!(final_snapshot.self_player.held_item_slot, 0);
     }
 
-    // ── execute_equip_tool: selects_best_tier ─────────────────────────────
+    // ── execute_equip_tool: selects best tier ─────────────────────────────
 
     #[tokio::test]
     async fn test_equip_tool_selects_best_tier() {
@@ -1164,9 +1164,9 @@ mod tests {
                 count: 1,
             }),
         ];
-        let (executor, _handle, state) = setup(inventory, snapshot);
+        let (executor, _mock, state) = setup(inventory, snapshot);
 
-        let result = executor.execute_equip_tool(ToolType::Pickaxe).await;
+        let result = CompoundOpExecutor::execute_equip_tool(&executor, ToolType::Pickaxe).await;
 
         assert!(result.is_ok(), "expected success, got: {:?}", result);
         // iron_pickaxe is at slot 1, so held_item_slot should be 1
@@ -1181,9 +1181,9 @@ mod tests {
         // Use a non-zero held_item_slot to detect any SwitchHotbarSlot(0).
         let mut snapshot = make_empty_snapshot();
         snapshot.self_player.held_item_slot = 3;
-        let (executor, _handle, state) = setup(vec![], snapshot);
+        let (executor, _mock, state) = setup(vec![], snapshot);
 
-        let result = executor.execute_equip_tool(ToolType::Hand).await;
+        let result = CompoundOpExecutor::execute_equip_tool(&executor, ToolType::Hand).await;
 
         assert!(result.is_ok(), "expected success, got: {:?}", result);
         let bot_result = result.unwrap();
@@ -1195,63 +1195,9 @@ mod tests {
         assert_eq!(final_snapshot.self_player.held_item_slot, 3);
     }
 
-    // ── Failure recovery: pathfinding fails during mine ─────────────────
-
-    #[tokio::test]
-    async fn test_mine_block_pathfinding_fails() {
-        let pos = BlockPos::new(10, 64, 20);
-        let snapshot = make_snapshot_with_block(pos, "stone");
-        let (sender, mut receiver) = create_command_channel(10);
-        let state = Arc::new(SharedState::new(AppConfig::default()));
-        state.update_snapshot(snapshot.clone());
-        state.set_online(true);
-        let executor = CompoundOpExecutor::new(sender, Arc::clone(&state));
-
-        // Spawn a responder that fails MoveTo
-        let responder = tokio::spawn(async move {
-            while let Some(wrapped) = receiver.recv().await {
-                let result = match &wrapped.command {
-                    BotCommand::QueryInventory => Ok(BotResult {
-                        success: true,
-                        message: "inventory".into(),
-                        data: Some(inventory_json(&[])),
-                    }),
-                    BotCommand::MoveTo(_) => Ok(BotResult {
-                        success: false,
-                        message: "path blocked".into(),
-                        data: None,
-                    }),
-                    _ => Ok(BotResult {
-                        success: true,
-                        message: "ok".into(),
-                        data: None,
-                    }),
-                };
-                let _ = wrapped.respond_to.send(result);
-            }
-        });
-
-        let result = executor.execute_mine_block(pos, false).await;
-
-        // Drop executor so the sender channel closes, allowing the mock to exit.
-        drop(executor);
-
-        assert!(result.is_err());
-        assert!(matches!(result, Err(BotError::PathfindingFailed { .. })));
-
-        responder.await.unwrap();
-    }
-
-    // ── CompoundOpExecutor construction ───────────────────────────────────
-
-    #[test]
-    fn test_executor_new() {
-        let (sender, _receiver) = create_command_channel(10);
-        let state = Arc::new(SharedState::new(AppConfig::default()));
-        let executor = CompoundOpExecutor::new(sender, state);
-        // Just verify it constructs without panic
-        let _ = executor;
-    }
+    // ═══════════════════════════════════════════════════════════════
+    // State machine integration tests
+    // ═══════════════════════════════════════════════════════════════
 
     // ── State machine integration: mine block reaches all states ─────────
 
@@ -1259,9 +1205,9 @@ mod tests {
     async fn test_mine_block_state_machine_reaches_all_states() {
         let pos = BlockPos::new(5, 64, 5);
         let snapshot = make_snapshot_with_block(pos, "dirt");
-        let (executor, _handle, _state) = setup(vec![], snapshot);
+        let (executor, _mock, _state) = setup(vec![], snapshot);
 
-        let result = executor.execute_mine_block(pos, false).await;
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, false).await;
         assert!(result.is_ok());
     }
 
@@ -1275,9 +1221,11 @@ mod tests {
             item_id: "oak_planks".into(),
             count: 10,
         })];
-        let (executor, _handle, _state) = setup(inventory, snapshot);
+        let (executor, mock, _state) = setup(inventory, snapshot);
+        *mock.next_place_type.lock().unwrap() = Some("oak_planks".into());
 
-        let result = executor.execute_place_block(pos, "oak_planks".into()).await;
+        let result =
+            CompoundOpExecutor::execute_place_block(&executor, pos, "oak_planks".into()).await;
         assert!(result.is_ok());
     }
 
@@ -1287,9 +1235,9 @@ mod tests {
     async fn test_open_container_state_machine_reaches_all_states() {
         let pos = BlockPos::new(5, 64, 5);
         let snapshot = make_empty_snapshot();
-        let (executor, _handle, _state) = setup(vec![], snapshot);
+        let (executor, _mock, _state) = setup(vec![], snapshot);
 
-        let result = executor.execute_open_container(pos).await;
+        let result = CompoundOpExecutor::execute_open_container(&executor, pos).await;
         assert!(result.is_ok());
     }
 
@@ -1302,9 +1250,9 @@ mod tests {
             item_id: "stone_axe".into(),
             count: 1,
         })];
-        let (executor, _handle, _state) = setup(inventory, snapshot);
+        let (executor, _mock, _state) = setup(inventory, snapshot);
 
-        let result = executor.execute_equip_tool(ToolType::Axe).await;
+        let result = CompoundOpExecutor::execute_equip_tool(&executor, ToolType::Axe).await;
         assert!(result.is_ok());
     }
 }

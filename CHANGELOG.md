@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **C-1**: 消除 `CompoundOpExecutor` 在同一命令通道上递归发送导致的死锁 — 改为通过 `&CommandExecutor` 引用直接 `dispatch` 子命令
+- **C-2**: 修复重连时 `INJECTED_*` 全局状态被 `handle_disconnect` 清空后未重新设置的问题 — 注入逻辑移入重连 `loop` 内部
+- **M-1**: `handle_act` 返回的 `BotResult.success` 现在根据子操作成败派生，不再硬编码为 `true`
+- **M-6**: MCP HTTP 服务器绑定地址现在从 `AppConfig.mcp_address` 读取，不再硬编码 `127.0.0.1`
 - **(this branch) Snapshot race actually fixed:** `handle_death` /
   `add_player_to_snapshot` / `handle_remove_player` / `handle_update_player`
   now use `SharedState::modify_snapshot` (atomic RCU via `ArcSwap::rcu`).

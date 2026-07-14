@@ -92,27 +92,6 @@ impl ConnectionManager {
         egui_ctx: Option<egui::Context>,
         command_sender: BotCommandSender,
     ) -> eyre::Result<()> {
-        // Inject dependencies so BotState::default() picks them up when
-        // azalea initializes the state internally via Default. Using
-        // `Mutex<Option<_>>` (rather than `OnceLock`) so the values can be
-        // refreshed on each reconnect and cleared on disconnect.
-        *events::INJECTED_SHARED_STATE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&self.state));
-        *events::INJECTED_COMMAND_RECEIVER
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&command_receiver));
-        *events::INJECTED_EGUI_CTX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = egui_ctx.clone();
-        *events::INJECTED_COMMAND_SENDER
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(command_sender);
-        events::INJECTED_SNAPSHOT_INTERVAL_MS.store(
-            self.config.snapshot_interval_ms,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-
         // Clear any stale disconnect request and error from a previous
         // session, and install a fresh cancellation token so a prior
         // session's cancel doesn't immediately trip our backoff sleep.
@@ -128,6 +107,31 @@ impl ConnectionManager {
                 info!("disconnect requested — stopping connection loop");
                 break;
             }
+
+            // Inject dependencies so BotState::default() picks them up when
+            // azalea initializes the state internally via Default. Using
+            // `Mutex<Option<_>>` (rather than `OnceLock`) so the values can be
+            // refreshed on each reconnect and cleared on disconnect.
+            // Re-injected on every loop iteration because handle_disconnect
+            // clears them all to None on disconnect — without this, a
+            // reconnect would fall back to a throwaway SharedState and the
+            // is_online() flag would never flip on the real state.
+            *events::INJECTED_SHARED_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&self.state));
+            *events::INJECTED_COMMAND_RECEIVER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&command_receiver));
+            *events::INJECTED_EGUI_CTX
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = egui_ctx.clone();
+            *events::INJECTED_COMMAND_SENDER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(command_sender.clone());
+            events::INJECTED_SNAPSHOT_INTERVAL_MS.store(
+                self.config.snapshot_interval_ms,
+                std::sync::atomic::Ordering::Relaxed,
+            );
 
             let account = Account::offline(&self.config.ai_username);
             let address = format!("{}:{}", self.config.mc_address, self.config.mc_port);
