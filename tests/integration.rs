@@ -66,6 +66,7 @@ fn make_test_snapshot() -> WorldSnapshot {
         timestamp: 42,
         chunk_summary: vec![(0, 0), (-1, 1)],
         commands_enabled: None,
+        ..Default::default()
     }
 }
 
@@ -507,11 +508,17 @@ async fn test_query_tools_offline_return_error() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Test 6: Command timeout returns CommandTimeout error
+// Test 6: Responder-dropped returns Offline (channel closed), distinct from
+//         receiver-dropped (also Offline but different message) and from
+//         genuine CommandTimeout (responder alive but slow).
 // ═══════════════════════════════════════════════════════════════
 
+/// When the receiver task accepts a command but drops the oneshot responder
+/// without replying (e.g. executor aborted mid-command), the sender observes
+/// a closed channel and reports `BotError::Offline` — not `CommandTimeout`,
+/// because the responder is gone permanently rather than merely slow.
 #[tokio::test]
-async fn test_command_timeout_when_responder_dropped() {
+async fn test_offline_returned_when_responder_dropped() {
     let (sender, mut receiver) = channel::create_command_channel(4);
 
     let dropper = tokio::spawn(async move {
@@ -522,21 +529,22 @@ async fn test_command_timeout_when_responder_dropped() {
     let result = sender.send_command(BotCommand::Jump).await;
 
     match result {
-        Err(BotError::CommandTimeout {
-            command,
-            timeout_secs,
-        }) => {
-            assert!(command.contains("Jump"), "timeout should mention Jump");
-            assert_eq!(timeout_secs, 30);
+        Err(BotError::Offline(msg)) => {
+            assert!(
+                msg.contains("responder dropped"),
+                "expected message to mention responder dropped, got: {msg}"
+            );
         }
-        other => panic!("expected BotError::CommandTimeout, got: {:?}", other),
+        other => panic!("expected BotError::Offline, got: {:?}", other),
     }
 
     dropper.await.expect("dropper should complete");
 }
 
+/// Same as above but for `BreakBlock` — verifies the command payload is
+/// delivered to the receiver before the responder is dropped.
 #[tokio::test]
-async fn test_command_timeout_with_break_block() {
+async fn test_offline_returned_when_responder_dropped_break_block() {
     let (sender, mut receiver) = channel::create_command_channel(4);
 
     let dropper = tokio::spawn(async move {
@@ -552,34 +560,50 @@ async fn test_command_timeout_with_break_block() {
     let result = sender.send_command(cmd).await;
 
     match result {
-        Err(BotError::CommandTimeout { command, .. }) => {
-            assert!(command.contains("BreakBlock"));
+        Err(BotError::Offline(msg)) => {
+            assert!(
+                msg.contains("responder dropped"),
+                "expected message to mention responder dropped, got: {msg}"
+            );
         }
-        other => panic!("expected CommandTimeout, got: {:?}", other),
+        other => panic!("expected Offline, got: {:?}", other),
     }
 
     dropper.await.expect("dropper should complete");
 }
 
+/// Both `Offline` causes should yield `BotError::Offline`, but with
+/// distinguishable messages so users can tell whether the receiver was
+/// never there ("channel closed") or accepted the command then died
+/// ("responder dropped").
 #[tokio::test]
-async fn test_command_timeout_distinct_from_offline() {
-    // Offline: receiver dropped before command is sent
+async fn test_offline_messages_distinguish_receiver_dropped_vs_responder_dropped() {
+    // Case A: receiver dropped before command is sent.
     let (sender1, receiver1) = channel::create_command_channel(4);
     drop(receiver1);
-    let offline_result = sender1.send_command(BotCommand::Jump).await;
-    assert!(matches!(offline_result, Err(BotError::Offline(_))));
+    let offline_a = sender1.send_command(BotCommand::Jump).await;
+    let msg_a = match offline_a {
+        Err(BotError::Offline(m)) => m,
+        other => panic!("expected Offline for receiver-dropped, got: {:?}", other),
+    };
+    assert!(msg_a.contains("closed"), "expected 'closed' in: {msg_a}");
 
-    // Timeout: receiver exists but drops responder without replying
+    // Case B: receiver exists but drops responder without replying.
     let (sender2, mut receiver2) = channel::create_command_channel(4);
     let dropper = tokio::spawn(async move {
         let wrapped = receiver2.recv().await.unwrap();
         drop(wrapped);
     });
-    let timeout_result = sender2.send_command(BotCommand::Jump).await;
-    assert!(matches!(
-        timeout_result,
-        Err(BotError::CommandTimeout { .. })
-    ));
+    let offline_b = sender2.send_command(BotCommand::Jump).await;
+    let msg_b = match offline_b {
+        Err(BotError::Offline(m)) => m,
+        other => panic!("expected Offline for responder-dropped, got: {:?}", other),
+    };
+    assert!(
+        msg_b.contains("responder dropped"),
+        "expected 'responder dropped' in: {msg_b}"
+    );
+    assert_ne!(msg_a, msg_b, "the two Offline messages should differ");
 
     dropper.await.unwrap();
 }
@@ -640,6 +664,7 @@ async fn test_auto_reconnect_sequence_simulation() {
         timestamp: 99,
         chunk_summary: vec![(1, 1)],
         commands_enabled: None,
+        ..Default::default()
     };
     state.update_snapshot(fresh_snap);
 

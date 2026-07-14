@@ -56,19 +56,23 @@ impl BotCommandSender {
     /// Send a command to the bot and await the response.
     ///
     /// # Errors
-    /// - `BotError::Offline` if the receiver has been dropped.
+    /// - `BotError::Offline` if the receiver has been dropped, or if the
+    ///   responder side drops the oneshot without sending (channel closed).
     /// - `BotError::CommandTimeout` if no response arrives within
-    ///   [`BotCommandSender::with_timeout`] or if the responder side drops the
-    ///   oneshot without sending.
+    ///   [`BotCommandSender::with_timeout`].
     pub async fn send_command(&self, cmd: BotCommand) -> Result<BotResult, BotError> {
         let (respond_to, rx) = oneshot::channel();
-        let cmd_str = format!("{:?}", cmd);
+        // Keep a clone for lazy logging — `cmd` is moved into `wrapped` below.
+        // Using `?cmd_for_log` in tracing macros defers the Debug formatting
+        // until a log level is enabled, avoiding the unconditional `format!`
+        // allocation that the previous implementation paid on every call.
+        let cmd_for_log = cmd.clone();
         let wrapped = BotCommandWithResponder {
             command: cmd,
             respond_to,
         };
 
-        trace!(command = %cmd_str, "sending bot command");
+        trace!(command = ?cmd_for_log, "sending bot command");
 
         if self.tx.send(wrapped).await.is_err() {
             error!("bot command channel closed — receiver dropped");
@@ -78,20 +82,19 @@ impl BotCommandSender {
         let timeout_secs = self.timeout.as_secs();
         match timeout(self.timeout, rx).await {
             Ok(Ok(result)) => {
-                debug!(command = %cmd_str, "bot command completed");
+                debug!(command = ?cmd_for_log, ?result, "bot command completed");
                 result
             }
             Ok(Err(_)) => {
-                warn!(command = %cmd_str, "bot command responder dropped without reply");
-                Err(BotError::CommandTimeout {
-                    command: cmd_str,
-                    timeout_secs,
-                })
+                warn!(command = ?cmd_for_log, "bot command responder dropped without reply");
+                Err(BotError::Offline(
+                    "bot command responder dropped without reply".into(),
+                ))
             }
             Err(_) => {
-                error!(command = %cmd_str, timeout_secs, "bot command timed out");
+                error!(command = ?cmd_for_log, timeout_secs, "bot command timed out");
                 Err(BotError::CommandTimeout {
-                    command: cmd_str,
+                    command: format!("{:?}", cmd_for_log),
                     timeout_secs,
                 })
             }
@@ -272,9 +275,10 @@ mod tests {
     // ── Timeout / responder drop ──────────────────────────────
 
     /// When the receiver drops the oneshot sender without responding,
-    /// the caller should get `BotError::CommandTimeout`.
+    /// the caller should get `BotError::Offline` (channel closed — distinct
+    /// from a real timeout, which would yield `CommandTimeout`).
     #[tokio::test]
-    async fn test_timeout_when_responder_dropped() {
+    async fn test_offline_when_responder_dropped() {
         let (sender, mut receiver) = create_command_channel(10);
 
         let cmd = BotCommand::Jump;
@@ -288,14 +292,10 @@ mod tests {
         let result = sender.send_command(cmd).await;
         assert!(result.is_err());
         match result {
-            Err(BotError::CommandTimeout {
-                command,
-                timeout_secs,
-            }) => {
-                assert!(command.contains("Jump"));
-                assert_eq!(timeout_secs, 30);
+            Err(BotError::Offline(msg)) => {
+                assert!(msg.contains("responder dropped"));
             }
-            other => panic!("expected CommandTimeout, got: {:?}", other),
+            other => panic!("expected Offline, got: {:?}", other),
         }
 
         responder.await.expect("responder task should complete");

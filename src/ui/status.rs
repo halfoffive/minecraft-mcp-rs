@@ -9,7 +9,7 @@ use egui::Ui;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::state::SharedState;
+use crate::state::{McpServerStatus, SharedState};
 use crate::ui::i18n::{self, TextKey};
 
 /// Render the status panel.
@@ -17,6 +17,7 @@ use crate::ui::i18n::{self, TextKey};
 /// Displays:
 /// - Last error message (red banner, only when present)
 /// - Connection status (online/offline with uptime)
+/// - MCP server status (running address / stdio / failed / stopped)
 /// - Player information (position, health, hunger, gamemode)
 /// - World stats (blocks, entities, chunks loaded)
 /// - Command counters (processed, succeeded, failed)
@@ -59,6 +60,32 @@ pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
             elapsed.as_secs(),
             i18n::tr(TextKey::UnitSeconds)
         ));
+    }
+
+    ui.separator();
+
+    // ── MCP Server ────────────────────────────────────────────────────
+    // Surface MCP server state (running address, stdio, bind failure, or
+    // stopped) so the user can see at a glance whether the MCP server is
+    // accepting requests — in particular, port-in-use bind failures that
+    // would otherwise only appear in logs.
+    let mcp_status = state.get_mcp_server_status();
+    match &mcp_status {
+        McpServerStatus::Running(addr) => {
+            ui.label(format!("MCP: Running on {addr}"));
+        }
+        McpServerStatus::Stdio => {
+            ui.label("MCP: Running on stdio");
+        }
+        McpServerStatus::Failed(msg) => {
+            ui.label(
+                egui::RichText::new(format!("MCP: {msg}"))
+                    .color(egui::Color32::from_rgb(220, 80, 80)),
+            );
+        }
+        McpServerStatus::Stopped => {
+            ui.label("MCP: Stopped");
+        }
     }
 
     ui.separator();

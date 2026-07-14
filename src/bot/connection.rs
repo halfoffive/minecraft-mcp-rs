@@ -100,6 +100,11 @@ impl ConnectionManager {
         self.state.reset_cancel_token();
 
         let mut attempt: u32 = 0;
+        // Separate counter for first-connect retries (when the bot has never
+        // come online). Bounded by `MAX_FIRST_CONNECT_RETRIES` so transient
+        // failures (server still starting, DNS delay) get a few automatic
+        // retries before fail-fast kicks in.
+        let mut first_connect_attempts: u32 = 0;
 
         loop {
             // If the user clicked Disconnect before we even started, stop.
@@ -167,15 +172,44 @@ impl ConnectionManager {
             }
 
             if !was_online {
-                // Connection never succeeded — fail fast. Capture a
-                // descriptive error (including the AppExit details) so the
-                // UI can display it, and stop retrying. The user must click
-                // Connect again to attempt reconnection.
+                // First-connect retry: try up to 3 times before giving up.
+                // Transient failures (server still starting, DNS delay) can
+                // recover without forcing the user to click Connect again.
+                const MAX_FIRST_CONNECT_RETRIES: u32 = 3;
+                const FIRST_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+                first_connect_attempts = first_connect_attempts.saturating_add(1);
+                if first_connect_attempts <= MAX_FIRST_CONNECT_RETRIES {
+                    warn!(
+                        attempt = first_connect_attempts,
+                        max = MAX_FIRST_CONNECT_RETRIES,
+                        "first connect failed — retrying in {}s",
+                        FIRST_CONNECT_RETRY_DELAY.as_secs()
+                    );
+                    // Wait before retry (cancellable via cancel_token, same
+                    // pattern as the reconnect backoff below).
+                    let cancel_token = self.state.cancel_token();
+                    tokio::select! {
+                        _ = tokio::time::sleep(FIRST_CONNECT_RETRY_DELAY) => {}
+                        _ = cancel_token.cancelled() => {
+                            info!("disconnect requested during first-connect retry — stopping");
+                            break;
+                        }
+                    }
+                    continue; // retry the loop
+                }
+
+                // All retries exhausted — fail fast. Capture a descriptive
+                // error (including the AppExit details) so the UI can display
+                // it, and stop retrying. The user must click Connect again to
+                // attempt reconnection.
                 let exit_desc = match &exit {
                     AppExit::Success => "success".to_string(),
                     AppExit::Error(code) => format!("error(code={code})"),
                 };
-                let msg = format!("Connection failed: {address} ({exit_desc})");
+                let msg = format!(
+                    "Connection failed: {address} ({exit_desc}, retried {MAX_FIRST_CONNECT_RETRIES} times)"
+                );
                 warn!(%address, %exit_desc, "connection failed — stopping retry loop");
                 self.state.set_last_error(msg);
                 break;

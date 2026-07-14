@@ -6,6 +6,7 @@
 //! player is drawn at the centre in red, entities in yellow, and blocks are
 //! coloured by [`color_map`] according to their `block_type`.
 
+use std::collections::HashMap;
 use std::io::Cursor;
 
 use base64::Engine;
@@ -36,16 +37,34 @@ pub fn render_topdown(snapshot: &WorldSnapshot, radius: u8) -> Result<Vec<u8>, B
     let center_x = player.x;
     let center_z = player.z;
 
-    // 1. Draw blocks within the Chebyshev radius (X-Z plane only).
+    // 1. Build a column map: (px, py) -> (highest_y, colour), skipping air.
+    //    Multiple blocks in the same (x,z) column would otherwise overwrite
+    //    each other based on iteration order; we keep the highest non-air one.
+    let mut column_best: HashMap<(u32, u32), (i32, Rgba<u8>)> = HashMap::new();
     for block in &snapshot.blocks {
         let dx = block.position.x - center_x;
         let dz = block.position.z - center_z;
         if dx.abs() > r || dz.abs() > r {
             continue;
         }
+        // Skip air blocks — they shouldn't obscure lower blocks.
+        if block.block_type.eq_ignore_ascii_case("air") {
+            continue;
+        }
         let px = (dx + r) as u32;
         let py = (dz + r) as u32;
         let colour = color_map(&block.block_type);
+        column_best
+            .entry((px, py))
+            .and_modify(|(best_y, c)| {
+                if block.position.y > *best_y {
+                    *best_y = block.position.y;
+                    *c = colour;
+                }
+            })
+            .or_insert((block.position.y, colour));
+    }
+    for ((px, py), (_, colour)) in column_best {
         img.put_pixel(px, py, colour);
     }
 
@@ -191,6 +210,7 @@ mod tests {
             timestamp: 0,
             chunk_summary: Vec::new(),
             commands_enabled: None,
+            ..Default::default()
         }
     }
 
@@ -215,6 +235,64 @@ mod tests {
         // We can't assert exact sizes because PNG compression varies, but
         // the larger image should encode more pixel data.
         assert!(large.len() > small.len() || large.len() >= 8);
+    }
+
+    #[test]
+    fn test_render_topdown_picks_highest_block() {
+        // Two non-air blocks at the same (x,z) but different Y: the higher
+        // one (grass) should win over the lower one (stone), regardless of
+        // iteration order. An air block above both should be skipped entirely
+        // so it doesn't obscure the grass below.
+        let snap = WorldSnapshot {
+            blocks: vec![
+                // Lower non-air block.
+                BlockEntry {
+                    position: BlockPos::new(1, 63, 0),
+                    block_type: "stone".into(),
+                    block_state: None,
+                },
+                // Higher non-air block — should win the column.
+                BlockEntry {
+                    position: BlockPos::new(1, 70, 0),
+                    block_type: "grass_block".into(),
+                    block_state: None,
+                },
+                // Air above both — must be skipped, not obscure the grass.
+                BlockEntry {
+                    position: BlockPos::new(1, 80, 0),
+                    block_type: "air".into(),
+                    block_state: None,
+                },
+            ],
+            entities: Vec::new(),
+            self_player: SelfPlayer {
+                uuid: "player".into(),
+                username: "TestBot".into(),
+                position: BlockPos::new(0, 64, 0),
+                health: 20.0,
+                hunger: 20,
+                gamemode: GameMode::Survival,
+                held_item_slot: 0,
+                inventory: Vec::new(),
+            },
+            timestamp: 0,
+            chunk_summary: Vec::new(),
+            commands_enabled: None,
+            ..Default::default()
+        };
+        let bytes = render_topdown(&snap, 4).expect("render should succeed");
+        let img = image::load_from_memory(&bytes)
+            .expect("decode PNG")
+            .to_rgba8();
+        // Player at (0,64,0) → centre pixel (r, r) = (4, 4) in red.
+        // Stacked column at (x=1, z=0) → dx=1, dz=0 → pixel (5, 4).
+        let pixel = img.get_pixel(5, 4);
+        let grass_colour = color_map("grass_block");
+        assert_eq!(
+            pixel.0, grass_colour.0,
+            "pixel (5,4) should be grass (highest non-air block), got {:?}",
+            pixel.0
+        );
     }
 
     #[test]

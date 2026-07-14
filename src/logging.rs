@@ -13,19 +13,26 @@
 
 use std::sync::Once;
 
+use tracing_subscriber::EnvFilter;
+
 static INIT: Once = Once::new();
 
 /// Initialize the global tracing subscriber.
 ///
 /// Behaviour:
 /// - Writes formatted log output to **stderr** only (stdout is the MCP channel).
-/// - Filter: `minecraft_mcp_rs=debug, azalea=warn` (other crates default to error).
+/// - Filter: respects the `RUST_LOG` environment variable if set; otherwise
+///   falls back to `minecraft_mcp_rs=debug, azalea=warn` (other crates default
+///   to error).
 /// - Safe to call multiple times — only the first call takes effect.
 pub fn init_logging() {
     INIT.call_once(|| {
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("minecraft_mcp_rs=debug,azalea=warn"));
+
         tracing_subscriber::fmt()
             .with_writer(std::io::stderr)
-            .with_env_filter("minecraft_mcp_rs=debug,azalea=warn")
+            .with_env_filter(filter)
             .init();
     });
 }

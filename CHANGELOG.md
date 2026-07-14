@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`compound_ops::find_standable_neighbor(snapshot, target) -> Option<BlockPos>`**
+  — scans ±1 X/Z × 3 Y levels (priority: same Y, y+1, y-1) for an air block
+  with a solid block below, used by `execute_mine_block` to pick a standable
+  MoveTo target instead of the block's own position.
+- **`WorldSnapshot::block_index: HashMap<BlockPos, usize>`** (`#[serde(skip)]`)
+  — O(1) position → block-entry index built by `SnapshotBuilder::build`,
+  consumed by `find_obstacle_block`.
+- **`state::McpServerStatus` enum** (`Running(SocketAddr)` / `Stdio` /
+  `Failed(String)` / `Stopped`) + `SharedState::set_mcp_server_status()` /
+  `get_mcp_server_status()` — surfaces real-time MCP server state to the UI
+  Status panel.
 - **`SharedState::modify_snapshot<F: FnMut(&mut WorldSnapshot)>`** closure API
   (based on `ArcSwap::rcu`) for atomic read-modify-write of the world snapshot.
 - **`SharedState::shutdown_token()` / `SharedState::trigger_shutdown()`** —
@@ -22,6 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **M-2**: 添加 `Event::Packet` 处理器，监听 `ClientboundGamePacket::BlockUpdate` 和 `SectionBlocksUpdate`，通过 `DirtyTracker::mark_block_dirty` 标记脏块。修复快照陈旧问题（之前只有 `ReceiveChunk` 事件触发快照重建，单方块更新被忽略）。
+- **M-3**: 由 M-2 自然解决 — `execute_mine_block` 状态机现在能在挖掘完成后观察到方块消失并达到 `Completed`。
+- **M-4**: `execute_mine_block` 的 `MoveTo` 目标改为方块的可站立邻居（`find_standable_neighbor` 扫描 ±1 X/Z × 3 Y 层），不再把方块自身位置作为路径终点。修复"到达方块内部后被卡住"问题。
+- **M-5**: `render_topdown` 现在按 `(x, z)` 分桶并保留最高 Y 的方块（跳过 air），修复之前忽略 Y 坐标导致低层方块覆盖顶层方块的问题。
+- **M-7**: `SnapshotUpdater` 计算 `player_chunk` 与 `chunk_scan_radius`（来自 `AppConfig`），按 Chebyshev 距离过滤脏块扫描范围，避免对远处 chunk 全量扫描。
+- **M-8**: HTTP transport + 非 loopback `mcp_address` 时，Settings 面板和 MCP Config 面板显示 TLS 警告（"⚠ No TLS — use trusted network or reverse proxy"）。
+- **M-9**: 首次连接（`!was_online`）失败时重试 3 次（2s 间隔，可被 `cancel_token` 打断），超过后才 fail-fast。修复瞬时网络抖动导致需要手动重连的 UX 问题。
+- **M-10**: 脏块以单方块粒度直接读取（不再触发整个 chunk 全量扫描）；当脏块所在 chunk 在 `chunk_scan_radius` 内会被全量扫描时，跳过该单块读取以避免重复。
+- **M-11**: `handle_act` 的 `perception_radius` 现在读取 `AppConfig::block_perception_radius`（之前硬编码 `16`）。
+- **M-12**: `WorldSnapshot` 新增 `block_index: HashMap<BlockPos, usize>`，`find_obstacle_block` 通过 O(1) 索引查找，不再 `Vec::iter().find()` 线性扫描。
+- **M-13**: `SharedState` 新增 `McpServerStatus` 枚举（`Running(addr)` / `Stdio` / `Failed(msg)` / `Stopped`），Status 面板显示 MCP 服务器实时状态。
+- **S-4**: `BotCommandSender::send_command` 在 responder 被丢弃时返回 `BotError::Offline("bot command responder dropped without reply")`，与真正的超时（`CommandTimeout`）区分开 — responder 永久消失不等同于"还没回复"。
+- **S-5**: `send_command` 移除每次调用都执行的 `format!("{:?}", cmd)`，改用 `tracing` 的 `?cmd_for_log` 懒格式化；`format!` 只在超时错误路径保留。
+- **S-7**: `logging.rs` 默认 filter 改为 `minecraft_mcp_rs=debug,azalea=warn`（之前是 `info`），方便调试 bot 行为。
 - **C-1**: 消除 `CompoundOpExecutor` 在同一命令通道上递归发送导致的死锁 — 改为通过 `&CommandExecutor` 引用直接 `dispatch` 子命令
 - **C-2**: 修复重连时 `INJECTED_*` 全局状态被 `handle_disconnect` 清空后未重新设置的问题 — 注入逻辑移入重连 `loop` 内部
 - **M-1**: `handle_act` 返回的 `BotResult.success` 现在根据子操作成败派生，不再硬编码为 `true`

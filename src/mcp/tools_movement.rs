@@ -355,6 +355,7 @@ mod tests {
             timestamp: 1,
             chunk_summary: vec![],
             commands_enabled: None,
+            ..Default::default()
         };
         state.update_snapshot(snap);
     }

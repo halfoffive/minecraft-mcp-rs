@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use azalea::ecs::component::Component;
 use azalea::pathfinder::PathfinderClientExt;
 use azalea::prelude::AppExit;
+use azalea::protocol::packets::game::ClientboundGamePacket;
 use azalea::{Client, Event};
 use tracing::{info, trace, warn};
 
@@ -187,6 +188,9 @@ pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::R
         }
         Event::ReceiveChunk(chunk_pos) => {
             handle_receive_chunk(&state, chunk_pos);
+        }
+        Event::Packet(packet) => {
+            handle_packet_block_updates(&state, &packet);
         }
         _ => {}
     }
@@ -451,6 +455,46 @@ fn handle_receive_chunk(state: &BotState, chunk_pos: azalea::core::position::Chu
         .unwrap_or_else(|e| e.into_inner());
     tracker.mark_chunk_dirty((chunk_pos.x, chunk_pos.z));
     trace!("chunk dirty marked: ({}, {})", chunk_pos.x, chunk_pos.z);
+}
+
+/// Inspect a server packet for block-change notifications and mark the
+/// affected positions dirty in the [`DirtyTracker`].
+///
+/// Only `BlockUpdate` (single block) and `SectionBlocksUpdate` (batch within
+/// one chunk section) are handled; all other packet variants are ignored.
+/// The world-block positions are converted from azalea's `BlockPos` /
+/// `ChunkSectionPos + ChunkSectionBlockPos` into the crate's [`BlockPos`]
+/// before marking.
+fn handle_packet_block_updates(state: &BotState, packet: &ClientboundGamePacket) {
+    match packet {
+        ClientboundGamePacket::BlockUpdate(data) => {
+            let pos = BlockPos::new(data.pos.x, data.pos.y, data.pos.z);
+            let mut tracker = state
+                .dirty_tracker
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            tracker.mark_block_dirty(pos);
+            trace!("block dirty marked: {}", pos);
+        }
+        ClientboundGamePacket::SectionBlocksUpdate(data) => {
+            let mut tracker = state
+                .dirty_tracker
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for entry in &data.states {
+                // ChunkSectionPos + ChunkSectionBlockPos yields azalea's
+                // world-space BlockPos (see azalea_core::position impls).
+                let world_pos = data.section_pos + entry.pos;
+                let pos = BlockPos::new(world_pos.x, world_pos.y, world_pos.z);
+                tracker.mark_block_dirty(pos);
+            }
+            trace!(
+                "section blocks update: {} blocks marked dirty",
+                data.states.len()
+            );
+        }
+        _ => {}
+    }
 }
 
 fn request_repaint(state: &BotState) {

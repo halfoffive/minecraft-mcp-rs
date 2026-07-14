@@ -1245,7 +1245,7 @@ impl<B: BotActions> CommandExecutor<B> {
         // Build the enriched result from the current snapshot.
         let snapshot = self.state.read_snapshot();
         let player_pos = snapshot.self_player.position;
-        let perception_radius: i32 = 16;
+        let perception_radius: i32 = self.state.read_config().block_perception_radius as i32;
 
         let nearby_blocks: Vec<_> = snapshot
             .blocks
@@ -1357,11 +1357,11 @@ fn find_obstacle_block(
     let steps = ((target.x - current.x).abs()).max((target.z - current.z).abs());
     for i in 1..=steps {
         let pos = BlockPos::new(current.x + dx * i, current.y, current.z + dz * i);
-        if let Some(block) = snapshot.blocks.iter().find(|b| b.position == pos)
-            && !block.block_type.is_empty()
-            && block.block_type != "air"
+        if let Some(&idx) = snapshot.block_index.get(&pos)
+            && !snapshot.blocks[idx].block_type.is_empty()
+            && snapshot.blocks[idx].block_type != "air"
         {
-            return Some(block.block_type.clone());
+            return Some(snapshot.blocks[idx].block_type.clone());
         }
     }
     None
@@ -1588,6 +1588,7 @@ mod tests {
             timestamp: 1,
             chunk_summary: vec![(0, 0), (1, 0)],
             commands_enabled: None,
+            ..Default::default()
         };
         state.update_snapshot(snap);
     }

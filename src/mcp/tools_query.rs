@@ -301,6 +301,7 @@ mod tests {
             timestamp: 42,
             chunk_summary: vec![(0, 0), (-1, 0)],
             commands_enabled: None,
+            ..Default::default()
         };
         state.update_snapshot(snap);
         Arc::new(state)

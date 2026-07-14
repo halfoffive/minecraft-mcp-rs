@@ -50,6 +50,21 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
         ui.label(i18n::tr(TextKey::BindAddress));
         ui.add(TextEdit::singleline(&mut edit.mcp_address).desired_width(180.0));
     });
+    // Warn when the HTTP bind address is not loopback: the Bearer
+    // token travels in cleartext (no TLS), so binding to anything
+    // other than `127.0.0.1` / `::1` / `localhost` (including
+    // `0.0.0.0`, which binds all interfaces) exposes it to the
+    // network. Only relevant for HTTP transport.
+    if edit.mcp_transport == McpTransport::Http {
+        let is_safe = matches!(edit.mcp_address.as_str(), "127.0.0.1" | "::1" | "localhost");
+        if !is_safe && !edit.mcp_address.is_empty() {
+            ui.label(
+                egui::RichText::new("⚠ No TLS — use trusted network or reverse proxy")
+                    .color(egui::Color32::from_rgb(220, 80, 80))
+                    .small(),
+            );
+        }
+    }
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::BindPort));
         ui.add(DragValue::new(&mut edit.mcp_port).range(1..=65535));

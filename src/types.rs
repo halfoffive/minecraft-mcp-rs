@@ -1,5 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 
 // ═══════════════════════════════════════════════════════════════
@@ -313,6 +314,10 @@ pub struct WorldSnapshot {
     /// Populated by `QueryServerInfo`; `None` until the server reports it.
     #[serde(default)]
     pub commands_enabled: Option<bool>,
+    /// Index from BlockPos to position in `blocks` Vec, for O(1) lookup.
+    /// Not serialized — rebuilt on each snapshot update.
+    #[serde(skip)]
+    pub block_index: HashMap<BlockPos, usize>,
 }
 
 impl Default for WorldSnapshot {
@@ -333,6 +338,7 @@ impl Default for WorldSnapshot {
             timestamp: 0,
             chunk_summary: Vec::new(),
             commands_enabled: None,
+            block_index: HashMap::new(),
         }
     }
 }
@@ -752,6 +758,7 @@ mod tests {
             timestamp: 1234567890,
             chunk_summary: vec![(0, 0), (1, 0)],
             commands_enabled: Some(true),
+            ..Default::default()
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let deserialized: WorldSnapshot = serde_json::from_str(&json).unwrap();

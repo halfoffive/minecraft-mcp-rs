@@ -12,6 +12,7 @@
 use arc_swap::ArcSwap;
 use azalea::container::ContainerHandle;
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 use tokio::sync::Notify;
@@ -68,6 +69,29 @@ impl std::fmt::Debug for BotEcsHandle {
 }
 
 // ---------------------------------------------------------------------------
+// McpServerStatus
+// ---------------------------------------------------------------------------
+
+/// Current status of the MCP server (stdio or HTTP transport).
+///
+/// Written by `serve_http` / `serve_stdio` on bind success, bind failure, and
+/// shutdown. Read by the UI status panel so the user can see whether the MCP
+/// server is running (and on which address) — in particular, surface
+/// port-in-use bind failures that would otherwise only appear in logs.
+#[derive(Debug, Clone)]
+pub enum McpServerStatus {
+    /// MCP HTTP server is listening on the given socket address.
+    Running(SocketAddr),
+    /// MCP server is running on stdio transport (no bind address).
+    Stdio,
+    /// MCP server failed to start (e.g. port already in use). Carries the
+    /// human-readable error message.
+    Failed(String),
+    /// MCP server is not running (initial state, or after shutdown).
+    Stopped,
+}
+
+// ---------------------------------------------------------------------------
 // SharedState
 // ---------------------------------------------------------------------------
 
@@ -104,6 +128,12 @@ pub struct SharedState {
     /// Stored behind a `Mutex` because writers (bot event handlers, MCP
     /// tools) run on different threads than the reader (UI).
     last_error: Mutex<Option<String>>,
+    /// Current MCP server status (Running / Stdio / Failed / Stopped).
+    ///
+    /// Updated by `serve_http` / `serve_stdio` on bind success, bind failure,
+    /// and shutdown. Read by the UI status panel to surface MCP server state
+    /// (e.g. port-in-use failures) to the user.
+    mcp_server_status: Mutex<McpServerStatus>,
     /// Cancellation token used to interrupt the reconnect backoff sleep
     /// when the user requests a disconnect. Stored behind a `Mutex` so it
     /// can be replaced with a fresh token on each new connection attempt
@@ -159,6 +189,7 @@ impl SharedState {
             timestamp: 0,
             chunk_summary: vec![],
             commands_enabled: None,
+            ..Default::default()
         };
 
         Self {
@@ -171,6 +202,7 @@ impl SharedState {
             container_handle: Mutex::new(None),
             chat_messages: Mutex::new(VecDeque::new()),
             last_error: Mutex::new(None),
+            mcp_server_status: Mutex::new(McpServerStatus::Stopped),
             cancel_token: Mutex::new(CancellationToken::new()),
             shutdown_token: Mutex::new(CancellationToken::new()),
             bot_ecs: Mutex::new(None),
@@ -463,6 +495,29 @@ impl SharedState {
         guard.clone()
     }
 
+    /// Store the current MCP server status.
+    ///
+    /// Called by `serve_http` / `serve_stdio` on bind success, bind failure,
+    /// and shutdown. The UI status panel reads this via
+    /// [`get_mcp_server_status`](Self::get_mcp_server_status).
+    pub fn set_mcp_server_status(&self, status: McpServerStatus) {
+        *self
+            .mcp_server_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = status;
+    }
+
+    /// Return a clone of the current MCP server status.
+    ///
+    /// Returns [`McpServerStatus::Stopped`] initially (before any transport
+    /// has started) or after the MCP server has shut down.
+    pub fn get_mcp_server_status(&self) -> McpServerStatus {
+        self.mcp_server_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Store the bot's ECS handle (set on `Event::Spawn`).
     ///
     /// The handle wraps a closure that writes `AppExit::Success` to the ECS
@@ -584,6 +639,7 @@ mod tests {
             timestamp: 42,
             chunk_summary: vec![(0, 0)],
             commands_enabled: None,
+            ..Default::default()
         };
 
         state.update_snapshot(new_snap);
@@ -646,6 +702,7 @@ mod tests {
                     timestamp: i,
                     chunk_summary: vec![],
                     commands_enabled: None,
+                    ..Default::default()
                 };
                 s_write.update_snapshot(snap);
             }
@@ -689,6 +746,7 @@ mod tests {
             timestamp: 1,
             chunk_summary: vec![],
             commands_enabled: None,
+            ..Default::default()
         };
         state.update_snapshot(seed.clone());
 
@@ -731,6 +789,7 @@ mod tests {
             timestamp: 1,
             chunk_summary: vec![],
             commands_enabled: None,
+            ..Default::default()
         };
         state.update_snapshot(seed);
 
