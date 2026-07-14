@@ -8,7 +8,7 @@
 //!
 //! Shared state is accessed lock-free by all threads.
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use minecraft_mcp_rs::channel;
@@ -82,8 +82,18 @@ fn main() {
                         serve_stdio(state_for_mcp, sender_for_mcp).await;
                     }
                     McpTransport::Http => {
-                        let port = state_for_mcp.read_config().mcp_port;
-                        let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
+                        let (port, mcp_address) = {
+                            let config = state_for_mcp.read_config();
+                            (config.mcp_port, config.mcp_address.clone())
+                        };
+                        let ip: IpAddr = mcp_address.parse().unwrap_or_else(|_| {
+                            tracing::warn!(
+                                address = %mcp_address,
+                                "failed to parse mcp_address as IP, falling back to 127.0.0.1"
+                            );
+                            IpAddr::V4(Ipv4Addr::LOCALHOST)
+                        });
+                        let addr = SocketAddr::new(ip, port);
                         serve_http(state_for_mcp, sender_for_mcp, addr).await;
                     }
                 }

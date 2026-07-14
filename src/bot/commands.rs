@@ -318,17 +318,28 @@ fn direction_to_vector(dir: Direction) -> Option<(i32, i32, i32)> {
 /// its slot when the executor is aborted.
 pub(crate) struct CommandExecutor<B: BotActions> {
     bot: B,
-    state: Arc<SharedState>,
+    /// Shared state — `pub(crate)` so [`CompoundOpExecutor`] in `ops.rs` can
+    /// read snapshots / check online status when driving compound operations
+    /// via `&CommandExecutor` reference (sub-commands are dispatched directly
+    /// through [`Self::dispatch`] rather than through the channel, to avoid
+    /// re-entrant deadlock with `run_with_lease`).
+    pub(crate) state: Arc<SharedState>,
     /// Owned receiver for the [`run`](Self::run) path. `None` when the
     /// executor was constructed via [`new_for_lease`](Self::new_for_lease).
     /// Only read by the test-only `run` method; `run_with_lease` uses the
     /// leased receiver instead.
     #[allow(dead_code)]
     receiver: Option<BotCommandReceiver>,
-    /// Optional sender for issuing sub-commands. When `Some`, `handle_act`
-    /// with `ActAction::Mine` delegates to [`CompoundOpExecutor`] to wait
-    /// for mining completion. `None` in unit tests (mock executors can't
-    /// respond to their own sub-commands without deadlocking).
+    /// Optional sender for issuing sub-commands.
+    ///
+    /// Historically `handle_act(Mine)` used this to delegate to
+    /// [`CompoundOpExecutor`], which sent sub-commands through the same
+    /// channel that `run_with_lease` consumes — causing a re-entrant
+    /// deadlock. Compound operations now dispatch sub-commands directly via
+    /// [`Self::dispatch`], so this field is no longer read by `handle_act`.
+    /// It is retained because the connect chain still constructs it; removing
+    /// it would require changing `new`, `new_for_lease`, `connect`, etc.
+    #[allow(dead_code)]
     sender: Option<BotCommandSender>,
 }
 
@@ -1194,32 +1205,31 @@ impl<B: BotActions> CommandExecutor<B> {
                 Err(e) => ("failed".into(), Some(e.to_string())),
             },
             ActAction::Mine { block_pos } => {
-                // When a sender is available, delegate to the compound
-                // operation executor which walks to the block, selects the
-                // best tool, sleeps for the calculated mine time, and
-                // verifies the block broke — returning a real success/failure
-                // result instead of just "started mining".
-                match &self.sender {
-                    Some(sender) => {
-                        let executor =
-                            CompoundOpExecutor::new(sender.clone(), Arc::clone(&self.state));
-                        match executor.execute_mine_block(block_pos, true).await {
-                            Ok(r) => (r.message, None),
-                            Err(e) => ("failed".into(), Some(e.to_string())),
-                        }
-                    }
-                    None => {
-                        warn!(
-                            ?block_pos,
-                            "Act::Mine called without a command sender — \
-                             falling back to fire-and-forget mining (no \
-                             completion verification)"
-                        );
-                        match self.handle_break_block(block_pos) {
-                            Ok(r) => (r.message, None),
-                            Err(e) => ("failed".into(), Some(e.to_string())),
-                        }
-                    }
+                // Delegate to the compound operation executor which walks to
+                // the block, selects the best tool, sleeps for the calculated
+                // mine time, and verifies the block broke — returning a real
+                // success/failure result instead of just "started mining".
+                //
+                // Sub-commands are dispatched directly via `&self` (this
+                // `CommandExecutor`) rather than through the `BotCommandSender`
+                // channel. The channel's only consumer is `run_with_lease`,
+                // which is blocked awaiting this `dispatch` call to return —
+                // sending sub-commands through the channel would deadlock
+                // (30s timeout) waiting for a consumer that can never run.
+                //
+                // `Box::pin` is required because `dispatch` is recursive
+                // through this call: `dispatch` → `handle_act` →
+                // `execute_mine_block` → `query_inventory` → `dispatch`. Without
+                // indirection the compiler cannot size the resulting future
+                // (E0733). Boxing just this edge keeps the rest of `dispatch`
+                // zero-cost.
+                match Box::pin(CompoundOpExecutor::execute_mine_block(
+                    self, block_pos, true,
+                ))
+                .await
+                {
+                    Ok(r) => (r.message, None),
+                    Err(e) => ("failed".into(), Some(e.to_string())),
                 }
             }
             ActAction::Attack { entity_id } => match self.handle_attack_entity(entity_id) {
@@ -1268,7 +1278,7 @@ impl<B: BotActions> CommandExecutor<B> {
         };
 
         Ok(BotResult {
-            success: true,
+            success: act_result.reason.is_none(),
             message: "Act completed".into(),
             data: Some(serde_json::to_value(&act_result).unwrap_or_default()),
         })
@@ -2391,6 +2401,35 @@ mod tests {
                 result
             );
         }
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Act (unified) tests
+    // ═══════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_handle_act_returns_false_on_failure() {
+        // When a sub-operation fails, `handle_act` must surface that in
+        // `success: false` (previously hardcoded to `true`). The error is
+        // captured in `ActResult::reason`, not propagated as `Err`.
+        let (executor, sender, _state, log) = make_executor();
+        log.attack_succeeds.store(false, Ordering::SeqCst);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(
+            &sender,
+            BotCommand::Act(ActAction::Attack { entity_id: 99 }),
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        let br = result.unwrap();
+        assert!(
+            !br.success,
+            "expected success == false on sub-op failure, got success=true"
+        );
 
         drop(sender);
         handle.await.expect("executor should finish");

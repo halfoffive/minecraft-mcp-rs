@@ -130,6 +130,9 @@ impl AppConfig {
         if self.mcp_port == 0 {
             return Err("mcp_port must not be 0".into());
         }
+        self.mcp_address
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| "mcp_address must be a valid IP address (e.g. 127.0.0.1 or 0.0.0.0)")?;
         if self.chunk_scan_radius < 1 || self.chunk_scan_radius > 16 {
             return Err(format!(
                 "chunk_scan_radius must be between 1 and 16, got {}",
@@ -385,6 +388,24 @@ mod tests {
         config.ai_username.clear();
         let err = config.validate().unwrap_err();
         assert!(err.contains("ai_username"), "got: {err}");
+    }
+
+    // -- Validation: mcp_address ---------------------------------------------
+
+    #[test]
+    fn test_validate_rejects_invalid_mcp_address() {
+        let mut config = AppConfig::default();
+        config.mcp_address = "not-an-ip".to_string();
+        assert!(
+            config.validate().is_err(),
+            "invalid mcp_address should fail validation"
+        );
+
+        config.mcp_address = "0.0.0.0".to_string();
+        assert!(config.validate().is_ok(), "valid IPv4 should pass");
+
+        config.mcp_address = "::1".to_string();
+        assert!(config.validate().is_ok(), "valid IPv6 should pass");
     }
 
     // -- Validation: command_timeout_secs ------------------------------------
