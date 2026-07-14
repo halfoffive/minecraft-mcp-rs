@@ -67,6 +67,23 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig) {
         ui.label(i18n::tr(TextKey::CopyHint));
     });
 
+    // ── Security warning for non-loopback HTTP binds ───────────
+    // HTTP transport sends the Bearer token in cleartext (no TLS).
+    // Only `127.0.0.1`, `::1`, and `localhost` are safe to bind
+    // without TLS — anything else (including `0.0.0.0`, which binds
+    // all interfaces) exposes the token to anyone on the network.
+    if edit.mcp_transport == McpTransport::Http {
+        let is_safe = matches!(edit.mcp_address.as_str(), "127.0.0.1" | "::1" | "localhost");
+        if !is_safe {
+            ui.label(
+                egui::RichText::new(
+                    "⚠ HTTP transport has no TLS encryption. Only use on trusted networks or with a reverse proxy (e.g., nginx + TLS).",
+                )
+                .color(egui::Color32::from_rgb(220, 80, 80)),
+            );
+        }
+    }
+
     // ── Read-only JSON display ─────────────────────────────────
     // `interactive(false)` makes the field read-only (no cursor / editing).
     // `desired_width(INFINITY)` stretches it to fill the available width so

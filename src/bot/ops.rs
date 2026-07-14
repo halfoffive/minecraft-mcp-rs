@@ -22,7 +22,7 @@ use crate::block_data::best_tool_for_block;
 use crate::bot::commands::{BotActions, CommandExecutor};
 use crate::compound_ops::{
     EquipToolOperation, MineBlockOperation, OpenContainerOperation, OperationEvent, OperationState,
-    PlaceBlockOperation,
+    PlaceBlockOperation, find_standable_neighbor,
 };
 use crate::error::BotError;
 use crate::mining_calc::calculate_mine_time;
@@ -186,14 +186,31 @@ impl CompoundOpExecutor {
 
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
             match op.current_action(&state) {
-                Some(BotCommand::MoveTo(target)) => {
-                    trace!(?target, "dispatching MoveTo");
-                    let result = executor.dispatch(BotCommand::MoveTo(target)).await?;
+                Some(BotCommand::MoveTo(_)) => {
+                    // M-4: walk to a standable neighbour of the target, not
+                    // the target itself — walking into a solid block causes
+                    // pathfinder collision.
+                    let snapshot = executor.state.read_snapshot();
+                    let move_target = match find_standable_neighbor(&snapshot, pos) {
+                        Some(neighbor) => neighbor,
+                        None => {
+                            warn!(?pos, "no standable position adjacent to target");
+                            state = op.advance(
+                                state,
+                                OperationEvent::Failed(BotError::Internal(
+                                    "no standable position adjacent to target".into(),
+                                )),
+                            );
+                            continue;
+                        }
+                    };
+                    trace!(?move_target, "dispatching MoveTo");
+                    let result = executor.dispatch(BotCommand::MoveTo(move_target)).await?;
                     if !result.success {
                         state = op.advance(
                             state,
                             OperationEvent::Failed(BotError::PathfindingFailed {
-                                target,
+                                target: move_target,
                                 reason: result.message,
                             }),
                         );
@@ -758,12 +775,37 @@ mod tests {
     fn make_snapshot_with_block(pos: BlockPos, block_type: &str) -> WorldSnapshot {
         let chunk_x = pos.x >> 4;
         let chunk_z = pos.z >> 4;
-        WorldSnapshot {
-            blocks: vec![BlockEntry {
+        let blocks = vec![
+            BlockEntry {
                 position: pos,
                 block_type: block_type.into(),
                 block_state: None,
-            }],
+            },
+            // Standable neighbour + solid floor so `find_standable_neighbor`
+            // can pick a valid move target (M-4: bot should walk next to
+            // the block, not into it).
+            BlockEntry {
+                position: BlockPos::new(pos.x + 1, pos.y, pos.z),
+                block_type: "air".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(pos.x + 1, pos.y - 1, pos.z),
+                block_type: "stone".into(),
+                block_state: None,
+            },
+        ];
+        // `find_standable_neighbor` and `find_obstacle_block` look up blocks
+        // via `block_index` (M-12), so populate it the same way
+        // `SnapshotBuilder::build` does in production.
+        let block_index: std::collections::HashMap<BlockPos, usize> = blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.position, i))
+            .collect();
+        WorldSnapshot {
+            blocks,
+            block_index,
             entities: vec![],
             self_player: SelfPlayer {
                 uuid: "test".into(),
@@ -799,6 +841,7 @@ mod tests {
             timestamp: 1,
             chunk_summary: vec![],
             commands_enabled: None,
+            ..Default::default()
         }
     }
 

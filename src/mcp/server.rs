@@ -42,7 +42,7 @@ use crate::mcp::tools_movement::{
     FlyToInput, JumpInput, MoveToInput, SmartMoveInput, TeleportInput, WalkDirectionInput,
 };
 use crate::mcp::tools_query::{GetWorldViewInput, NearbyBlocksInput, NearbyEntitiesInput};
-use crate::state::SharedState;
+use crate::state::{McpServerStatus, SharedState};
 
 // ---------------------------------------------------------------------------
 // McpBotServer
@@ -441,6 +441,9 @@ impl ServerHandler for McpBotServer {
 pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
     // Capture the shutdown token before `state` is moved into the server.
     let shutdown_token = state.shutdown_token();
+    // Keep a clone for status updates after `state` is moved into the server.
+    let state_for_status = Arc::clone(&state);
+    state_for_status.set_mcp_server_status(McpServerStatus::Stdio);
     let server = McpBotServer::new(state, sender);
     let (stdin, stdout) = stdio();
 
@@ -464,6 +467,8 @@ pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
             error!(error = %e, "MCP server failed");
         }
     }
+
+    state_for_status.set_mcp_server_status(McpServerStatus::Stopped);
 }
 
 // ---------------------------------------------------------------------------
@@ -515,6 +520,9 @@ async fn bearer_auth_middleware(
 /// authentication read live from [`SharedState::read_config`]. Runs until the
 /// process exits or the axum server encounters an unrecoverable error.
 pub async fn serve_http(state: Arc<SharedState>, sender: BotCommandSender, addr: SocketAddr) {
+    // Keep a clone for status updates after `state` is moved into the router.
+    let state_for_status = Arc::clone(&state);
+
     // The streamable HTTP service creates a fresh McpBotServer per session,
     // so capture cheap clones of state and sender in the factory closure.
     let state_for_factory = Arc::clone(&state);
@@ -539,9 +547,16 @@ pub async fn serve_http(state: Arc<SharedState>, sender: BotCommandSender, addr:
         .with_state(state);
 
     let listener = match TcpListener::bind(addr).await {
-        Ok(listener) => listener,
+        Ok(listener) => {
+            state_for_status.set_mcp_server_status(McpServerStatus::Running(addr));
+            info!(addr = %addr, "MCP HTTP server listening");
+            listener
+        }
         Err(e) => {
+            let msg = format!("MCP HTTP bind failed: {e}");
             error!(error = %e, "Failed to bind MCP HTTP listener");
+            state_for_status.set_mcp_server_status(McpServerStatus::Failed(msg.clone()));
+            state_for_status.set_last_error(msg);
             return;
         }
     };
@@ -556,6 +571,8 @@ pub async fn serve_http(state: Arc<SharedState>, sender: BotCommandSender, addr:
     {
         error!(error = %e, "MCP HTTP server error");
     }
+
+    state_for_status.set_mcp_server_status(McpServerStatus::Stopped);
 }
 
 // ---------------------------------------------------------------------------

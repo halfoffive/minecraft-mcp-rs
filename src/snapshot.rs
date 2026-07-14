@@ -157,6 +157,12 @@ impl SnapshotBuilder {
         }
         blocks.extend(self.new_blocks);
 
+        let block_index: HashMap<BlockPos, usize> = blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.position, i))
+            .collect();
+
         let entities = self.new_entities.unwrap_or(self.old.entities);
 
         let self_player = self.new_self_player.unwrap_or(self.old.self_player);
@@ -173,6 +179,7 @@ impl SnapshotBuilder {
             timestamp,
             chunk_summary,
             commands_enabled: None,
+            block_index,
         }
     }
 }
@@ -245,6 +252,7 @@ mod tests {
             timestamp: 0,
             chunk_summary: vec![(0, 0)],
             commands_enabled: None,
+            ..Default::default()
         }
     }
 

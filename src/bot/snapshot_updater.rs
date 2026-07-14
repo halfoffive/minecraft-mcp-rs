@@ -153,12 +153,34 @@ async fn build_snapshot_inner(
         tracker.take_dirty_sets()
     };
 
+    // M-7: Player chunk and scan radius, used to skip far-away dirty
+    // chunks. `chunk_scan_radius` (default 8, range 1–16) limits how many
+    // chunks around the player are fully scanned on each snapshot tick.
+    let player_chunk = (self_player.position.x >> 4, self_player.position.z >> 4);
+    let chunk_scan_radius = shared_state.read_config().chunk_scan_radius as i32;
+
     // ── Read world for changed blocks ────────────────────────
     let mut new_blocks = Vec::new();
     if !dirty_blocks.is_empty() || !dirty_chunks.is_empty() {
         let world = bot.world();
         let world_guard = world.read();
+
+        // M-10: Read individual dirty blocks (from block-update events)
+        // rather than scanning their entire chunk. Skip blocks whose chunk
+        // is in `dirty_chunks` AND within scan radius — those chunks will be
+        // fully scanned below, so reading individual blocks here would be
+        // redundant (each full scan is 98,304 `get_block_state` calls).
+        // Blocks in far-away dirty chunks (outside radius) are still read
+        // here because the full scan is skipped for them, so this is the
+        // only chance to refresh their state in the snapshot.
         for pos in &dirty_blocks {
+            let chunk = (pos.x >> 4, pos.z >> 4);
+            if dirty_chunks.contains(&chunk) {
+                let dist = ((chunk.0 - player_chunk.0).abs()).max((chunk.1 - player_chunk.1).abs());
+                if dist <= chunk_scan_radius {
+                    continue;
+                }
+            }
             let az_pos = azalea::core::position::BlockPos::new(pos.x, pos.y, pos.z);
             if let Some(block_state) = world_guard.get_block_state(az_pos) {
                 let block_name = block_state_to_name(block_state);
@@ -169,16 +191,26 @@ async fn build_snapshot_inner(
                 });
             }
         }
+
+        // M-7: Only scan dirty chunks within `chunk_scan_radius` of the
+        // player's current chunk. Chunks outside this radius are skipped to
+        // avoid expensive 98,304-position scans for far-away chunks.
+        //
         // Scan each dirty chunk in full so the blocks inside it are re-read
         // from the world. SnapshotBuilder::build() removes every block whose
-        // chunk is in `dirty_chunks`, so without re-adding the surviving
-        // blocks here they would be permanently lost from the snapshot.
+        // chunk is in `dirty_chunks` (within radius — see builder_tracker
+        // below), so without re-adding the surviving blocks here they would
+        // be permanently lost from the snapshot.
         //
         // Chunk dimensions for Minecraft 1.21 are 16×384×16: x and z span
         // 16 blocks within the chunk, y spans the full build height
         // (-64..320). Only non-air blocks are recorded to avoid bloating
         // the snapshot with empty positions.
         for &(chunk_x, chunk_z) in &dirty_chunks {
+            let dist = ((chunk_x - player_chunk.0).abs()).max((chunk_z - player_chunk.1).abs());
+            if dist > chunk_scan_radius {
+                continue;
+            }
             let base_x = chunk_x * 16;
             let base_z = chunk_z * 16;
             for dx in 0..16i32 {
@@ -207,12 +239,20 @@ async fn build_snapshot_inner(
     }
 
     // ── Repopulate tracker for SnapshotBuilder ───────────────
+    // M-7: Only mark chunks within scan radius as dirty in the builder
+    // tracker. Far-away dirty chunks are not scanned, and their old blocks
+    // are preserved (stale but acceptable for far-away regions). Individual
+    // dirty blocks are always marked so their old versions are removed and
+    // the freshly-read versions are added.
     let mut builder_tracker = DirtyTracker::new();
     for pos in &dirty_blocks {
         builder_tracker.mark_block_dirty(*pos);
     }
-    for chunk in &dirty_chunks {
-        builder_tracker.mark_chunk_dirty(*chunk);
+    for &(chunk_x, chunk_z) in &dirty_chunks {
+        let dist = ((chunk_x - player_chunk.0).abs()).max((chunk_z - player_chunk.1).abs());
+        if dist <= chunk_scan_radius {
+            builder_tracker.mark_chunk_dirty((chunk_x, chunk_z));
+        }
     }
 
     let mut builder = SnapshotBuilder::new((*old_snapshot).clone())

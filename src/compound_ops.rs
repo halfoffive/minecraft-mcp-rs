@@ -57,6 +57,55 @@ pub enum OperationEvent {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Standable-neighbour lookup
+// ═══════════════════════════════════════════════════════════════
+
+/// Find a standable position adjacent to `target` (±1 X/Z, same Y or ±1 Y).
+///
+/// A position is standable if the block at that position is air (or absent
+/// from the snapshot, which is treated as air) and the block below it is
+/// solid (non-air). Returns `None` if no such position exists in the
+/// snapshot.
+///
+/// Looks up blocks via `WorldSnapshot::block_index` — O(1) per check.
+pub(crate) fn find_standable_neighbor(
+    snapshot: &crate::types::WorldSnapshot,
+    target: crate::types::BlockPos,
+) -> Option<crate::types::BlockPos> {
+    // Check 4 horizontal neighbours at 3 Y levels (y-1, y, y+1).
+    // Priority: same Y first, then y+1 (step up), then y-1 (step down).
+    let offsets_y: [i32; 3] = [0, 1, -1];
+    let offsets_xz: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+
+    for &dy in &offsets_y {
+        for &(dx, dz) in &offsets_xz {
+            let pos = crate::types::BlockPos::new(target.x + dx, target.y + dy, target.z + dz);
+            let below = crate::types::BlockPos::new(pos.x, pos.y - 1, pos.z);
+
+            // A position is standable if it is air (or absent from the
+            // snapshot, which we treat as air) and the block below it is
+            // solid (non-air). Use the O(1) `block_index` instead of a
+            // linear `blocks.iter().find()` scan.
+            let pos_is_clear = snapshot
+                .block_index
+                .get(&pos)
+                .map(|&idx| snapshot.blocks[idx].block_type.eq_ignore_ascii_case("air"))
+                .unwrap_or(true);
+            let below_is_solid = snapshot
+                .block_index
+                .get(&below)
+                .map(|&idx| !snapshot.blocks[idx].block_type.eq_ignore_ascii_case("air"))
+                .unwrap_or(false);
+
+            if pos_is_clear && below_is_solid {
+                return Some(pos);
+            }
+        }
+    }
+    None
+}
+
+// ═══════════════════════════════════════════════════════════════
 // MineBlockOperation
 // ═══════════════════════════════════════════════════════════════
 
@@ -284,6 +333,27 @@ mod tests {
         BotError::Internal("test failure".into())
     }
 
+    /// Build a `WorldSnapshot` from a block list, populating `block_index`
+    /// the same way `SnapshotBuilder::build` does in production. Use this
+    /// in tests instead of `WorldSnapshot { blocks, ..Default::default() }`
+    /// when the test exercises code that looks up blocks via `block_index`
+    /// (e.g. `find_standable_neighbor`, `find_obstacle_block`).
+    fn make_snapshot_with_blocks(
+        blocks: Vec<crate::types::BlockEntry>,
+    ) -> crate::types::WorldSnapshot {
+        use std::collections::HashMap;
+        let block_index: HashMap<BlockPos, usize> = blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.position, i))
+            .collect();
+        crate::types::WorldSnapshot {
+            blocks,
+            block_index,
+            ..Default::default()
+        }
+    }
+
     // ── OperationState variant tests ────────────────────────
 
     #[test]
@@ -336,6 +406,127 @@ mod tests {
     fn test_operation_event_clone() {
         let e = OperationEvent::Arrived;
         assert_eq!(e.clone(), e);
+    }
+
+    // ── find_standable_neighbor ─────────────────────────────
+
+    #[test]
+    fn test_find_standable_neighbor() {
+        use crate::types::BlockEntry;
+
+        // Snapshot:
+        //   - target block (stone) at (0, 64, 0)
+        //   - air at (1, 64, 0) — standable position
+        //   - stone below at (1, 63, 0) — solid floor
+        // Expected: returns (1, 64, 0)
+        let target = BlockPos::new(0, 64, 0);
+        let snapshot = make_snapshot_with_blocks(vec![
+            BlockEntry {
+                position: target,
+                block_type: "stone".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(1, 64, 0),
+                block_type: "air".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(1, 63, 0),
+                block_type: "stone".into(),
+                block_state: None,
+            },
+        ]);
+
+        assert_eq!(
+            find_standable_neighbor(&snapshot, target),
+            Some(BlockPos::new(1, 64, 0))
+        );
+    }
+
+    #[test]
+    fn test_find_standable_neighbor_returns_none_when_no_floor() {
+        use crate::types::BlockEntry;
+
+        // Target at (0, 64, 0) with no floor below any neighbour —
+        // nothing to stand on.
+        let target = BlockPos::new(0, 64, 0);
+        let snapshot = make_snapshot_with_blocks(vec![BlockEntry {
+            position: target,
+            block_type: "stone".into(),
+            block_state: None,
+        }]);
+
+        assert_eq!(find_standable_neighbor(&snapshot, target), None);
+    }
+
+    #[test]
+    fn test_find_standable_neighbor_skips_solid_neighbour() {
+        use crate::types::BlockEntry;
+
+        // Target at (0, 64, 0). Neighbour (1, 64, 0) is solid stone (not
+        // air), so it's not standable even though (1, 63, 0) is solid floor.
+        // Neighbour (-1, 64, 0) is air with stone below — standable.
+        let target = BlockPos::new(0, 64, 0);
+        let snapshot = make_snapshot_with_blocks(vec![
+            BlockEntry {
+                position: target,
+                block_type: "stone".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(1, 64, 0),
+                block_type: "stone".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(1, 63, 0),
+                block_type: "stone".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(-1, 64, 0),
+                block_type: "air".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(-1, 63, 0),
+                block_type: "stone".into(),
+                block_state: None,
+            },
+        ]);
+
+        assert_eq!(
+            find_standable_neighbor(&snapshot, target),
+            Some(BlockPos::new(-1, 64, 0))
+        );
+    }
+
+    #[test]
+    fn test_find_standable_neighbor_uses_air_absent_from_snapshot() {
+        use crate::types::BlockEntry;
+
+        // Target at (0, 64, 0). Neighbour (1, 64, 0) is absent from the
+        // snapshot (treated as air). Block below at (1, 63, 0) is stone.
+        // Expected: returns (1, 64, 0).
+        let target = BlockPos::new(0, 64, 0);
+        let snapshot = make_snapshot_with_blocks(vec![
+            BlockEntry {
+                position: target,
+                block_type: "stone".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(1, 63, 0),
+                block_type: "stone".into(),
+                block_state: None,
+            },
+        ]);
+
+        assert_eq!(
+            find_standable_neighbor(&snapshot, target),
+            Some(BlockPos::new(1, 64, 0))
+        );
     }
 
     // ── MineBlockOperation: happy path ──────────────────────
