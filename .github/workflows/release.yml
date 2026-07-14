@@ -1,6 +1,9 @@
 # Builds and publishes a GitHub Release with multi-platform, multi-arch
 # binaries when a version tag (v*) is pushed. Can also be triggered manually
 # for pre-release testing.
+#
+# Windows artifacts are packaged as both .zip and .7z.
+# Linux/macOS artifacts are packaged as both .tar.xz and .tar.gz.
 name: Release
 
 on:
@@ -73,11 +76,36 @@ jobs:
             cp "target/${{ matrix.target }}/release/minecraft-mcp-rs" "minecraft-mcp-rs-${{ matrix.label }}"
           fi
 
+      - name: Package artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $base = "minecraft-mcp-rs-${{ matrix.label }}"
+          $exe = "${base}.exe"
+
+          # .zip via built-in PowerShell
+          Compress-Archive -Path $exe -DestinationPath "${base}.zip" -Force
+
+          # .7z via 7-Zip (install if not present)
+          $sevenZip = "C:\Program Files\7-Zip\7z.exe"
+          if (-not (Test-Path $sevenZip)) {
+            choco install 7zip -y --no-progress
+          }
+          & $sevenZip a -t7z -mx=9 "${base}.7z" $exe
+
+      - name: Package artifact (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          base="minecraft-mcp-rs-${{ matrix.label }}"
+          tar -cJf "${base}.tar.xz" "$base"
+          tar -czf "${base}.tar.gz" "$base"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: minecraft-mcp-rs-${{ matrix.label }}
-          path: minecraft-mcp-rs-${{ matrix.label }}*
+          path: minecraft-mcp-rs-${{ matrix.label }}.*
           if-no-files-found: error
 
   release:

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-07-14
+
+All binaries are now released in two archive formats per platform.
+
+### Changed
+
+- Release workflow (`.github/workflows/release.yml`) now produces:
+  - Windows: `.zip` and `.7z`
+  - Linux / macOS: `.tar.xz` and `.tar.gz`
+
 ## [1.0.0] - 2026-07-14
 
 First stable release. Consolidates all review-fix work from PRs #6–#9 plus the
