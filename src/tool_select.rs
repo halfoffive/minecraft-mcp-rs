@@ -61,10 +61,10 @@ pub fn find_tool_in_inventory(
             // target block. This prevents a wood pickaxe from being
             // optimistically returned for diamond_ore, which would silently
             // drop nothing in-game.
-            if let Some(req) = required_harvest_level {
-                if harvest_level_of(found_material) < req {
-                    continue;
-                }
+            if let Some(req) = required_harvest_level
+                && harvest_level_of(found_material) < req
+            {
+                continue;
             }
 
             let priority = MATERIAL_PRIORITY.iter().position(|m| m == &found_material);
@@ -326,7 +326,10 @@ mod tests {
             item_id: "wooden_pickaxe".to_string(),
             count: 1,
         })];
-        assert_eq!(find_tool_in_inventory(&ToolType::Pickaxe, &inv, Some(2)), None);
+        assert_eq!(
+            find_tool_in_inventory(&ToolType::Pickaxe, &inv, Some(2)),
+            None
+        );
     }
 
     #[test]
@@ -363,7 +366,10 @@ mod tests {
             item_id: "stone_pickaxe".to_string(),
             count: 1,
         })];
-        assert_eq!(find_tool_in_inventory(&ToolType::Pickaxe, &inv, Some(2)), None);
+        assert_eq!(
+            find_tool_in_inventory(&ToolType::Pickaxe, &inv, Some(2)),
+            None
+        );
     }
 
     #[test]

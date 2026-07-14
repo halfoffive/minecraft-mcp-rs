@@ -43,10 +43,7 @@ use crate::ui::{mcp_config, settings, status};
 ///   the handle is purely a UI-side bookkeeping reference; the actual
 ///   runtime inside the thread is supposed to exit via
 ///   `state.request_disconnect()` + `cancel_token`.
-fn join_with_timeout(
-    handle: JoinHandle<()>,
-    timeout: Duration,
-) -> Result<(), Duration> {
+fn join_with_timeout(handle: JoinHandle<()>, timeout: Duration) -> Result<(), Duration> {
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         let _ = handle.join();
@@ -219,9 +216,9 @@ impl MinecraftApp {
         if let Some(prev) = self.bot_thread.take() {
             match join_with_timeout(prev, Duration::from_secs(1)) {
                 Ok(()) => tracing::debug!("previous bot thread joined cleanly"),
-                Err(_) => tracing::warn!(
-                    "previous bot thread did not exit within 1s — abandoning join"
-                ),
+                Err(_) => {
+                    tracing::warn!("previous bot thread did not exit within 1s — abandoning join")
+                }
             }
         }
 
@@ -402,7 +399,10 @@ mod tests {
             std::hint::black_box(acc);
         });
         let result = join_with_timeout(handle, Duration::from_secs(2));
-        assert!(result.is_ok(), "fast thread should join within 2s: {result:?}");
+        assert!(
+            result.is_ok(),
+            "fast thread should join within 2s: {result:?}"
+        );
     }
 
     /// `join_with_timeout` returns `Err(timeout)` when the handle is still

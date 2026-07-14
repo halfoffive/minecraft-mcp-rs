@@ -244,15 +244,19 @@ mod tests {
                 target: BlockPos::new(0, 9999, 0),
             },
         };
-        let result = handle_act(&{
-            let s = SharedState::new(AppConfig::default());
-            s.set_online(true);
-            Arc::new(s)
-        }, &{
-            let s = SharedState::new(AppConfig::default());
-            let (tx, _rx) = create_command_channel(4, Arc::new(s));
-            tx
-        }, bad_y)
+        let result = handle_act(
+            &{
+                let s = SharedState::new(AppConfig::default());
+                s.set_online(true);
+                Arc::new(s)
+            },
+            &{
+                let s = SharedState::new(AppConfig::default());
+                let (tx, _rx) = create_command_channel(4, Arc::new(s));
+                tx
+            },
+            bad_y,
+        )
         .await;
         assert!(
             matches!(result, Err(BotError::InvalidParams(_))),
@@ -265,15 +269,19 @@ mod tests {
                 entity_id: u32::MAX,
             },
         };
-        let result = handle_act(&{
-            let s = SharedState::new(AppConfig::default());
-            s.set_online(true);
-            Arc::new(s)
-        }, &{
-            let s = SharedState::new(AppConfig::default());
-            let (tx, _rx) = create_command_channel(4, Arc::new(s));
-            tx
-        }, bad_attack)
+        let result = handle_act(
+            &{
+                let s = SharedState::new(AppConfig::default());
+                s.set_online(true);
+                Arc::new(s)
+            },
+            &{
+                let s = SharedState::new(AppConfig::default());
+                let (tx, _rx) = create_command_channel(4, Arc::new(s));
+                tx
+            },
+            bad_attack,
+        )
         .await;
         assert!(
             matches!(result, Err(BotError::InvalidParams(_))),

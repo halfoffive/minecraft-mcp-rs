@@ -1069,7 +1069,10 @@ mod tests {
         let low_y = BotCommand::Act(ActAction::Move {
             target: BlockPos::new(0, -65, 0),
         });
-        assert!(matches!(validate_command(&low_y), Err(BotError::InvalidParams(_))));
+        assert!(matches!(
+            validate_command(&low_y),
+            Err(BotError::InvalidParams(_))
+        ));
 
         // entity_id at the boundary (i32::MAX) is allowed.
         let ok_attack = BotCommand::Act(ActAction::Attack {
@@ -1087,15 +1090,24 @@ mod tests {
         ));
 
         // The same checks apply to the public `validate_act_action` entry point.
-        assert!(validate_act_action(&ActAction::Move {
-            target: BlockPos::new(0, 9999, 0)
-        })
-        .is_err());
-        assert!(validate_act_action(&ActAction::Attack { entity_id: u32::MAX }).is_err());
-        assert!(validate_act_action(&ActAction::Move {
-            target: BlockPos::new(0, 64, 0)
-        })
-        .is_ok());
+        assert!(
+            validate_act_action(&ActAction::Move {
+                target: BlockPos::new(0, 9999, 0)
+            })
+            .is_err()
+        );
+        assert!(
+            validate_act_action(&ActAction::Attack {
+                entity_id: u32::MAX
+            })
+            .is_err()
+        );
+        assert!(
+            validate_act_action(&ActAction::Move {
+                target: BlockPos::new(0, 64, 0)
+            })
+            .is_ok()
+        );
     }
 
     // ── Exhaustive match on all 32 variants ────────────────────────

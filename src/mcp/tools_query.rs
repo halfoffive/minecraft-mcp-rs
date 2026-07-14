@@ -578,7 +578,10 @@ mod tests {
         // the filter drop every block. `clamp_to_i32` saturates to
         // i32::MAX, so the filter keeps everything.
         let result = get_nearby_blocks(&state, u32::MAX, None);
-        assert!(result.is_ok(), "oversized radius must not error: {result:?}");
+        assert!(
+            result.is_ok(),
+            "oversized radius must not error: {result:?}"
+        );
     }
 
     /// Same regression for `get_nearby_entities`.
@@ -586,6 +589,9 @@ mod tests {
     fn test_get_nearby_entities_oversized_radius_does_not_panic() {
         let state = state_with_snapshot();
         let result = get_nearby_entities(&state, u32::MAX);
-        assert!(result.is_ok(), "oversized radius must not error: {result:?}");
+        assert!(
+            result.is_ok(),
+            "oversized radius must not error: {result:?}"
+        );
     }
 }

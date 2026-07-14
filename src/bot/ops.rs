@@ -316,7 +316,11 @@ impl CompoundOpExecutor {
                     let still_there = new_snapshot
                         .block_index
                         .get(&pos)
-                        .map(|&idx| !new_snapshot.blocks[idx].block_type.eq_ignore_ascii_case("air"))
+                        .map(|&idx| {
+                            !new_snapshot.blocks[idx]
+                                .block_type
+                                .eq_ignore_ascii_case("air")
+                        })
                         .unwrap_or(false);
                     if still_there {
                         warn!(?pos, "block still present after mining time");

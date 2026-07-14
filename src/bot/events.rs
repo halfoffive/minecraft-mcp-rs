@@ -267,14 +267,10 @@ async fn handle_spawn(bot: Client, state: &BotState) {
                 "Event::Spawn fires only after ConnectionManager injects \
                  a Some(BotCommandSender) into BotState",
             );
-            let client =
-                RealBotClient::new(bot, Arc::clone(&shared_state), command_sender);
+            let client = RealBotClient::new(bot, Arc::clone(&shared_state), command_sender);
             let handle = tokio::task::spawn_local(async move {
-                let mut executor = CommandExecutor::new_for_lease(
-                    client,
-                    shared_state,
-                    command_sender_opt,
-                );
+                let mut executor =
+                    CommandExecutor::new_for_lease(client, shared_state, command_sender_opt);
                 executor.run_with_lease(lease).await;
             });
             *state
@@ -634,6 +630,12 @@ mod tests {
 
     #[test]
     fn test_remove_player_updates_snapshot() {
+        // Reset the injected dependency first so `BotState::default()`
+        // builds a fresh `SharedState` (not one left over from a
+        // previous parallel test that added entities).
+        *INJECTED_SHARED_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let state = BotState::default();
         let info = azalea::player::PlayerInfo {
             profile: azalea::auth::game_profile::GameProfile {
@@ -656,6 +658,14 @@ mod tests {
 
     #[test]
     fn test_update_player_updates_snapshot() {
+        // Reset the injected dependency first so `BotState::default()`
+        // builds a fresh `SharedState` (not one left over from a
+        // previous parallel test that would also leave an entity
+        // indexed at `entities[0]`, breaking the `entities[0].display_name`
+        // assertion below).
+        *INJECTED_SHARED_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let state = BotState::default();
         let uuid = uuid::Uuid::new_v4();
         let info_add = azalea::player::PlayerInfo {

@@ -164,7 +164,11 @@ pub(crate) struct RealBotClient {
 
 impl RealBotClient {
     pub fn new(client: Client, state: Arc<SharedState>, sender: BotCommandSender) -> Self {
-        Self { client, state, sender }
+        Self {
+            client,
+            state,
+            sender,
+        }
     }
 }
 
@@ -683,7 +687,7 @@ impl<B: BotActions> CommandExecutor<B> {
         // presence of the entry guarantees the bot has the chunk
         // data — anything not in the index is genuinely unknown.
         let snapshot = self.state.read_snapshot();
-        if snapshot.block_index.get(&pos).is_none() {
+        if !snapshot.block_index.contains_key(&pos) {
             return Err(BotError::ChunkNotLoaded(pos));
         }
         self.bot.mine_block(&pos);
@@ -1857,7 +1861,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(30)).await;
             notify_for_task.notify_waiters();
             tokio::time::sleep(Duration::from_millis(30)).await;
-            mock_log.goto_target_unreached.store(false, Ordering::SeqCst);
+            mock_log
+                .goto_target_unreached
+                .store(false, Ordering::SeqCst);
         });
 
         // 1s timeout — the position flip (at ~60ms) must release us
@@ -1867,7 +1873,10 @@ mod tests {
         let elapsed = start.elapsed();
         firer.await.unwrap();
 
-        assert!(result.is_ok(), "notify + position update must unblock fallback");
+        assert!(
+            result.is_ok(),
+            "notify + position update must unblock fallback"
+        );
         assert!(
             elapsed < Duration::from_millis(200),
             "wait_for_goto_completion should return promptly after position update, took {elapsed:?}"

@@ -282,10 +282,8 @@ impl ConnectionManager {
         *events::INJECTED_COMMAND_SENDER
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(command_sender.clone());
-        events::INJECTED_SNAPSHOT_INTERVAL_MS.store(
-            snapshot_interval_ms,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        events::INJECTED_SNAPSHOT_INTERVAL_MS
+            .store(snapshot_interval_ms, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -531,25 +529,32 @@ mod tests {
             &sender,
             config.snapshot_interval_ms,
         );
-        assert!(events::INJECTED_SHARED_STATE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some());
-        assert!(events::INJECTED_COMMAND_RECEIVER
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some());
-        assert!(events::INJECTED_EGUI_CTX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_none());
-        assert!(events::INJECTED_COMMAND_SENDER
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some());
+        assert!(
+            events::INJECTED_SHARED_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        );
+        assert!(
+            events::INJECTED_COMMAND_RECEIVER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        );
+        assert!(
+            events::INJECTED_EGUI_CTX
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        );
+        assert!(
+            events::INJECTED_COMMAND_SENDER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        );
         assert_eq!(
-            events::INJECTED_SNAPSHOT_INTERVAL_MS
-                .load(std::sync::atomic::Ordering::Relaxed),
+            events::INJECTED_SNAPSHOT_INTERVAL_MS.load(std::sync::atomic::Ordering::Relaxed),
             config.snapshot_interval_ms
         );
 
@@ -605,8 +610,7 @@ mod tests {
             "INJECTED_COMMAND_SENDER must be Some after iteration 2"
         );
         assert_eq!(
-            events::INJECTED_SNAPSHOT_INTERVAL_MS
-                .load(std::sync::atomic::Ordering::Relaxed),
+            events::INJECTED_SNAPSHOT_INTERVAL_MS.load(std::sync::atomic::Ordering::Relaxed),
             config.snapshot_interval_ms,
             "snapshot interval must be restored on iteration 2"
         );
