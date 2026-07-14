@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-14
+
+First stable release. Consolidates all review-fix work from PRs #6–#9 plus the
+initial MCP server / UI feature set.
+
+### Added
+
+- GitHub Actions release workflow (`.github/workflows/release.yml`) — builds
+  and publishes binaries for Windows / macOS / Linux × x86_64 / aarch64 on
+  every `v*` tag push or manual workflow dispatch.
+
 ### Added
 
 - **`compound_ops::find_standable_neighbor(snapshot, target) -> Option<BlockPos>`**
