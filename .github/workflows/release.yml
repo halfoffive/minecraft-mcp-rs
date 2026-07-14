@@ -129,10 +129,49 @@ jobs:
           find artifacts -type f -exec cp {} release-assets/ \;
           ls -la release-assets/
 
+      - name: Generate bilingual release notes
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          repo="${GITHUB_REPOSITORY}"
+          base_url="https://github.com/${repo}/releases/download/${tag}"
+
+          cat > release-body.md <<EOF
+          ## Downloads | 下载
+
+          | Platform | Architecture | Format | Download |
+          |----------|--------------|--------|----------|
+          | Windows | x86_64 | zip | [minecraft-mcp-rs-windows-x86_64.zip](${base_url}/minecraft-mcp-rs-windows-x86_64.zip) |
+          | Windows | x86_64 | 7z | [minecraft-mcp-rs-windows-x86_64.7z](${base_url}/minecraft-mcp-rs-windows-x86_64.7z) |
+          | Windows | aarch64 | zip | [minecraft-mcp-rs-windows-aarch64.zip](${base_url}/minecraft-mcp-rs-windows-aarch64.zip) |
+          | Windows | aarch64 | 7z | [minecraft-mcp-rs-windows-aarch64.7z](${base_url}/minecraft-mcp-rs-windows-aarch64.7z) |
+          | macOS | aarch64 | tar.xz | [minecraft-mcp-rs-macos-aarch64.tar.xz](${base_url}/minecraft-mcp-rs-macos-aarch64.tar.xz) |
+          | macOS | aarch64 | tar.gz | [minecraft-mcp-rs-macos-aarch64.tar.gz](${base_url}/minecraft-mcp-rs-macos-aarch64.tar.gz) |
+          | Linux | x86_64 | tar.xz | [minecraft-mcp-rs-linux-x86_64.tar.xz](${base_url}/minecraft-mcp-rs-linux-x86_64.tar.xz) |
+          | Linux | x86_64 | tar.gz | [minecraft-mcp-rs-linux-x86_64.tar.gz](${base_url}/minecraft-mcp-rs-linux-x86_64.tar.gz) |
+          | Linux | aarch64 | tar.xz | [minecraft-mcp-rs-linux-aarch64.tar.xz](${base_url}/minecraft-mcp-rs-linux-aarch64.tar.xz) |
+          | Linux | aarch64 | tar.gz | [minecraft-mcp-rs-linux-aarch64.tar.gz](${base_url}/minecraft-mcp-rs-linux-aarch64.tar.gz) |
+
+          | 平台 | 架构 | 格式 | 下载 |
+          |------|------|------|------|
+          | Windows | x86_64 | zip | [minecraft-mcp-rs-windows-x86_64.zip](${base_url}/minecraft-mcp-rs-windows-x86_64.zip) |
+          | Windows | x86_64 | 7z | [minecraft-mcp-rs-windows-x86_64.7z](${base_url}/minecraft-mcp-rs-windows-x86_64.7z) |
+          | Windows | aarch64 | zip | [minecraft-mcp-rs-windows-aarch64.zip](${base_url}/minecraft-mcp-rs-windows-aarch64.zip) |
+          | Windows | aarch64 | 7z | [minecraft-mcp-rs-windows-aarch64.7z](${base_url}/minecraft-mcp-rs-windows-aarch64.7z) |
+          | macOS | aarch64 | tar.xz | [minecraft-mcp-rs-macos-aarch64.tar.xz](${base_url}/minecraft-mcp-rs-macos-aarch64.tar.xz) |
+          | macOS | aarch64 | tar.gz | [minecraft-mcp-rs-macos-aarch64.tar.gz](${base_url}/minecraft-mcp-rs-macos-aarch64.tar.gz) |
+          | Linux | x86_64 | tar.xz | [minecraft-mcp-rs-linux-x86_64.tar.xz](${base_url}/minecraft-mcp-rs-linux-x86_64.tar.xz) |
+          | Linux | x86_64 | tar.gz | [minecraft-mcp-rs-linux-x86_64.tar.gz](${base_url}/minecraft-mcp-rs-linux-x86_64.tar.gz) |
+          | Linux | aarch64 | tar.xz | [minecraft-mcp-rs-linux-aarch64.tar.xz](${base_url}/minecraft-mcp-rs-linux-aarch64.tar.xz) |
+          | Linux | aarch64 | tar.gz | [minecraft-mcp-rs-linux-aarch64.tar.gz](${base_url}/minecraft-mcp-rs-linux-aarch64.tar.gz) |
+          EOF
+
+          cat release-body.md
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: release-assets/*
+          body_path: release-body.md
           draft: false
           prerelease: ${{ github.event.inputs.prerelease || false }}
           generate_release_notes: true

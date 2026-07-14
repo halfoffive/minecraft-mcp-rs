@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-07-14
+
+Release notes now include a bilingual (English / 简体中文) download table
+with links for every platform and archive format.
+
+### Changed
+
+- `.github/workflows/release.yml` generates a `release-body.md` with English
+  and Chinese download tables, then passes it to `action-gh-release` via
+  `body_path`.
+
 ## [1.0.1] - 2026-07-14
 
 All binaries are now released in two archive formats per platform.
