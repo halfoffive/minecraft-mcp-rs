@@ -61,7 +61,7 @@ pub async fn handle_act(
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
