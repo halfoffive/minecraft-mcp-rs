@@ -59,7 +59,7 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
         let is_safe = matches!(edit.mcp_address.as_str(), "127.0.0.1" | "::1" | "localhost");
         if !is_safe && !edit.mcp_address.is_empty() {
             ui.label(
-                egui::RichText::new("⚠ No TLS — use trusted network or reverse proxy")
+                egui::RichText::new(i18n::tr(TextKey::TlsWarning))
                     .color(egui::Color32::from_rgb(220, 80, 80))
                     .small(),
             );
@@ -72,7 +72,7 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::Transport));
         egui::ComboBox::from_id_salt("mcp_transport_combo")
-            .selected_text(format!("{:?}", edit.mcp_transport))
+            .selected_text(transport_label(edit.mcp_transport))
             .show_ui(ui, |ui| {
                 ui.selectable_value(
                     &mut edit.mcp_transport,
@@ -229,6 +229,19 @@ fn language_label(lang: Language) -> &'static str {
     match lang {
         Language::En => i18n::tr(TextKey::LangEn),
         Language::ZhCn => i18n::tr(TextKey::LangZhCn),
+    }
+}
+
+/// Return the localised display name for `transport` (used as the
+/// ComboBox's `selected_text`).
+///
+/// Mirrors the selectable labels inside the dropdown so the collapsed
+/// ComboBox shows the same string as the highlighted option when expanded,
+/// and updates immediately when the UI language changes.
+fn transport_label(transport: McpTransport) -> &'static str {
+    match transport {
+        McpTransport::Http => i18n::tr(TextKey::TransportHttp),
+        McpTransport::Stdio => i18n::tr(TextKey::TransportStdio),
     }
 }
 

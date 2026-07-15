@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI uses dev profile for non-release builds:** `.github/workflows/build.yml`
+  now runs `cargo build --locked --target <target>` (dev profile) instead of
+  `--release`, so PR/push CI builds are faster and no longer trigger the
+  release-only Windows console hiding. `release.yml` still uses `--release`
+  with `strip` for published binaries.
+- **CI deduplicates workflow runs:** `build.yml` now limits `push` triggers to
+  the `master` branch (so internal PR branches only trigger the
+  `pull_request` workflow), adds a top-level `concurrency` group with
+  `cancel-in-progress: true` to cancel stale runs, and decouples the `lint`
+  job from the `build` matrix so lint/test runs in parallel with the
+  cross-platform builds.
+
+### Fixed
+
+- **Disconnect during connection attempt:** `ClientBuilder::start()` in
+  `connection.rs` is now wrapped in `tokio::select!` with
+  `cancel_token.cancelled()`, so clicking Disconnect while azalea is still
+  trying to TCP-connect aborts the attempt immediately instead of waiting
+  for the ~5 s timeout to expire.
+- **Release console window:** `src/main.rs` now carries
+  `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` so
+  release builds on Windows no longer flash a black console window. Debug
+  builds retain the console for diagnostics.
+- **i18n missed strings:** the MCP server status line in the Status panel
+  (`Running on <addr>` / `Running on stdio` / `Failed: <msg>` / `Stopped`),
+  the non-loopback HTTP TLS warnings in both the Settings and MCP Config
+  panels, and the transport `ComboBox` collapsed label are now routed
+  through `TextKey` translations. Switching the UI language now updates all
+  of them on the next frame instead of leaving hard-coded English behind.
+
 ## [1.0.3] - 2026-07-15
 
 ### Fixed — P0 (project correctness)

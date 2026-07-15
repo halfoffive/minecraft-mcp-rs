@@ -9,8 +9,8 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> = {
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/getting-started', activeMatch: '/guide/' },
-      { text: 'Tools', link: '/guide/tools', activeMatch: '/guide/' },
-      { text: 'Config', link: '/guide/configuration' },
+      { text: 'Tools', link: '/tools', activeMatch: '/tools' },
+      { text: 'Config', link: '/config', activeMatch: '/config' },
       { text: 'GitHub', link: 'https://github.com/your-org/minecraft-mcp-rs' }
     ],
 
@@ -20,10 +20,20 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> = {
           text: 'Guide',
           items: [
             { text: 'Getting Started', link: '/guide/getting-started' },
-            { text: 'Configuration', link: '/guide/configuration' },
-            { text: 'Tools', link: '/guide/tools' },
             { text: 'Architecture', link: '/guide/architecture' }
           ]
+        }
+      ],
+      '/tools/': [
+        {
+          text: 'Tools',
+          items: [{ text: 'Tools', link: '/tools' }]
+        }
+      ],
+      '/config/': [
+        {
+          text: 'Config',
+          items: [{ text: 'Configuration', link: '/config' }]
         }
       ]
     },

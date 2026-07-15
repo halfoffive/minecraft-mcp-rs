@@ -142,10 +142,23 @@ impl ConnectionManager {
             // start() blocks until the client disconnects or the connection fails.
             // BotState is created internally by azalea via Default — the injected
             // statics above ensure the correct SharedState and command receiver are used.
-            let exit = ClientBuilder::new()
-                .set_handler(events::handle_event)
-                .start(account, address.clone())
-                .await;
+            //
+            // Wrap in tokio::select! so a disconnect request during the (possibly
+            // multi-second) TCP connect attempt aborts immediately instead of
+            // waiting for start() to return. Without this, clicking Disconnect
+            // while azalea is still trying to connect has no effect until the
+            // TCP timeout expires (~5 s).
+            let start_cancel = self.state.cancel_token();
+            let exit = tokio::select! {
+                result = ClientBuilder::new()
+                    .set_handler(events::handle_event)
+                    .start(account, address.clone()) => result,
+                _ = start_cancel.cancelled() => {
+                    info!("disconnect requested during connection attempt — aborting start");
+                    self.state.set_online(false);
+                    break;
+                }
+            };
 
             // Was the bot online before this disconnect? The event handler
             // sets `is_online()` to true on `Event::Spawn`, so this is true

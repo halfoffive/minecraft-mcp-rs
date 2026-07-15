@@ -72,19 +72,35 @@ pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
     let mcp_status = state.get_mcp_server_status();
     match &mcp_status {
         McpServerStatus::Running(addr) => {
-            ui.label(format!("MCP: Running on {addr}"));
+            ui.label(format!(
+                "{} {}",
+                i18n::tr(TextKey::McpServerLabel),
+                i18n::tr(TextKey::McpServerRunning).replace("{addr}", &addr.to_string())
+            ));
         }
         McpServerStatus::Stdio => {
-            ui.label("MCP: Running on stdio");
+            ui.label(format!(
+                "{} {}",
+                i18n::tr(TextKey::McpServerLabel),
+                i18n::tr(TextKey::McpServerStdio)
+            ));
         }
         McpServerStatus::Failed(msg) => {
             ui.label(
-                egui::RichText::new(format!("MCP: {msg}"))
-                    .color(egui::Color32::from_rgb(220, 80, 80)),
+                egui::RichText::new(format!(
+                    "{} {}",
+                    i18n::tr(TextKey::McpServerLabel),
+                    i18n::tr(TextKey::McpServerFailed).replace("{msg}", msg)
+                ))
+                .color(egui::Color32::from_rgb(220, 80, 80)),
             );
         }
         McpServerStatus::Stopped => {
-            ui.label("MCP: Stopped");
+            ui.label(format!(
+                "{} {}",
+                i18n::tr(TextKey::McpServerLabel),
+                i18n::tr(TextKey::McpServerStopped)
+            ));
         }
     }
 
