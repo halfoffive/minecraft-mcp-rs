@@ -8,6 +8,10 @@
 //!
 //! Shared state is accessed lock-free by all threads.
 
+// Hide the console window in release builds on Windows. Debug builds retain
+// the console for diagnostic output (tracing logs, panics, etc.).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
