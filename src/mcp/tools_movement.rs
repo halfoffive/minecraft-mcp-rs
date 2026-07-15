@@ -69,7 +69,7 @@ pub async fn handle_move_to(
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
@@ -128,7 +128,7 @@ pub async fn handle_walk_direction(
             serde_json::to_string(&json)
                 .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
         }
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
@@ -156,7 +156,7 @@ pub async fn handle_jump(
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
@@ -207,7 +207,7 @@ pub async fn handle_teleport(
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
@@ -249,7 +249,7 @@ pub async fn handle_smart_move(
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
@@ -300,7 +300,7 @@ pub async fn handle_fly_to(
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
