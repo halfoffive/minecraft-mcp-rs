@@ -445,7 +445,16 @@ impl CompoundOpExecutor {
                     // Always move to the standable neighbour, not the
                     // target — `current_action` returns the raw target
                     // for backward compat, but we override it here.
-                    let result = executor.dispatch(BotCommand::MoveTo(move_target)).await?;
+                    // Task 2.6: dispatch errors must transition the state
+                    // machine to `Failed(_)` rather than `?`-returning out
+                    // of the executor.
+                    let result = match executor.dispatch(BotCommand::MoveTo(move_target)).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            state = op.advance(state, OperationEvent::Failed(e));
+                            continue;
+                        }
+                    };
                     if !result.success {
                         state = op.advance(
                             state,
@@ -459,9 +468,14 @@ impl CompoundOpExecutor {
                     state = op.advance(state, OperationEvent::Arrived);
                 }
                 Some(BotCommand::PlaceBlock(target, bt)) => {
-                    let result = executor
-                        .dispatch(BotCommand::PlaceBlock(target, bt))
-                        .await?;
+                    // Task 2.6: same `?` → state.advance(Failed(e)) rewrite.
+                    let result = match executor.dispatch(BotCommand::PlaceBlock(target, bt)).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            state = op.advance(state, OperationEvent::Failed(e));
+                            continue;
+                        }
+                    };
                     if !result.success {
                         state = op.advance(
                             state,
@@ -535,7 +549,16 @@ impl CompoundOpExecutor {
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
             match op.current_action(&state) {
                 Some(BotCommand::MoveTo(target)) => {
-                    let result = executor.dispatch(BotCommand::MoveTo(target)).await?;
+                    // Task 2.6: dispatch errors must transition the state
+                    // machine to `Failed(_)` rather than `?`-returning out
+                    // of the executor.
+                    let result = match executor.dispatch(BotCommand::MoveTo(target)).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            state = op.advance(state, OperationEvent::Failed(e));
+                            continue;
+                        }
+                    };
                     if !result.success {
                         state = op.advance(
                             state,
@@ -549,7 +572,14 @@ impl CompoundOpExecutor {
                     state = op.advance(state, OperationEvent::Arrived);
                 }
                 Some(BotCommand::OpenContainer(target)) => {
-                    let result = executor.dispatch(BotCommand::OpenContainer(target)).await?;
+                    // Task 2.6: same `?` → state.advance(Failed(e)) rewrite.
+                    let result = match executor.dispatch(BotCommand::OpenContainer(target)).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            state = op.advance(state, OperationEvent::Failed(e));
+                            continue;
+                        }
+                    };
                     if !result.success {
                         state =
                             op.advance(state, OperationEvent::Failed(BotError::ContainerTimeout));
@@ -1668,16 +1698,17 @@ mod tests {
         let src = include_str!("ops.rs");
         let marker = "state = op.advance(state, OperationEvent::Failed(e));";
         let occurrences = src.matches(marker).count();
-        // Expect 3 dispatch arms (MoveTo, EquipTool, BreakBlock) — but
-        // the same line also appears in the test helper for
-        // pathfinding failure (we use it in `match PathfindingFailed`).
-        // 3 is the lower bound; if it ever drops to 2, an arm was
+        // Expect 7 dispatch arms — 3 in `execute_mine_block` (MoveTo,
+        // EquipTool, BreakBlock), 2 in `execute_place_block` (MoveTo,
+        // PlaceBlock), and 2 in `execute_open_container` (MoveTo,
+        // OpenContainer). If it ever drops below 7, an arm was
         // reverted to `?`.
         assert!(
-            occurrences >= 3,
-            "expected at least 3 occurrences of the dispatch-err \
+            occurrences >= 7,
+            "expected at least 7 occurrences of the dispatch-err \
              `state.advance(Failed(e))` pattern (one per dispatch arm \
-             in `execute_mine_block`), found {occurrences}. A future \
+             across `execute_mine_block`, `execute_place_block`, and \
+             `execute_open_container`), found {occurrences}. A future \
              edit may have reverted the `?`-to-`match` rewrite."
         );
     }

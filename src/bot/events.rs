@@ -210,7 +210,10 @@ pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::R
 /// needs to `await` between polls. The `handle_event` function calls
 /// this with `.await` so the runtime can drive the retry loop.
 async fn handle_spawn(bot: Client, state: &BotState) {
-    state.shared_state.set_online(true);
+    // NOTE: set_online(true) is intentionally deferred until after the
+    // command executor is successfully started (see below).  Reporting
+    // "online" before the executor is ready would cause MCP clients to
+    // send commands that receive Offline errors.
 
     // Store the ECS handle so request_disconnect can trigger shutdown by
     // writing AppExit::Success to the ECS World (same pattern as
@@ -271,7 +274,7 @@ async fn handle_spawn(bot: Client, state: &BotState) {
                      dependency injection)"
                 );
                 request_repaint(state);
-                trace!("bot spawned without executor, set online=true");
+                trace!("bot spawned without executor — not marking online");
                 return;
             };
             let client = RealBotClient::new(bot, Arc::clone(&shared_state), command_sender);
@@ -284,6 +287,10 @@ async fn handle_spawn(bot: Client, state: &BotState) {
                 .executor_handle
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(handle);
+            // Mark the bot online only after the executor is running so
+            // MCP clients that observe is_online()==true can immediately
+            // send commands without hitting Offline errors.
+            state.shared_state.set_online(true);
             info!("command executor started");
         }
         None => {
@@ -296,7 +303,7 @@ async fn handle_spawn(bot: Client, state: &BotState) {
     }
 
     request_repaint(state);
-    trace!("bot spawned, set online=true");
+    trace!("handle_spawn completed");
 }
 
 /// Abort any in-flight tick snapshot tasks and drop their handles.
