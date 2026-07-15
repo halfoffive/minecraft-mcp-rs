@@ -263,10 +263,17 @@ async fn handle_spawn(bot: Client, state: &BotState) {
             // the unwrap is safe at runtime. The `Option<...>` is
             // passed through to `CommandExecutor` unchanged.
             let command_sender_opt = state.command_sender.clone();
-            let command_sender: BotCommandSender = command_sender_opt.clone().expect(
-                "Event::Spawn fires only after ConnectionManager injects \
-                 a Some(BotCommandSender) into BotState",
-            );
+            let Some(command_sender) = command_sender_opt.clone() else {
+                warn!(
+                    "Spawn fired but command_sender was not injected — \
+                     skipping executor start (this indicates azalea \
+                     fired Event::Spawn before ConnectionManager completed \
+                     dependency injection)"
+                );
+                request_repaint(state);
+                trace!("bot spawned without executor, set online=true");
+                return;
+            };
             let client = RealBotClient::new(bot, Arc::clone(&shared_state), command_sender);
             let handle = tokio::task::spawn_local(async move {
                 let mut executor =

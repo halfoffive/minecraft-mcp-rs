@@ -1,6 +1,6 @@
 # minecraft-mcp-rs · 审查 TL;DR
 
-> 一屏可读。完整报告见 `audit-report.md`，分项细节见 `findings/01-06.md`。
+> 一屏可读。
 
 ## 总体评价
 
@@ -89,15 +89,3 @@
 - P1.6 find_standable_neighbor 误判（只在 chunk 未加载时）
 - P1.7 goto 早返回窗口（azalea 自身问题边界）
 - P2 全部（26+ 项性能 / 一致性）
-
-## 报告产物清单
-
-- `audit-report.md`（约 350 行，完整版）
-- `SUMMARY.md`（本文件，TL;DR）
-- `findings/01-concurrency.md`（并发与线程安全）
-- `findings/02-mcp.md`（MCP 协议层）
-- `findings/03-bot-logic.md`（Bot 逻辑与状态机）
-- `findings/04-resources.md`（资源管理与生命周期）
-- `findings/05-error-ui-config.md`（错误处理 / UI / 配置）
-- `findings/06-tests-build.md`（测试与构建）
-- `spec.md` / `tasks.md` / `checklist.md`（spec 流程文档）
