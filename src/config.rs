@@ -109,7 +109,7 @@ impl Default for AppConfig {
             command_timeout_secs: 30,
             mcp_token: default_mcp_token(),
             mcp_transport: McpTransport::default(),
-            language: Language::default(),
+            language: Language::from_system_locale(),
         }
     }
 }
@@ -270,7 +270,10 @@ mod tests {
     #[test]
     fn test_default_config_language() {
         let config = AppConfig::default();
-        assert_eq!(config.language, Language::En);
+        // The default language follows the host system locale rather than
+        // hardcoding English, so we compare against the runtime-detected
+        // value instead of Language::En.
+        assert_eq!(config.language, Language::from_system_locale());
     }
 
     #[test]
