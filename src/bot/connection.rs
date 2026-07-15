@@ -57,6 +57,19 @@ impl ConnectionManager {
         self.state.set_online(false);
     }
 
+    /// Request an egui repaint if a context was supplied.
+    ///
+    /// The connection loop runs on a background OS thread; state mutations
+    /// like `set_online(false)` and `clear_connecting()` are invisible to the
+    /// UI until the next frame. Calling this after every state transition that
+    /// affects the Connect/Disconnect buttons or status labels keeps the UI
+    /// in sync without waiting for the 1-second fallback repaint.
+    fn request_repaint(ctx: &Option<egui::Context>) {
+        if let Some(ctx) = ctx {
+            ctx.request_repaint();
+        }
+    }
+
     /// Run the connection loop.
     ///
     /// Connects, runs until the bot is disconnected, then decides what to
@@ -156,6 +169,7 @@ impl ConnectionManager {
                 _ = start_cancel.cancelled() => {
                     info!("disconnect requested during connection attempt — aborting start");
                     self.state.set_online(false);
+                    Self::request_repaint(&egui_ctx);
                     break;
                 }
             };
@@ -168,6 +182,7 @@ impl ConnectionManager {
 
             // Disconnected — ensure the online flag is cleared.
             self.state.set_online(false);
+            Self::request_repaint(&egui_ctx);
 
             // If the user requested disconnect, don't treat it as a failure.
             if self.state.is_disconnect_requested() {
@@ -216,6 +231,7 @@ impl ConnectionManager {
                 );
                 warn!(%address, %exit_desc, "connection failed — stopping retry loop");
                 self.state.set_last_error(msg);
+                Self::request_repaint(&egui_ctx);
                 break;
             }
 
@@ -243,6 +259,7 @@ impl ConnectionManager {
 
         // Allow the next Connect click to proceed.
         self.state.clear_connecting();
+        Self::request_repaint(&egui_ctx);
         Ok(())
     }
 
