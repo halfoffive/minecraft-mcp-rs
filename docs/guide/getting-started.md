@@ -34,7 +34,7 @@ transport in the Settings panel:
 
 By default the bot tries to connect to `127.0.0.1:25565` as `AI_Bot`. Tweak
 settings in the UI panel or via environment before startup (see
-[Configuration](./configuration)).
+[Configuration](../config)).
 
 ## Test
 
