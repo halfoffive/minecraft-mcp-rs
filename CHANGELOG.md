@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-07-15
+
 ### Fixed — P0 (project correctness)
 
 - **u32→i32 溢出 (P0-#1):** added `clamp_to_i32` helper in `src/mcp/mod.rs`;
@@ -102,8 +104,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cargo fmt --check`. The release workflow's `release` job depends on
   both `build` and `lint` so a failing lint blocks the GitHub Release.
   No more "green CI but locally broken" surprises.
-
-## [Unreleased] - Phase 2
 
 ### Added — Harvest Level enforcement (H-1)
 
