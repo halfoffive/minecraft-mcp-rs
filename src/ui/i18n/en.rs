@@ -42,6 +42,14 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::Token => "Token:",
         TextKey::TokenHint => "Bearer token for HTTP auth",
 
+        // ── MCP server status / warnings ───────────────────────────────
+        TextKey::McpServerLabel => "MCP:",
+        TextKey::McpServerRunning => "Running on {addr}",
+        TextKey::McpServerStdio => "Running on stdio",
+        TextKey::McpServerFailed => "Failed: {msg}",
+        TextKey::McpServerStopped => "Stopped",
+        TextKey::TlsWarning => "⚠ No TLS — use trusted network or reverse proxy",
+
         // ── Scanning section ───────────────────────────────────────────
         TextKey::Scanning => "Scanning",
         TextKey::ChunkScanRadius => "Chunk Scan Radius (1-16):",
@@ -160,6 +168,12 @@ mod tests {
             TextKey::TransportStdio,
             TextKey::Token,
             TextKey::TokenHint,
+            TextKey::McpServerLabel,
+            TextKey::McpServerRunning,
+            TextKey::McpServerStdio,
+            TextKey::McpServerFailed,
+            TextKey::McpServerStopped,
+            TextKey::TlsWarning,
             TextKey::Scanning,
             TextKey::ChunkScanRadius,
             TextKey::BlockPerceptionRadius,

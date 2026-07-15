@@ -42,6 +42,14 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::Token => "令牌：",
         TextKey::TokenHint => "HTTP 认证的 Bearer 令牌",
 
+        // ── MCP server status / warnings ───────────────────────────────
+        TextKey::McpServerLabel => "MCP：",
+        TextKey::McpServerRunning => "运行于 {addr}",
+        TextKey::McpServerStdio => "运行于 stdio",
+        TextKey::McpServerFailed => "失败：{msg}",
+        TextKey::McpServerStopped => "已停止",
+        TextKey::TlsWarning => "⚠ 无 TLS — 请在可信网络中使用或使用反向代理",
+
         // ── Scanning section ───────────────────────────────────────────
         TextKey::Scanning => "扫描",
         TextKey::ChunkScanRadius => "区块扫描半径 (1-16)：",
@@ -153,6 +161,12 @@ mod tests {
             TextKey::TransportStdio,
             TextKey::Token,
             TextKey::TokenHint,
+            TextKey::McpServerLabel,
+            TextKey::McpServerRunning,
+            TextKey::McpServerStdio,
+            TextKey::McpServerFailed,
+            TextKey::McpServerStopped,
+            TextKey::TlsWarning,
             TextKey::Scanning,
             TextKey::ChunkScanRadius,
             TextKey::BlockPerceptionRadius,
