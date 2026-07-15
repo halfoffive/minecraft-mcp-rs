@@ -83,6 +83,13 @@ fn make_offline_state() -> Arc<SharedState> {
     Arc::new(SharedState::new(AppConfig::default()))
 }
 
+/// Create a minimal `Arc<SharedState>` for tests that just need a state
+/// to feed to [`channel::create_command_channel`] without caring about
+/// online status or snapshot content.
+fn make_test_state() -> Arc<SharedState> {
+    Arc::new(SharedState::new(AppConfig::default()))
+}
+
 /// Helper to create a BotResult.
 fn bot_result(success: bool, message: &str) -> BotResult {
     BotResult {
@@ -100,7 +107,7 @@ fn bot_result(success: bool, message: &str) -> BotResult {
 async fn test_full_mcp_cycle_initialize_and_query() {
     // ── Initialize (get_info) ────────────────────────────────────
     let state = make_online_state();
-    let (sender, mut receiver) = channel::create_command_channel(4);
+    let (sender, mut receiver) = channel::create_command_channel(4, state.clone());
     let server = McpBotServer::new(state.clone(), sender.clone());
 
     let info = server.get_info();
@@ -156,7 +163,7 @@ async fn test_full_mcp_cycle_initialize_and_query() {
 #[tokio::test]
 async fn test_full_mcp_cycle_tool_list_and_offline_handling() {
     let state = make_offline_state();
-    let (sender, _receiver) = channel::create_command_channel(4);
+    let (sender, _receiver) = channel::create_command_channel(4, state.clone());
     let server = McpBotServer::new(state.clone(), sender);
 
     // get_info works even offline
@@ -184,7 +191,7 @@ async fn test_full_mcp_cycle_tool_list_and_offline_handling() {
 
 #[tokio::test]
 async fn test_channel_move_to_sends_correct_position() {
-    let (sender, mut receiver) = channel::create_command_channel(4);
+    let (sender, mut receiver) = channel::create_command_channel(4, make_test_state());
 
     let verifier = tokio::spawn(async move {
         let wrapped = receiver.recv().await.expect("should receive command");
@@ -212,7 +219,7 @@ async fn test_channel_move_to_sends_correct_position() {
 
 #[tokio::test]
 async fn test_channel_break_block_sends_correct_position() {
-    let (sender, mut receiver) = channel::create_command_channel(4);
+    let (sender, mut receiver) = channel::create_command_channel(4, make_test_state());
 
     let verifier = tokio::spawn(async move {
         let wrapped = receiver.recv().await.expect("should receive command");
@@ -239,7 +246,7 @@ async fn test_channel_break_block_sends_correct_position() {
 
 #[tokio::test]
 async fn test_channel_walk_direction_sends_correct_direction() {
-    let (sender, mut receiver) = channel::create_command_channel(4);
+    let (sender, mut receiver) = channel::create_command_channel(4, make_test_state());
 
     let verifier = tokio::spawn(async move {
         let wrapped = receiver.recv().await.expect("should receive command");
@@ -265,7 +272,7 @@ async fn test_channel_walk_direction_sends_correct_direction() {
 
 #[tokio::test]
 async fn test_channel_place_block_sends_position_and_type() {
-    let (sender, mut receiver) = channel::create_command_channel(4);
+    let (sender, mut receiver) = channel::create_command_channel(4, make_test_state());
 
     let verifier = tokio::spawn(async move {
         let wrapped = receiver.recv().await.expect("should receive command");
@@ -342,7 +349,7 @@ fn test_is_connected_reflects_online_status() {
 
 #[tokio::test]
 async fn test_concurrent_commands_serialized_second_waits() {
-    let (sender, mut receiver) = channel::create_command_channel(16);
+    let (sender, mut receiver) = channel::create_command_channel(16, make_test_state());
 
     let responder = tokio::spawn(async move {
         let mut order: Vec<String> = vec![];
@@ -399,7 +406,7 @@ async fn test_concurrent_commands_serialized_second_waits() {
 
 #[tokio::test]
 async fn test_multiple_commands_all_get_responses() {
-    let (sender, mut receiver) = channel::create_command_channel(16);
+    let (sender, mut receiver) = channel::create_command_channel(16, make_test_state());
 
     let responder = tokio::spawn(async move {
         let mut count = 0u32;
@@ -443,7 +450,7 @@ async fn test_multiple_commands_all_get_responses() {
 
 #[tokio::test]
 async fn test_bot_offline_channel_returns_offline_error() {
-    let (sender, receiver) = channel::create_command_channel(4);
+    let (sender, receiver) = channel::create_command_channel(4, make_test_state());
     drop(receiver);
 
     let result = sender.send_command(BotCommand::QuerySelfInfo).await;
@@ -461,7 +468,7 @@ async fn test_bot_offline_channel_returns_offline_error() {
 
 #[tokio::test]
 async fn test_bot_offline_all_command_types_fail() {
-    let (sender, receiver) = channel::create_command_channel(4);
+    let (sender, receiver) = channel::create_command_channel(4, make_test_state());
     drop(receiver);
 
     let commands = vec![
@@ -519,7 +526,7 @@ async fn test_query_tools_offline_return_error() {
 /// because the responder is gone permanently rather than merely slow.
 #[tokio::test]
 async fn test_offline_returned_when_responder_dropped() {
-    let (sender, mut receiver) = channel::create_command_channel(4);
+    let (sender, mut receiver) = channel::create_command_channel(4, make_test_state());
 
     let dropper = tokio::spawn(async move {
         let wrapped = receiver.recv().await.expect("should receive command");
@@ -545,7 +552,7 @@ async fn test_offline_returned_when_responder_dropped() {
 /// delivered to the receiver before the responder is dropped.
 #[tokio::test]
 async fn test_offline_returned_when_responder_dropped_break_block() {
-    let (sender, mut receiver) = channel::create_command_channel(4);
+    let (sender, mut receiver) = channel::create_command_channel(4, make_test_state());
 
     let dropper = tokio::spawn(async move {
         let wrapped = receiver.recv().await.expect("should receive command");
@@ -579,7 +586,7 @@ async fn test_offline_returned_when_responder_dropped_break_block() {
 #[tokio::test]
 async fn test_offline_messages_distinguish_receiver_dropped_vs_responder_dropped() {
     // Case A: receiver dropped before command is sent.
-    let (sender1, receiver1) = channel::create_command_channel(4);
+    let (sender1, receiver1) = channel::create_command_channel(4, make_test_state());
     drop(receiver1);
     let offline_a = sender1.send_command(BotCommand::Jump).await;
     let msg_a = match offline_a {
@@ -589,7 +596,7 @@ async fn test_offline_messages_distinguish_receiver_dropped_vs_responder_dropped
     assert!(msg_a.contains("closed"), "expected 'closed' in: {msg_a}");
 
     // Case B: receiver exists but drops responder without replying.
-    let (sender2, mut receiver2) = channel::create_command_channel(4);
+    let (sender2, mut receiver2) = channel::create_command_channel(4, make_test_state());
     let dropper = tokio::spawn(async move {
         let wrapped = receiver2.recv().await.unwrap();
         drop(wrapped);
@@ -608,6 +615,50 @@ async fn test_offline_messages_distinguish_receiver_dropped_vs_responder_dropped
     dropper.await.unwrap();
 }
 
+/// When the receiver task accepts a command but takes longer than
+/// `command_timeout_secs` to reply, the sender must observe
+/// `BotError::CommandTimeout` — distinct from `BotError::Offline`,
+/// which is reserved for the responder-dropped / receiver-dropped
+/// cases. The responder is kept **alive** (we sleep rather than drop)
+/// so the genuine `tokio::time::timeout` branch is exercised, not the
+/// responder-dropped branch.
+#[tokio::test]
+async fn test_command_timeout_responder_alive_but_slow() {
+    let state = make_offline_state();
+    // Set a 1-second timeout (smallest representable value with
+    // the current `AppConfig::command_timeout_secs: u64` field).
+    state.update_config(|cfg| {
+        cfg.command_timeout_secs = 1;
+    });
+    let (sender, mut receiver) = channel::create_command_channel(4, state);
+
+    let cmd = BotCommand::Jump;
+
+    let responder = tokio::spawn(async move {
+        let wrapped = receiver.recv().await.expect("should receive command");
+        // Hold the responder for 1.5s — longer than the 1s timeout —
+        // so send_command's `tokio::time::timeout` fires first.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        // Drop after the timeout has already fired (irrelevant to the
+        // assertion, just keeps the task clean).
+        drop(wrapped);
+    });
+
+    let result = sender.send_command(cmd).await;
+
+    match result {
+        Err(BotError::CommandTimeout { command, .. }) => {
+            assert!(
+                command.contains("Jump"),
+                "expected command field to mention Jump, got: {command}"
+            );
+        }
+        other => panic!("expected BotError::CommandTimeout, got: {:?}", other),
+    }
+
+    responder.await.expect("responder should complete");
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Test 7: Auto-reconnect sequence simulation
 // ═══════════════════════════════════════════════════════════════
@@ -615,7 +666,7 @@ async fn test_offline_messages_distinguish_receiver_dropped_vs_responder_dropped
 #[tokio::test]
 async fn test_auto_reconnect_sequence_simulation() {
     let state = make_online_state();
-    let (sender, mut receiver) = channel::create_command_channel(4);
+    let (sender, mut receiver) = channel::create_command_channel(4, state.clone());
 
     let _chan_task = tokio::spawn(async move {
         while let Some(wrapped) = receiver.recv().await {
@@ -689,7 +740,7 @@ async fn test_auto_reconnect_sequence_simulation() {
 #[tokio::test]
 async fn test_reconnect_multiple_cycles() {
     let state = make_online_state();
-    let (sender, mut receiver) = channel::create_command_channel(4);
+    let (sender, mut receiver) = channel::create_command_channel(4, state.clone());
 
     let _chan_task = tokio::spawn(async move {
         while let Some(wrapped) = receiver.recv().await {
@@ -752,7 +803,7 @@ fn test_all_query_tools_exist_and_work() {
 
 #[tokio::test]
 async fn test_all_bot_command_variants_exist_no_craft_item() {
-    let (sender, mut receiver) = channel::create_command_channel(16);
+    let (sender, mut receiver) = channel::create_command_channel(16, make_test_state());
 
     let responder = tokio::spawn(async move {
         let mut variants_seen = std::collections::HashSet::new();
@@ -871,7 +922,7 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
 
 #[tokio::test]
 async fn test_channel_factory_creates_working_pair() {
-    let (sender, mut receiver) = channel::create_command_channel(8);
+    let (sender, mut receiver) = channel::create_command_channel(8, make_test_state());
 
     let verifier = tokio::spawn(async move {
         let wrapped = receiver.recv().await.expect("should receive");
@@ -893,7 +944,7 @@ async fn test_channel_factory_creates_working_pair() {
 
 #[tokio::test]
 async fn test_sender_clone_works_independently() {
-    let (sender, mut receiver) = channel::create_command_channel(8);
+    let (sender, mut receiver) = channel::create_command_channel(8, make_test_state());
     let sender2 = sender.clone();
 
     let responder = tokio::spawn(async move {
@@ -936,7 +987,7 @@ async fn test_sender_clone_works_independently() {
 
 #[tokio::test]
 async fn test_compound_break_with_tool_selection_flow() {
-    let (sender, mut receiver) = channel::create_command_channel(16);
+    let (sender, mut receiver) = channel::create_command_channel(16, make_test_state());
 
     let processor = tokio::spawn(async move {
         // Step 1: equip_tool

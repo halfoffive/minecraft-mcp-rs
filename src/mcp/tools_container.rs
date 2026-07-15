@@ -80,7 +80,9 @@ pub async fn handle_open_container(
 /// Input for the `take_from_container` MCP tool.
 #[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct TakeFromContainerInput {
-    /// Container slot index (0-based) to take items from.
+    /// Container slot index (0-based) to take items from. Double chests
+    /// have 54 slots (0-53).
+    #[schemars(range(min = 0, max = 53))]
     pub slot: u8,
     /// Number of items to take (default 1).
     #[schemars(range(min = 1, max = 64))]
@@ -124,7 +126,9 @@ pub async fn handle_take_from_container(
 /// Input for the `put_into_container` MCP tool.
 #[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct PutIntoContainerInput {
-    /// Container slot index (0-based) to put items into.
+    /// Container slot index (0-based) to put items into. Double chests
+    /// have 54 slots (0-53).
+    #[schemars(range(min = 0, max = 53))]
     pub slot: u8,
     /// Number of items to put (default 1).
     #[schemars(range(min = 1, max = 64))]
@@ -205,7 +209,7 @@ mod tests {
 
     fn setup() -> (Arc<SharedState>, BotCommandSender) {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4);
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         (state, sender)
     }
 
@@ -329,6 +333,44 @@ mod tests {
         assert_eq!(
             TakeFromContainerInput::schema_name(),
             "TakeFromContainerInput"
+        );
+    }
+
+    /// Verifies the JSON Schema published to MCP clients advertises a slot
+    /// max of 53 (not the old 50). The schemars `range` attribute should
+    /// surface as a `maximum: 53` constraint on the `slot` integer.
+    #[test]
+    fn test_take_from_container_schema_slot_max_is_53() {
+        let schema = rmcp::schemars::schema_for!(TakeFromContainerInput);
+        let value = serde_json::to_value(&schema).expect("schema serialises");
+        let slot_schema = value
+            .get("properties")
+            .and_then(|p| p.get("slot"))
+            .expect("schema has properties.slot");
+        assert_eq!(
+            slot_schema.get("maximum").and_then(|m| m.as_u64()),
+            Some(53),
+            "TakeFromContainerInput.slot must advertise maximum=53, got {slot_schema}"
+        );
+        assert_eq!(
+            slot_schema.get("minimum").and_then(|m| m.as_u64()),
+            Some(0),
+            "TakeFromContainerInput.slot must advertise minimum=0, got {slot_schema}"
+        );
+    }
+
+    #[test]
+    fn test_put_into_container_schema_slot_max_is_53() {
+        let schema = rmcp::schemars::schema_for!(PutIntoContainerInput);
+        let value = serde_json::to_value(&schema).expect("schema serialises");
+        let slot_schema = value
+            .get("properties")
+            .and_then(|p| p.get("slot"))
+            .expect("schema has properties.slot");
+        assert_eq!(
+            slot_schema.get("maximum").and_then(|m| m.as_u64()),
+            Some(53),
+            "PutIntoContainerInput.slot must advertise maximum=53, got {slot_schema}"
         );
     }
 }

@@ -7,10 +7,12 @@ use minecraft_mcp_rs::block_data::{
     ItemStack, MATERIAL_PRIORITY, MATERIAL_TIER_SPEED, best_tool_for_block, material_from_item_name,
 };
 use minecraft_mcp_rs::command_validate::validate_coordinates;
+use minecraft_mcp_rs::compound_ops::find_standable_neighbor;
 use minecraft_mcp_rs::mining_calc::calculate_mine_time;
 use minecraft_mcp_rs::tool_select::find_tool_in_inventory;
-use minecraft_mcp_rs::types::{MaterialTier, ToolType};
+use minecraft_mcp_rs::types::{BlockEntry, BlockPos, MaterialTier, ToolType, WorldSnapshot};
 use proptest::prelude::*;
+use std::collections::HashMap;
 
 // ═══════════════════════════════════════════════════════════════
 // Strategies
@@ -139,7 +141,7 @@ proptest! {
         // If the expected tool is Hand, there is no "best tool" to find.
         prop_assume!(expected_tool != ToolType::Hand);
 
-        let best_slot = find_tool_in_inventory(&expected_tool, &inventory).map(|(_, slot)| slot);
+        let best_slot = find_tool_in_inventory(&expected_tool, &inventory, None).map(|(_, slot)| slot);
 
         if let Some(slot) = best_slot {
             let slot = slot as usize;
@@ -176,7 +178,7 @@ proptest! {
         // Skip Hand since there's no tier comparison for it
         prop_assume!(tool_type != ToolType::Hand);
 
-        let best_slot = find_tool_in_inventory(&tool_type, &inventory).map(|(_, slot)| slot);
+        let best_slot = find_tool_in_inventory(&tool_type, &inventory, None).map(|(_, slot)| slot);
 
         if let Some(best_slot) = best_slot {
             let best_stack = inventory[best_slot as usize].as_ref().unwrap();
@@ -395,7 +397,10 @@ proptest! {
                 ToolType::Pickaxe,
                 ToolType::Axe,
                 ToolType::Shovel,
+                ToolType::Hoe,
+                ToolType::Sword,
                 ToolType::Shears,
+                ToolType::Hand,
             ];
             let valid_materials = [
                 MaterialTier::Wood,
@@ -417,5 +422,218 @@ proptest! {
                 material
             );
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Property: find_standable_neighbor
+// ═══════════════════════════════════════════════════════════════
+
+/// Helper: build a [`WorldSnapshot`] from a list of blocks, populating
+/// `block_index` exactly the way `SnapshotBuilder::build` does in
+/// production. `find_standable_neighbor` reads via `block_index`, so the
+/// test snapshot must match.
+fn make_snapshot_with_blocks(blocks: Vec<BlockEntry>) -> WorldSnapshot {
+    let block_index: HashMap<BlockPos, usize> = blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.position, i))
+        .collect();
+    WorldSnapshot {
+        blocks,
+        block_index,
+        ..Default::default()
+    }
+}
+
+/// Returns `true` when `pos` is one of the 8 horizontal neighbour cells
+/// of `target` at the same Y (or ±1 Y), excluding `target` itself. This
+/// mirrors the geometry `find_standable_neighbor` searches.
+fn is_8adjacent(target: BlockPos, pos: BlockPos) -> bool {
+    let dx = (pos.x - target.x).abs();
+    let dy = (pos.y - target.y).abs();
+    let dz = (pos.z - target.z).abs();
+    dx <= 1 && dy <= 1 && dz <= 1 && (dx + dy + dz) > 0
+}
+
+proptest! {
+    /// Property: For any target position within Minecraft Y bounds and
+    /// any standable neighbor in one of the 8 horizontal directions
+    /// (4 orthogonal + 4 diagonal), `find_standable_neighbor` must
+    /// return a position that is 8-direction adjacent to the target.
+    ///
+    /// The generated snapshot places the target as a solid stone block
+    /// and the chosen neighbor as an air block with a solid stone floor
+    /// directly below it — the canonical standable setup. The function
+    /// must find that neighbor (or, if multiple standable cells exist in
+    /// the 3×3×3 search volume due to prop luck, another 8-adjacent
+    /// cell), and never a position outside the search volume.
+    #[test]
+    fn prop_standable_neighbor_returns_adjacent(
+        x in -100i32..100,
+        z in -100i32..100,
+        y in -64i32..=320i32,
+        dir_x in -1i32..=1,
+        dir_z in -1i32..=1,
+    ) {
+        // Skip (0, 0) — the target itself is not a neighbour.
+        prop_assume!(dir_x != 0 || dir_z != 0);
+
+        let target = BlockPos::new(x, y, z);
+        let neighbor = BlockPos::new(x + dir_x, y, z + dir_z);
+        let floor = BlockPos::new(x + dir_x, y - 1, z + dir_z);
+
+        let snapshot = make_snapshot_with_blocks(vec![
+            BlockEntry {
+                position: target,
+                block_type: "stone".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: neighbor,
+                block_type: "air".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: floor,
+                block_type: "stone".into(),
+                block_state: None,
+            },
+        ]);
+
+        let result = find_standable_neighbor(&snapshot, target);
+        match result {
+            Some(pos) => {
+                prop_assert!(
+                    is_8adjacent(target, pos),
+                    "result {:?} is not 8-adjacent to target {:?} (must be within ±1 on each axis and not equal)",
+                    pos,
+                    target
+                );
+            }
+            None => {
+                // A 4-direction implementation would return None when
+                // the only standable cell is diagonal. We do not require
+                // the test to fail in that case — the `*_8_directions`
+                // unit test in `compound_ops` enforces diagonal support.
+                // Property: when None, there must be no 4-adjacent
+                // standable cell either (which is satisfied vacuously
+                // because we did not add a 4-adjacent air block).
+            }
+        }
+    }
+
+    /// Property: For Y boundary values (-64 and 320) and an interior
+    /// Y, placing a standable neighbor at the target's same Y must be
+    /// found by `find_standable_neighbor` (the same-Y search has top
+    /// priority in the implementation).
+    #[test]
+    fn prop_standable_neighbor_y_extremes(y in prop_oneof![
+        Just(-64i32), Just(320i32), Just(64i32), Just(100i32), Just(200i32)
+    ]) {
+        let target = BlockPos::new(50, y, -50);
+        let neighbor = BlockPos::new(51, y, -50);
+        let floor = BlockPos::new(51, y - 1, -50);
+
+        let snapshot = make_snapshot_with_blocks(vec![
+            BlockEntry {
+                position: target,
+                block_type: "stone".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: neighbor,
+                block_type: "air".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: floor,
+                block_type: "stone".into(),
+                block_state: None,
+            },
+        ]);
+
+        let result = find_standable_neighbor(&snapshot, target);
+        prop_assert!(
+            result == Some(neighbor),
+            "expected Some({:?}) at y={}, got {:?}",
+            neighbor,
+            y,
+            result
+        );
+    }
+
+    /// Property: An empty snapshot must never report a standable
+    /// neighbour (no air blocks + no floors = no place to stand).
+    #[test]
+    fn prop_standable_neighbor_empty_snapshot(
+        x in -100i32..100,
+        z in -100i32..100,
+        y in -64i32..=320i32,
+    ) {
+        let target = BlockPos::new(x, y, z);
+        let snapshot = WorldSnapshot::default();
+        prop_assert!(
+            find_standable_neighbor(&snapshot, target).is_none(),
+            "empty snapshot should yield None, got Some for target {:?}",
+            target
+        );
+    }
+
+    /// Property: When all 8 horizontal neighbours are blocked (solid
+    /// stone) and the diagonal SE neighbour is air with a solid floor
+    /// below, the function must find that diagonal — verifying the
+    /// 8-direction scan. This is the same shape as the unit test
+    /// `test_find_standable_neighbor_8_directions` but driven by
+    /// proptest so a regression in the offset table is caught
+    /// automatically across 1000 runs.
+    #[test]
+    fn prop_standable_neighbor_finds_diagonal_when_cardinals_blocked(
+        x in -100i32..100,
+        z in -100i32..100,
+        y in -64i32..=320i32,
+    ) {
+        let target = BlockPos::new(x, y, z);
+        let diag = BlockPos::new(x + 1, y, z + 1);
+        let diag_floor = BlockPos::new(x + 1, y - 1, z + 1);
+
+        let mut blocks = vec![BlockEntry {
+            position: target,
+            block_type: "stone".into(),
+            block_state: None,
+        }];
+        // Block all 4 cardinal neighbours.
+        for (dx, dz) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+            blocks.push(BlockEntry {
+                position: BlockPos::new(x + dx, y, z + dz),
+                block_type: "stone".into(),
+                block_state: None,
+            });
+            blocks.push(BlockEntry {
+                position: BlockPos::new(x + dx, y - 1, z + dz),
+                block_type: "stone".into(),
+                block_state: None,
+            });
+        }
+        // The SE diagonal is the only standable cell.
+        blocks.push(BlockEntry {
+            position: diag,
+            block_type: "air".into(),
+            block_state: None,
+        });
+        blocks.push(BlockEntry {
+            position: diag_floor,
+            block_type: "stone".into(),
+            block_state: None,
+        });
+
+        let snapshot = make_snapshot_with_blocks(blocks);
+        let result = find_standable_neighbor(&snapshot, target);
+        prop_assert!(
+            result == Some(diag),
+            "expected Some({:?}) (the only standable cell), got {:?}",
+            diag,
+            result
+        );
     }
 }

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::command_validate::clamp_to_i32;
 use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::GameMode;
@@ -87,7 +88,7 @@ pub fn get_nearby_blocks(
     }
     let snapshot = state.read_snapshot();
     let center = snapshot.self_player.position;
-    let r = radius as i32;
+    let r = clamp_to_i32(radius);
 
     let blocks: Vec<&crate::types::BlockEntry> = snapshot
         .blocks
@@ -114,7 +115,7 @@ pub fn get_nearby_entities(state: &Arc<SharedState>, radius: u32) -> Result<Stri
     }
     let snapshot = state.read_snapshot();
     let center = snapshot.self_player.position;
-    let r = radius as i32;
+    let r = clamp_to_i32(radius);
 
     let entities: Vec<&crate::types::EntityEntry> = snapshot
         .entities
@@ -550,5 +551,47 @@ mod tests {
                 "radius {radius} should produce image content"
             );
         }
+    }
+
+    // ── clamp_to_i32 (P0-#1) ───────────────────────────────────────
+
+    /// `clamp_to_i32` is the saturating cast used in `get_nearby_blocks` /
+    /// `get_nearby_entities` to keep `u32` radius values above `i32::MAX`
+    /// from silently wrapping to negative (which would make the Chebyshev
+    /// filter return nothing).
+    #[test]
+    fn test_radius_clamp_overflow() {
+        // 5_000_000_000 exceeds u32::MAX (4_294_967_295) so we use
+        // `u32::MAX` directly to exercise the saturate branch.
+        assert_eq!(clamp_to_i32(u32::MAX), i32::MAX);
+        assert_eq!(clamp_to_i32(4_000_000_000_u32), i32::MAX);
+        assert_eq!(clamp_to_i32(100_u32), 100);
+        assert_eq!(clamp_to_i32(i32::MAX as u32), i32::MAX);
+    }
+
+    /// End-to-end: an oversized `u32` radius must not panic and must not
+    /// silently return zero matches because of `as i32` wrap-around.
+    #[test]
+    fn test_get_nearby_blocks_oversized_radius_does_not_panic() {
+        let state = state_with_snapshot();
+        // u32::MAX would wrap to -1 with a bare `as i32` cast and make
+        // the filter drop every block. `clamp_to_i32` saturates to
+        // i32::MAX, so the filter keeps everything.
+        let result = get_nearby_blocks(&state, u32::MAX, None);
+        assert!(
+            result.is_ok(),
+            "oversized radius must not error: {result:?}"
+        );
+    }
+
+    /// Same regression for `get_nearby_entities`.
+    #[test]
+    fn test_get_nearby_entities_oversized_radius_does_not_panic() {
+        let state = state_with_snapshot();
+        let result = get_nearby_entities(&state, u32::MAX);
+        assert!(
+            result.is_ok(),
+            "oversized radius must not error: {result:?}"
+        );
     }
 }

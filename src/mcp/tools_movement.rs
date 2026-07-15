@@ -315,7 +315,7 @@ mod tests {
 
     fn setup() -> (Arc<SharedState>, BotCommandSender) {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, mut receiver) = create_command_channel(4);
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
         // Spawn a mock receiver so tests that actually send commands get a
         // successful response instead of a "channel closed" error.
@@ -473,7 +473,7 @@ mod tests {
         // BotCommand::WalkDirection(Direction::North, 3).
         let state = Arc::new(SharedState::new(AppConfig::default()));
         make_online(&state);
-        let (sender, mut receiver) = create_command_channel(4);
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
         let responder = tokio::spawn(async move {
             let wrapped = receiver.recv().await.expect("should receive command");
@@ -625,7 +625,7 @@ mod tests {
     async fn test_smart_move_sends_correct_command() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         make_online(&state);
-        let (sender, mut receiver) = create_command_channel(4);
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
         let responder = tokio::spawn(async move {
             let wrapped = receiver.recv().await.expect("should receive command");
@@ -710,7 +710,7 @@ mod tests {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         make_online(&state);
         make_creative(&state);
-        let (sender, mut receiver) = create_command_channel(4);
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
         let responder = tokio::spawn(async move {
             let wrapped = receiver.recv().await.expect("should receive command");

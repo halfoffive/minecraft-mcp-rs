@@ -21,6 +21,24 @@ const MAX_Y: i32 = 320;
 
 // ── Public validation API ─────────────────────────────────────────────────
 
+/// Saturating cast from `u32` to `i32`, capping at `i32::MAX`.
+///
+/// Use this anywhere an external input is held as `u32` but later compared
+/// as a signed offset (e.g. Chebyshev radius filtering). A bare `v as i32`
+/// silently wraps values above `i32::MAX` into negative numbers, which makes
+/// the comparison filter return nothing — see P0-#1 in
+/// `.trae/specs/fix-audit-issues/spec.md`.
+///
+/// Inputs already in the safe range pass through unchanged. Inputs above
+/// `i32::MAX` are clamped to `i32::MAX`; behaviour does not panic.
+pub fn clamp_to_i32(v: u32) -> i32 {
+    if v > i32::MAX as u32 {
+        i32::MAX
+    } else {
+        v as i32
+    }
+}
+
 /// Validate a [`BotCommand`] before execution.
 ///
 /// Returns `Ok(())` if all parameters are within acceptable ranges, or
@@ -124,11 +142,11 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
             Ok(())
         }
 
-        // Container slots can go up to 50 (large chests).
+        // Container slots can go up to 53 (double chests have 54 slots, 0-53).
         BotCommand::TakeFromContainer(slot, count) => {
-            if *slot > 50 {
+            if *slot > 53 {
                 return Err(BotError::InvalidParams(format!(
-                    "TakeFromContainer slot must be 0-50, got {slot}"
+                    "TakeFromContainer slot must be 0-53, got {slot}"
                 )));
             }
             if *count == 0 {
@@ -141,9 +159,9 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
 
         // PutIntoContainer mirrors TakeFromContainer's bounds.
         BotCommand::PutIntoContainer(slot, count) => {
-            if *slot > 50 {
+            if *slot > 53 {
                 return Err(BotError::InvalidParams(format!(
-                    "PutIntoContainer slot must be 0-50, got {slot}"
+                    "PutIntoContainer slot must be 0-53, got {slot}"
                 )));
             }
             if *count == 0 {
@@ -219,13 +237,37 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
 
 /// Validate an [`ActAction`] payload by delegating to the equivalent
 /// standalone command's validation.
-fn validate_act_action(action: &ActAction) -> Result<(), BotError> {
+///
+/// Each variant is checked against the same bounds the underlying
+/// [`BotCommand`] would use:
+///
+/// - Position-bearing variants ([`ActAction::Move`], [`ActAction::SmartMove`],
+///   [`ActAction::Fly`], [`ActAction::Mine`]) must respect the Minecraft
+///   world border (X / Z) and build-height limits (Y).
+/// - [`ActAction::Attack::entity_id`] must fit in `i32::MAX`; azalea's entity
+///   lookups cast `u32` → `i32` and values above `i32::MAX` would wrap to
+///   negative IDs that never match a real entity.
+/// - [`ActAction::CollectItems::radius`] is bounded 1..=64 to match
+///   [`BotCommand::CollectItems`] and to keep any `as i32` filter inside
+///   that handler safe via [`clamp_to_i32`].
+///
+/// This function is `pub` so MCP handlers (e.g. `tools_act::handle_act`) can
+/// validate `ActAction` payloads before dispatching them.
+pub fn validate_act_action(action: &ActAction) -> Result<(), BotError> {
     match action {
         ActAction::Move { target }
         | ActAction::SmartMove { target }
         | ActAction::Fly { target } => validate_position(target),
         ActAction::Mine { block_pos } => validate_position(block_pos),
-        ActAction::Attack { entity_id: _ } => Ok(()),
+        ActAction::Attack { entity_id } => {
+            if *entity_id > i32::MAX as u32 {
+                return Err(BotError::InvalidParams(format!(
+                    "Attack entity_id must be <= i32::MAX ({}), got {entity_id}",
+                    i32::MAX
+                )));
+            }
+            Ok(())
+        }
         ActAction::CollectItems { radius } => {
             if *radius == 0 || *radius > 64 {
                 return Err(BotError::InvalidParams(format!(
@@ -740,17 +782,31 @@ mod tests {
 
     #[test]
     fn test_take_from_container_valid_slot_boundary() {
-        // Large chests can use slots up to 50.
-        let cmd = BotCommand::TakeFromContainer(50, 1);
+        // Double chests have 54 slots (0-53); slot 53 must be accepted.
+        let cmd = BotCommand::TakeFromContainer(53, 1);
         assert!(validate_command(&cmd).is_ok());
     }
 
     #[test]
     fn test_take_from_container_slot_too_high() {
-        // Slot 51 exceeds the container slot range.
-        let cmd = BotCommand::TakeFromContainer(51, 1);
+        // Slot 54 is the first slot past the double-chest limit.
+        let cmd = BotCommand::TakeFromContainer(54, 1);
         assert!(validate_command(&cmd).is_err());
         let cmd = BotCommand::TakeFromContainer(u8::MAX, 1);
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_take_from_container_slot_53_accepted() {
+        // Explicit alias for the spec's required test name.
+        let cmd = BotCommand::TakeFromContainer(53, 1);
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_take_from_container_slot_54_rejected() {
+        // Explicit alias for the spec's required test name.
+        let cmd = BotCommand::TakeFromContainer(54, 1);
         assert!(validate_command(&cmd).is_err());
     }
 
@@ -768,15 +824,15 @@ mod tests {
 
     #[test]
     fn test_put_into_container_valid_slot_boundary() {
-        // Large chests can use slots up to 50.
-        let cmd = BotCommand::PutIntoContainer(50, 1);
+        // Double chests: slot 53 must be accepted.
+        let cmd = BotCommand::PutIntoContainer(53, 1);
         assert!(validate_command(&cmd).is_ok());
     }
 
     #[test]
     fn test_put_into_container_slot_too_high() {
-        // Slot 51 exceeds the container slot range.
-        let cmd = BotCommand::PutIntoContainer(51, 1);
+        // Slot 54 is past the double-chest limit.
+        let cmd = BotCommand::PutIntoContainer(54, 1);
         assert!(validate_command(&cmd).is_err());
         let cmd = BotCommand::PutIntoContainer(u8::MAX, 1);
         assert!(validate_command(&cmd).is_err());
@@ -962,6 +1018,96 @@ mod tests {
     fn test_act_collect_items_valid() {
         let cmd = BotCommand::Act(ActAction::CollectItems { radius: 16 });
         assert!(validate_command(&cmd).is_ok());
+    }
+
+    // ── clamp_to_i32 (P0-#1) ───────────────────────────────────────
+
+    /// Regression for P0-#1: a bare `v as i32` cast wraps values above
+    /// `i32::MAX` into negative integers, which silently breaks the
+    /// Chebyshev radius filter. `clamp_to_i32` must saturate instead.
+    #[test]
+    fn test_radius_clamp_overflow() {
+        // 5_000_000_000 exceeds u32::MAX (4_294_967_295) so we use
+        // `u32::MAX` directly to exercise the saturate branch. A bare
+        // `v as i32` cast on `u32::MAX` wraps to -1, which silently
+        // breaks the Chebyshev radius filter.
+        assert_eq!(clamp_to_i32(u32::MAX), i32::MAX);
+        assert_eq!(clamp_to_i32(4_000_000_000_u32), i32::MAX);
+        assert_eq!(clamp_to_i32(100_u32), 100);
+        assert_eq!(clamp_to_i32(i32::MAX as u32), i32::MAX);
+        // u32::MAX must clamp (cannot wrap to -1).
+        assert_eq!(clamp_to_i32(u32::MAX), i32::MAX);
+        // Zero is a no-op.
+        assert_eq!(clamp_to_i32(0), 0);
+    }
+
+    // ── validate_act_action (P0-#2) ────────────────────────────────
+
+    /// Regression for P0-#2: handle_act must reject invalid `ActAction`
+    /// payloads (out-of-range Y, oversized entity_id) before the bot
+    /// executor sees them, so callers get a fast `InvalidParams` error
+    /// rather than a wrapped internal failure.
+    #[test]
+    fn test_act_input_validation() {
+        // Y far above the build height must be rejected.
+        let bad_y = BotCommand::Act(ActAction::Move {
+            target: BlockPos::new(0, 9999, 0),
+        });
+        assert!(
+            matches!(validate_command(&bad_y), Err(BotError::InvalidParams(_))),
+            "y=9999 should be rejected, got {:?}",
+            validate_command(&bad_y)
+        );
+
+        // Y exactly at the boundary is allowed.
+        let ok_y = BotCommand::Act(ActAction::Move {
+            target: BlockPos::new(0, 64, 0),
+        });
+        assert!(validate_command(&ok_y).is_ok());
+
+        // Y one below the lower build limit must be rejected.
+        let low_y = BotCommand::Act(ActAction::Move {
+            target: BlockPos::new(0, -65, 0),
+        });
+        assert!(matches!(
+            validate_command(&low_y),
+            Err(BotError::InvalidParams(_))
+        ));
+
+        // entity_id at the boundary (i32::MAX) is allowed.
+        let ok_attack = BotCommand::Act(ActAction::Attack {
+            entity_id: i32::MAX as u32,
+        });
+        assert!(validate_command(&ok_attack).is_ok());
+
+        // entity_id above i32::MAX must be rejected.
+        let bad_attack = BotCommand::Act(ActAction::Attack {
+            entity_id: u32::MAX,
+        });
+        assert!(matches!(
+            validate_command(&bad_attack),
+            Err(BotError::InvalidParams(_))
+        ));
+
+        // The same checks apply to the public `validate_act_action` entry point.
+        assert!(
+            validate_act_action(&ActAction::Move {
+                target: BlockPos::new(0, 9999, 0)
+            })
+            .is_err()
+        );
+        assert!(
+            validate_act_action(&ActAction::Attack {
+                entity_id: u32::MAX
+            })
+            .is_err()
+        );
+        assert!(
+            validate_act_action(&ActAction::Move {
+                target: BlockPos::new(0, 64, 0)
+            })
+            .is_ok()
+        );
     }
 
     // ── Exhaustive match on all 32 variants ────────────────────────

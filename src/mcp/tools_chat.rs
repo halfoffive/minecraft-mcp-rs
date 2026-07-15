@@ -186,7 +186,8 @@ mod tests {
         tokio::sync::mpsc::UnboundedReceiver<String>,
     ) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (sender, mut receiver) = create_command_channel(10);
+        let state = Arc::new(SharedState::new(crate::config::AppConfig::default()));
+        let (sender, mut receiver) = create_command_channel(10, state);
 
         // Spawn a responder that echoes the command name back
         tokio::spawn(async move {
@@ -227,6 +228,22 @@ mod tests {
             matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("empty")),
             "empty should be rejected"
         );
+    }
+
+    /// Alias of `test_handle_send_chat_empty_rejected` for spec clarity:
+    /// the MCP layer must reject an empty chat message with
+    /// `BotError::InvalidParams` before sending anything to the bot.
+    #[tokio::test]
+    async fn test_handle_send_chat_empty_message_rejected_at_mcp_layer() {
+        let (sender, _rx) = make_echo_channel();
+        let state = make_state(true);
+        let result = handle_send_chat(&state, &sender, String::new()).await;
+        match result {
+            Err(BotError::InvalidParams(msg)) => {
+                assert!(msg.to_lowercase().contains("empty"), "msg: {msg}");
+            }
+            other => panic!("expected InvalidParams for empty message, got {other:?}"),
+        }
     }
 
     #[tokio::test]

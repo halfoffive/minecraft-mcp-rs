@@ -108,9 +108,35 @@ jobs:
           path: minecraft-mcp-rs-${{ matrix.label }}.*
           if-no-files-found: error
 
+  lint:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-lint-ubuntu
+
+      - name: Run tests
+        run: cargo test --locked --all-targets
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Check formatting
+        run: cargo fmt --check
+
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [build, lint]
     runs-on: ubuntu-latest
     permissions:
       contents: write

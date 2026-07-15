@@ -116,7 +116,10 @@ impl Default for BotState {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .unwrap_or_else(|| {
-                let (_, receiver) = crate::channel::create_command_channel(1);
+                let (_, receiver) = crate::channel::create_command_channel(
+                    1,
+                    Arc::new(SharedState::new(crate::config::AppConfig::default())),
+                );
                 Arc::new(Mutex::new(Some(receiver)))
             });
 
@@ -163,7 +166,7 @@ impl Default for BotState {
 pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::Result<()> {
     match event {
         Event::Spawn => {
-            handle_spawn(bot, &state);
+            handle_spawn(bot, &state).await;
         }
         Event::Disconnect(_) => {
             handle_disconnect(bot, &state).await;
@@ -201,8 +204,16 @@ pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::R
 // Event helpers
 // ---------------------------------------------------------------------------
 
-fn handle_spawn(bot: Client, state: &BotState) {
-    state.shared_state.set_online(true);
+/// Start the command executor and store the bot's ECS handle.
+///
+/// Made `async` so it can call `ReceiverLease::take_with_retry`, which
+/// needs to `await` between polls. The `handle_event` function calls
+/// this with `.await` so the runtime can drive the retry loop.
+async fn handle_spawn(bot: Client, state: &BotState) {
+    // NOTE: set_online(true) is intentionally deferred until after the
+    // command executor is successfully started (see below).  Reporting
+    // "online" before the executor is ready would cause MCP clients to
+    // send commands that receive Offline errors.
 
     // Store the ECS handle so request_disconnect can trigger shutdown by
     // writing AppExit::Success to the ECS World (same pattern as
@@ -237,33 +248,62 @@ fn handle_spawn(bot: Client, state: &BotState) {
     }
 
     // Lease the command receiver and start a new executor driving it.
-    match ReceiverLease::take(&state.command_receiver) {
+    match ReceiverLease::take_with_retry(&state.command_receiver).await {
         Some(lease) => {
             let shared_state = Arc::clone(&state.shared_state);
-            let command_sender = state.command_sender.clone();
-            let client = RealBotClient::new(bot, Arc::clone(&shared_state));
+            // Clone the sender outside the async move closure so the
+            // closure doesn't borrow `state` (which lives longer than
+            // the closure but the borrow checker doesn't know that
+            // here — see E0521). The sender is needed by both
+            // `RealBotClient` (for `sender.timeout()` lookups in
+            // `goto` so the pathfinder timeout stays in lock-step with
+            // the command-channel timeout) and `CommandExecutor` (for
+            // recursive compound-op dispatch). `BotState::command_sender`
+            // is `Option<BotCommandSender>` (None in unit tests where
+            // there is no `McpBotServer` injecting a sender); in
+            // production `connection.rs` always sets it to `Some`,
+            // and `Event::Spawn` only fires after that injection, so
+            // the unwrap is safe at runtime. The `Option<...>` is
+            // passed through to `CommandExecutor` unchanged.
+            let command_sender_opt = state.command_sender.clone();
+            let Some(command_sender) = command_sender_opt.clone() else {
+                warn!(
+                    "Spawn fired but command_sender was not injected — \
+                     skipping executor start (this indicates azalea \
+                     fired Event::Spawn before ConnectionManager completed \
+                     dependency injection)"
+                );
+                request_repaint(state);
+                trace!("bot spawned without executor — not marking online");
+                return;
+            };
+            let client = RealBotClient::new(bot, Arc::clone(&shared_state), command_sender);
             let handle = tokio::task::spawn_local(async move {
                 let mut executor =
-                    CommandExecutor::new_for_lease(client, shared_state, command_sender);
+                    CommandExecutor::new_for_lease(client, shared_state, command_sender_opt);
                 executor.run_with_lease(lease).await;
             });
             *state
                 .executor_handle
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(handle);
+            // Mark the bot online only after the executor is running so
+            // MCP clients that observe is_online()==true can immediately
+            // send commands without hitting Offline errors.
+            state.shared_state.set_online(true);
             info!("command executor started");
         }
         None => {
             warn!(
-                "Spawn fired but no command receiver was available — executor \
-                 not started (this is expected if a previous executor is still \
-                 shutting down)"
+                "Spawn fired but no command receiver was available after \
+                 100ms retry window — executor not started (this is expected \
+                 if the previous executor is still shutting down)"
             );
         }
     }
 
     request_repaint(state);
-    trace!("bot spawned, set online=true");
+    trace!("handle_spawn completed");
 }
 
 /// Abort any in-flight tick snapshot tasks and drop their handles.
@@ -604,6 +644,12 @@ mod tests {
 
     #[test]
     fn test_remove_player_updates_snapshot() {
+        // Reset the injected dependency first so `BotState::default()`
+        // builds a fresh `SharedState` (not one left over from a
+        // previous parallel test that added entities).
+        *INJECTED_SHARED_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let state = BotState::default();
         let info = azalea::player::PlayerInfo {
             profile: azalea::auth::game_profile::GameProfile {
@@ -626,6 +672,14 @@ mod tests {
 
     #[test]
     fn test_update_player_updates_snapshot() {
+        // Reset the injected dependency first so `BotState::default()`
+        // builds a fresh `SharedState` (not one left over from a
+        // previous parallel test that would also leave an entity
+        // indexed at `entities[0]`, breaking the `entities[0].display_name`
+        // assertion below).
+        *INJECTED_SHARED_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let state = BotState::default();
         let uuid = uuid::Uuid::new_v4();
         let info_add = azalea::player::PlayerInfo {

@@ -191,8 +191,17 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
             // teardown happens when the bot's next event fires
             // Event::Disconnect (which calls bot.exit()), or when the
             // server drops the connection.
+            //
+            // Do NOT call `set_online(false)` here: the bot is still
+            // online until the disconnect actually completes, and
+            // flipping the flag early confuses other UI elements
+            // (status panel goes red while the bot is still moving)
+            // and races with the `Event::Disconnect` handler in
+            // `bot/events.rs` which is the canonical source of truth
+            // for the online state. The status panel will reflect the
+            // disconnect as soon as `handle_disconnect` writes
+            // `set_online(false)`.
             state.request_disconnect();
-            state.set_online(false);
         }
     });
 
@@ -220,5 +229,53 @@ fn language_label(lang: Language) -> &'static str {
     match lang {
         Language::En => i18n::tr(TextKey::LangEn),
         Language::ZhCn => i18n::tr(TextKey::LangZhCn),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+
+    /// The Disconnect button click in `settings_panel` is wired to
+    /// `state.request_disconnect()` and nothing else — the actual
+    /// `set_online(false)` must be performed by the canonical
+    /// `Event::Disconnect` handler in `bot/events.rs`. This test
+    /// guards the contract: the UI does NOT pre-emptively flip the
+    /// online flag, so the status panel and `is_connected()` keep
+    /// showing the truthful "still online" state until the real
+    /// disconnect event fires.
+    #[test]
+    fn test_disconnect_does_not_set_offline_early() {
+        let state = SharedState::new(AppConfig::default());
+        state.set_online(true);
+        assert!(
+            state.is_online(),
+            "precondition: bot should be online before disconnect"
+        );
+
+        // Simulate the Disconnect button click. The button's callback
+        // is `state.request_disconnect();` — no other state mutation.
+        state.request_disconnect();
+
+        // The bot must still report as online. The flag is the source
+        // of truth for the rest of the UI (status panel, query tools
+        // like `is_connected`), and flipping it here would race with
+        // `Event::Disconnect::handle_disconnect` (which is the only
+        // authorised writer).
+        assert!(
+            state.is_online(),
+            "request_disconnect() must not flip the online flag \
+             — only the Event::Disconnect handler should"
+        );
+
+        // Sanity: the explicit offline transition still works as
+        // expected once the canonical writer runs.
+        state.set_online(false);
+        assert!(!state.is_online(), "set_online(false) should take effect");
     }
 }

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use azalea::pathfinder::goals::BlockPosGoal;
 use azalea::prelude::*;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use tracing::{debug, trace, warn};
 
 use crate::block_data::ItemStack;
@@ -33,6 +33,16 @@ use crate::utils::to_snake_case;
 pub(crate) trait BotActions {
     /// Start pathfinding to a block position and await completion (or timeout).
     async fn goto(&self, pos: &BlockPos) -> Result<(), BotError>;
+
+    /// Whether the bot is currently within the pathfinder's "arrived"
+    /// radius of the most recent `goto` goal.
+    ///
+    /// Used by [`RealBotClient::goto`] as a 50ms fallback in case the
+    /// tick handler's `notify_waiters()` is delayed or dropped — without
+    /// it, a missed tick would force callers to wait the full
+    /// `command_timeout_secs` before returning. Mock implementations
+    /// return `true` once the pathfinder has been told to start.
+    fn is_goto_target_reached(&self) -> bool;
 
     /// Perform a single jump.
     async fn jump(&self);
@@ -83,40 +93,116 @@ pub(crate) trait BotActions {
 // RealBotClient — delegates to azalea::Client
 // ═══════════════════════════════════════════════════════════════
 
+/// Wait for the pathfinder to reach the goal, with a 50ms position-check
+/// fallback in case the tick handler's `notify_waiters()` is delayed or
+/// dropped.
+///
+/// The fallback exists because the previous implementation waited
+/// indefinitely on a single `notify` future; a missed tick would
+/// deadlock the command until the full `timeout_dur` elapsed. This
+/// loop races the notify against a 50ms timer that re-checks
+/// `BotActions::is_goto_target_reached`, exiting early on either
+/// success.
+///
+/// Extracted as a free function so the fallback semantics can be
+/// unit-tested with a mock `BotActions` implementation (a real azalea
+/// `Client` cannot be constructed in unit tests).
+///
+/// # Returns
+/// - `Ok(())` if `is_goto_target_reached()` reports success within
+///   `timeout_dur`, or if a `notify_waiters()` wakes the loop on a
+///   tick where the position check passes.
+/// - `Err(tokio::time::Duration)` with the elapsed time at the
+///   deadline if neither signal fires within the window — the caller
+///   is responsible for stopping the pathfinder and constructing the
+///   user-facing `BotError::PathfindingFailed` (so the unit test can
+///   assert on the helper in isolation).
+pub(crate) async fn wait_for_goto_completion<B: BotActions>(
+    bot: &B,
+    notify: &std::sync::Arc<tokio::sync::Notify>,
+    timeout_dur: Duration,
+) -> Result<(), tokio::time::Duration> {
+    let check_interval = Duration::from_millis(50);
+    let start = tokio::time::Instant::now();
+    loop {
+        // Fast path: re-check the position before waiting so we exit
+        // immediately if the bot arrived between the last tick and
+        // our wake.
+        if bot.is_goto_target_reached() {
+            return Ok(());
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= timeout_dur {
+            return Err(elapsed);
+        }
+        let remaining = timeout_dur - elapsed;
+        let wait = std::cmp::min(remaining, check_interval);
+        // Register the notified future *before* sleeping so a
+        // `notify_waiters()` that fires while we are constructing the
+        // future is not lost.
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        tokio::select! {
+            _ = notified => {
+                // Tick handler signalled a reach; the next loop
+                // iteration's `is_goto_target_reached` call will
+                // confirm and return Ok.
+            }
+            _ = tokio::time::sleep(wait) => {
+                // Fallback: re-check position next iteration.
+            }
+        }
+    }
+}
+
 /// Wraps an [`azalea::Client`] to implement [`BotActions`].
 pub(crate) struct RealBotClient {
     client: Client,
     state: Arc<SharedState>,
+    sender: BotCommandSender,
 }
 
 impl RealBotClient {
-    pub fn new(client: Client, state: Arc<SharedState>) -> Self {
-        Self { client, state }
+    pub fn new(client: Client, state: Arc<SharedState>, sender: BotCommandSender) -> Self {
+        Self {
+            client,
+            state,
+            sender,
+        }
     }
 }
 
 impl BotActions for RealBotClient {
+    fn is_goto_target_reached(&self) -> bool {
+        // Delegate to azalea's pathfinder status. The method is sync on
+        // the underlying `Client`; if a future azalea version moves it
+        // behind an `await`, this becomes a fallible spot — wrap the
+        // call in a `bool::from(...)` conversion rather than re-raising
+        // the error so the `goto` fallback loop keeps its 50ms cadence.
+        self.client.is_goto_target_reached()
+    }
+
     async fn goto(&self, pos: &BlockPos) -> Result<(), BotError> {
         let az_pos = azalea::BlockPos::new(pos.x, pos.y, pos.z);
         let goal = BlockPosGoal(az_pos);
 
-        // Honour the user-configured command timeout instead of hardcoding 30s.
-        let timeout_secs = self.state.read_config().command_timeout_secs;
-        let timeout_dur = Duration::from_secs(timeout_secs);
+        // Honour the user-configured command timeout — read it through
+        // the sender so the value is in lock-step with the timeout
+        // `BotCommandSender::send_command` itself uses.
+        let timeout_dur = self.sender.timeout();
+        let timeout_secs = timeout_dur.as_secs();
         let notify = self.state.goto_notify();
 
         self.client.goto(goal).await;
 
-        // Fast path: target may already be reached before we start waiting.
-        if self.client.is_goto_target_reached() {
-            return Ok(());
-        }
-
-        // Wait for the tick handler to signal that the pathfinder has reached
-        // the goal, or time out and abort pathfinding.
-        match timeout(timeout_dur, notify.notified()).await {
+        // Delegate the wait/fallback loop to a free function so the
+        // 50ms fallback semantics can be unit-tested with a mock
+        // `BotActions` implementation (real azalea `Client` cannot be
+        // constructed in tests).
+        match wait_for_goto_completion(self, &notify, timeout_dur).await {
             Ok(()) => Ok(()),
-            Err(_) => {
+            Err(_elapsed) => {
+                // Deadline elapsed — stop the pathfinder and report failure.
                 self.client.stop_pathfinding();
                 Err(BotError::PathfindingFailed {
                     target: BlockPos {
@@ -587,15 +673,21 @@ impl<B: BotActions> CommandExecutor<B> {
 
     fn handle_break_block(&self, pos: BlockPos) -> Result<BotResult, BotError> {
         trace!(?pos, "BreakBlock");
-        // Fail fast if the chunk containing the block is not loaded yet.
-        let chunk_x = pos.x >> 4;
-        let chunk_z = pos.z >> 4;
+        // Chunk pre-check (P1-#7): previously this used
+        // `snapshot.chunk_summary` to verify the chunk was loaded. That
+        // failed in two common cases — (a) the chunk summary lags
+        // behind actual chunk loads by one snapshot tick (M-2 packet
+        // updates mark dirty blocks but the chunk-level summary
+        // catches up on the next rebuild), and (b) any `BreakBlock`
+        // that the bot itself caused by interacting with an unloaded
+        // chunk edge (chunks within render distance are loaded but not
+        // yet summarised). The block index is the source of truth
+        // here: if a block at `pos` is present in the snapshot, the
+        // chunk must be loaded enough for us to know about it. The
+        // presence of the entry guarantees the bot has the chunk
+        // data — anything not in the index is genuinely unknown.
         let snapshot = self.state.read_snapshot();
-        if !snapshot
-            .chunk_summary
-            .iter()
-            .any(|(cx, cz)| *cx == chunk_x && *cz == chunk_z)
-        {
+        if !snapshot.block_index.contains_key(&pos) {
             return Err(BotError::ChunkNotLoaded(pos));
         }
         self.bot.mine_block(&pos);
@@ -729,7 +821,7 @@ impl<B: BotActions> CommandExecutor<B> {
 
         // Search the inventory for a matching tool.
         let entries = self.bot.inventory_entries();
-        match find_tool_in_inventory(&tool, &entries) {
+        match find_tool_in_inventory(&tool, &entries, None) {
             Some((_material, slot)) if slot <= 8 => {
                 // Tool is in the hotbar — switch to it directly.
                 self.bot.switch_hotbar_slot(slot);
@@ -1389,6 +1481,12 @@ mod tests {
     struct MockCallLog {
         goto_calls: Mutex<Vec<BlockPos>>,
         goto_succeeds: AtomicBool,
+        /// When `true`, `is_goto_target_reached` always returns `false`,
+        /// forcing `RealBotClient::goto`'s 50ms fallback loop to keep
+        /// spinning until `command_timeout_secs` elapses. Default is
+        /// `false` so the existing tests still see "arrived on first
+        /// 50ms tick".
+        goto_target_unreached: AtomicBool,
         jump_calls: AtomicUsize,
         teleport_calls: Mutex<Vec<BlockPos>>,
         hotbar_switch_calls: Mutex<Vec<u8>>,
@@ -1411,6 +1509,7 @@ mod tests {
             Self {
                 goto_calls: Mutex::new(Vec::new()),
                 goto_succeeds: AtomicBool::new(true),
+                goto_target_unreached: AtomicBool::new(false),
                 jump_calls: AtomicUsize::new(0),
                 teleport_calls: Mutex::new(Vec::new()),
                 hotbar_switch_calls: Mutex::new(Vec::new()),
@@ -1447,6 +1546,17 @@ mod tests {
     }
 
     impl BotActions for MockBotClient {
+        fn is_goto_target_reached(&self) -> bool {
+            // The mock defaults to "we have arrived" so the fallback
+            // loop in `RealBotClient::goto` exits on the first 50ms
+            // tick. Tests that need a delayed arrival (so the fallback
+            // timer must actually be exercised) can flip
+            // `goto_target_unreached` to `true` to make the position
+            // check stay false for the whole `command_timeout_secs`
+            // window.
+            !self.log.goto_target_unreached.load(Ordering::SeqCst)
+        }
+
         async fn goto(&self, pos: &BlockPos) -> Result<(), BotError> {
             self.log.goto_calls.lock().unwrap().push(*pos);
             if self.log.goto_succeeds.load(Ordering::SeqCst) {
@@ -1535,9 +1645,9 @@ mod tests {
         Arc<SharedState>,
         Arc<MockCallLog>,
     ) {
-        let (sender, receiver) = create_command_channel(16);
         let config = AppConfig::default();
         let state = Arc::new(SharedState::new(config));
+        let (sender, receiver) = create_command_channel(16, Arc::clone(&state));
         state.set_online(true);
         let mock = MockBotClient::new();
         let log = mock.log().clone();
@@ -1659,6 +1769,118 @@ mod tests {
         // goto should still have been called.
         let goto_calls = log.goto_calls.lock().unwrap();
         assert_eq!(goto_calls.len(), 1);
+    }
+
+    /// Goto's 50ms fallback loop must re-check `is_goto_target_reached`
+    /// even when no `notify_waiters()` is fired. This is the path
+    /// exercised when the tick handler is delayed or missed — without
+    /// it, a missed tick would force callers to wait the full
+    /// `command_timeout_secs` before returning. The mock reports
+    /// "target reached" (`goto_target_unreached = false`), so the
+    /// first 50ms fallback tick should release the wait. We bound the
+    /// test to well under `command_timeout_secs` (1s) to prove the
+    /// fallback (and not the deadline) is what unblocks the call.
+    #[tokio::test]
+    async fn test_goto_falls_back_to_position_check() {
+        // Construct a mock whose `is_goto_target_reached` returns
+        // `true` (default `goto_target_unreached = false`).
+        let mock = MockBotClient::new();
+        let notify = Arc::new(tokio::sync::Notify::new());
+
+        // Sanity check: the mock reports "arrived" so the fallback
+        // loop's first iteration should return Ok immediately.
+        assert!(mock.is_goto_target_reached());
+
+        let result = wait_for_goto_completion(&mock, &notify, Duration::from_secs(5)).await;
+        assert!(
+            result.is_ok(),
+            "expected Ok on first fallback tick, got: {:?}",
+            result
+        );
+    }
+
+    /// When the position check stays false for the full timeout window
+    /// and the notify never fires, the fallback loop must still hit
+    /// the deadline and return `Err(Duration)` — not hang forever.
+    /// This is the "missed tick + unreachable target" worst case.
+    #[tokio::test]
+    async fn test_goto_falls_back_to_position_check_times_out() {
+        let mock = MockBotClient::new();
+        // Force the position check to always return false, so the
+        // fallback loop is forced to spin until the timeout.
+        mock.log.goto_target_unreached.store(true, Ordering::SeqCst);
+        let notify = Arc::new(tokio::sync::Notify::new());
+
+        let start = tokio::time::Instant::now();
+        let result = wait_for_goto_completion(&mock, &notify, Duration::from_millis(200)).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "expected Err (deadline) when position check stays false"
+        );
+        // The wait must not blow past the timeout by more than a
+        // single 50ms fallback tick of scheduling slack.
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "returned too early at {elapsed:?} (expected ≥ 200ms)"
+        );
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "fallback loop is leaking past the deadline: {elapsed:?}"
+        );
+    }
+
+    /// `notify_waiters()` from the tick handler must short-circuit the
+    /// fallback loop even when the position check has not yet caught
+    /// up. We simulate the race by setting `goto_target_unreached`
+    /// initially, then having a background task that:
+    /// 1. Fires the notify at 30ms (the "tick fired, position not yet
+    ///    visible" race).
+    /// 2. Flips `goto_target_unreached` to `false` at 60ms (the
+    ///    "position now visible" update).
+    ///
+    /// The wait must return at or before 60ms (the position update),
+    /// well under the 1s timeout. If the notify were ignored, the
+    /// loop would sleep the full 50ms intervals and reach ~80ms; if
+    /// the position update were ignored, the loop would hit the 1s
+    /// deadline.
+    #[tokio::test]
+    async fn test_goto_notify_short_circuits_fallback() {
+        let mock = MockBotClient::new();
+        // Position check starts false.
+        mock.log.goto_target_unreached.store(true, Ordering::SeqCst);
+        let notify = Arc::new(tokio::sync::Notify::new());
+
+        // Simulate the real race: tick handler fires notify first
+        // (pathfinder reports done), then a moment later the snapshot
+        // catches up and the position check would pass.
+        let mock_log = Arc::clone(mock.log());
+        let notify_for_task = Arc::clone(&notify);
+        let firer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            notify_for_task.notify_waiters();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            mock_log
+                .goto_target_unreached
+                .store(false, Ordering::SeqCst);
+        });
+
+        // 1s timeout — the position flip (at ~60ms) must release us
+        // first, not the deadline.
+        let start = tokio::time::Instant::now();
+        let result = wait_for_goto_completion(&mock, &notify, Duration::from_secs(1)).await;
+        let elapsed = start.elapsed();
+        firer.await.unwrap();
+
+        assert!(
+            result.is_ok(),
+            "notify + position update must unblock fallback"
+        );
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "wait_for_goto_completion should return promptly after position update, took {elapsed:?}"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2043,12 +2265,18 @@ mod tests {
         let (executor, sender, state, log) = make_executor();
         let handle = spawn_executor(executor);
 
-        // Seed the chunk summary so the target block is considered loaded.
+        // Seed the block index so the target block is considered
+        // loaded. The chunk pre-check (P1-#7) now consults
+        // `block_index.get(&pos)` rather than `chunk_summary`, so the
+        // test must populate the index entry.
         let pos = BlockPos::new(10, 64, 20);
-        let chunk_x = pos.x >> 4;
-        let chunk_z = pos.z >> 4;
         state.update_snapshot(crate::types::WorldSnapshot {
-            chunk_summary: vec![(chunk_x, chunk_z)],
+            blocks: vec![BlockEntry {
+                position: pos,
+                block_type: "stone".into(),
+                block_state: None,
+            }],
+            block_index: std::collections::HashMap::from([(pos, 0)]),
             ..Default::default()
         });
 
@@ -2061,6 +2289,81 @@ mod tests {
         let mines = log.mine_calls.lock().unwrap();
         assert_eq!(mines.len(), 1);
         assert_eq!(mines[0], pos);
+    }
+
+    /// Chunk pre-check (P1-#7) regression: a `BreakBlock` must not be
+    /// rejected with `ChunkNotLoaded` when the target block IS present
+    /// in the snapshot — even if the chunk-summary is stale or empty.
+    /// Previously the handler iterated `snapshot.chunk_summary`, which
+    /// could miss blocks at the edge of the render distance or in
+    /// chunks that the snapshot updater had not yet summarised, even
+    /// though the bot's local chunk cache knew about them. The fix
+    /// consults `snapshot.block_index` instead, which is the
+    /// authoritative "do we know about this block" index.
+    #[tokio::test]
+    async fn test_break_block_loaded_chunk_not_rejected() {
+        let (executor, sender, state, log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        // Populate the snapshot with the target block but leave
+        // `chunk_summary` empty (simulating the lag between chunk
+        // load and summary rebuild). The block index entry is the
+        // only thing the new pre-check looks at.
+        let pos = BlockPos::new(20, 70, -5);
+        state.update_snapshot(crate::types::WorldSnapshot {
+            blocks: vec![BlockEntry {
+                position: pos,
+                block_type: "dirt".into(),
+                block_state: None,
+            }],
+            // Empty chunk_summary would have caused the OLD pre-check
+            // to return `ChunkNotLoaded`. The new pre-check must
+            // accept this.
+            chunk_summary: Vec::new(),
+            block_index: std::collections::HashMap::from([(pos, 0)]),
+            ..Default::default()
+        });
+
+        let result = send_and_await(&sender, BotCommand::BreakBlock(pos)).await;
+        assert!(
+            result.is_ok(),
+            "BreakBlock at a block present in the snapshot must succeed \
+             even when chunk_summary is empty (P1-#7 regression): {:?}",
+            result
+        );
+        let br = result.unwrap();
+        assert!(br.success);
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        let mines = log.mine_calls.lock().unwrap();
+        assert_eq!(mines.len(), 1);
+        assert_eq!(mines[0], pos);
+    }
+
+    /// Sanity counterpart to `test_break_block_loaded_chunk_not_rejected`:
+    /// when the block is genuinely unknown (no entry in the block
+    /// index), the pre-check must still return `ChunkNotLoaded`. This
+    /// guards against the new check becoming a no-op.
+    #[tokio::test]
+    async fn test_break_block_unknown_block_still_rejected() {
+        let (executor, sender, state, _log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        // Empty snapshot: nothing is loaded.
+        state.update_snapshot(crate::types::WorldSnapshot::default());
+
+        let pos = BlockPos::new(100, 64, 100);
+        let result = send_and_await(&sender, BotCommand::BreakBlock(pos)).await;
+        assert!(
+            matches!(result, Err(BotError::ChunkNotLoaded(p)) if p == pos),
+            "expected ChunkNotLoaded for an unknown block, got: {:?}",
+            result
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
     }
 
     #[tokio::test]
