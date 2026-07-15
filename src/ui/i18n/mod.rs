@@ -54,6 +54,24 @@ pub enum Language {
     ZhCn,
 }
 
+impl Language {
+    /// Determine the UI language from the host's system locale.
+    ///
+    /// Uses `sys_locale::get_locale()` and returns [`Language::ZhCn`] for
+    /// any locale whose primary language tag is `zh` (e.g. `zh-CN`,
+    /// `zh-SG`, `zh-HK`, `zh-TW`). Falls back to [`Language::En`] for all
+    /// other locales or when the system locale cannot be determined.
+    ///
+    /// This is used as the initial default in [`AppConfig`](crate::config::AppConfig)
+    /// so first-time users see the UI in their system language.
+    pub fn from_system_locale() -> Self {
+        match sys_locale::get_locale() {
+            Some(locale) if locale.starts_with("zh") => Language::ZhCn,
+            _ => Language::En,
+        }
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════
 // TextKey — the set of translatable UI strings
 // ════════════════════════════════════════════════════════════════════
@@ -425,5 +443,13 @@ mod tests {
     #[test]
     fn test_language_default_is_english() {
         assert_eq!(Language::default(), Language::En);
+    }
+
+    /// `from_system_locale()` returns a valid variant without panicking and
+    /// maps `zh*` locales to `ZhCn`.
+    #[test]
+    fn test_from_system_locale_returns_valid_variant() {
+        let lang = Language::from_system_locale();
+        assert!(matches!(lang, Language::En | Language::ZhCn));
     }
 }

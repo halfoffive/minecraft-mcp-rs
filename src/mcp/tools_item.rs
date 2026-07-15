@@ -45,7 +45,7 @@ pub async fn handle_switch_hotbar_slot(
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
@@ -90,7 +90,7 @@ pub async fn handle_drop_item(
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
@@ -136,7 +136,7 @@ pub async fn handle_use_item(
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
@@ -200,7 +200,7 @@ pub async fn handle_equip_tool(
             serde_json::to_string(&json)
                 .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
         }
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
@@ -242,7 +242,7 @@ pub async fn handle_collect_items(
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 

@@ -917,6 +917,92 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Test 9: Action tool handlers propagate BotError variants from the channel
+// ═══════════════════════════════════════════════════════════════
+
+/// When the channel receiver is dropped, `send_command` returns
+/// `BotError::Offline`. The MCP tool handler must propagate that variant
+/// directly so the client receives JSON-RPC code `-32000` with
+/// `reason: "bot_disconnected"`. Wrapping it in `BotError::Internal`
+/// would hide the disconnection from the MCP client.
+#[tokio::test]
+async fn test_send_chat_propagates_channel_offline_error() {
+    let state = make_online_state();
+    let (sender, receiver) = channel::create_command_channel(4, state.clone());
+    drop(receiver);
+
+    let result =
+        minecraft_mcp_rs::mcp::tools_chat::handle_send_chat(&state, &sender, "hello".into()).await;
+    assert!(
+        matches!(result, Err(BotError::Offline(_))),
+        "expected Offline error to propagate, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_break_block_propagates_channel_offline_error() {
+    let state = make_online_state();
+    let (sender, receiver) = channel::create_command_channel(4, state.clone());
+    drop(receiver);
+
+    let input = minecraft_mcp_rs::mcp::tools_block::BreakBlockInput {
+        x: 0,
+        y: 64,
+        z: 0,
+        use_best_tool: None,
+    };
+    let result =
+        minecraft_mcp_rs::mcp::tools_block::handle_break_block(&state, &sender, input).await;
+    assert!(
+        matches!(result, Err(BotError::Offline(_))),
+        "expected Offline error to propagate, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_move_to_propagates_channel_offline_error() {
+    let state = make_online_state();
+    let (sender, receiver) = channel::create_command_channel(4, state.clone());
+    drop(receiver);
+
+    let input = minecraft_mcp_rs::mcp::tools_movement::MoveToInput { x: 1, y: 64, z: 1 };
+    let result =
+        minecraft_mcp_rs::mcp::tools_movement::handle_move_to(&state, &sender, input).await;
+    assert!(
+        matches!(result, Err(BotError::Offline(_))),
+        "expected Offline error to propagate, got {result:?}"
+    );
+}
+
+/// When the responder takes longer than `command_timeout_secs` to reply,
+/// `send_command` returns `BotError::CommandTimeout`. The handler must
+/// propagate it directly instead of converting it to `BotError::Internal`.
+#[tokio::test]
+async fn test_send_chat_propagates_command_timeout() {
+    let state = make_online_state();
+    state.update_config(|cfg| {
+        cfg.command_timeout_secs = 1;
+    });
+    let (sender, mut receiver) = channel::create_command_channel(4, state.clone());
+
+    let responder = tokio::spawn(async move {
+        let wrapped = receiver.recv().await.expect("should receive command");
+        // Hold the responder for 1.5s, longer than the 1s timeout.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        drop(wrapped);
+    });
+
+    let result =
+        minecraft_mcp_rs::mcp::tools_chat::handle_send_chat(&state, &sender, "hello".into()).await;
+    assert!(
+        matches!(result, Err(BotError::CommandTimeout { .. })),
+        "expected CommandTimeout error to propagate, got {result:?}"
+    );
+
+    responder.await.expect("responder should complete");
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Additional: channel factory, sender cloning, compound ops
 // ═══════════════════════════════════════════════════════════════
 

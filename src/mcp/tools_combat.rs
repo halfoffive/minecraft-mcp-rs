@@ -54,7 +54,7 @@ pub async fn handle_attack_entity(
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
@@ -95,7 +95,7 @@ pub async fn handle_shield_block(
             serde_json::to_string(&json)
                 .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
         }
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 

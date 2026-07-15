@@ -22,6 +22,15 @@ use crate::ui::i18n::{self, Language, TextKey};
 pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -> bool {
     let mut connect_clicked = false;
 
+    // Sync the active i18n language with the dropdown *before* rendering any
+    // label. This prevents a one-frame flash where labels above the Language
+    // section (e.g. Timing) still appear in the previous language immediately
+    // after the user picks a new one.
+    if i18n::current() != edit.language {
+        i18n::set(edit.language);
+        ui.ctx().request_repaint();
+    }
+
     // ── Minecraft Server ──────────────────────────────────────
     ui.label(i18n::tr(TextKey::MinecraftServer));
     ui.horizontal(|ui| {
@@ -154,11 +163,6 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
                 );
             });
     });
-    if i18n::current() != edit.language {
-        i18n::set(edit.language);
-        ui.ctx().request_repaint();
-    }
-
     ui.separator();
 
     // ── Connect / Disconnect ──────────────────────────────────

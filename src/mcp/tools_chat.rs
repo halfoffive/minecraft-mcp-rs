@@ -67,7 +67,7 @@ pub async fn handle_send_chat(
     let cmd = BotCommand::SendChat(message);
     match sender.send_command(cmd).await {
         Ok(result) => Ok(result.message),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
@@ -101,7 +101,7 @@ pub async fn handle_execute_command(
     let cmd = BotCommand::ExecuteCommand(cmd_str);
     match sender.send_command(cmd).await {
         Ok(result) => Ok(result.message),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
@@ -134,7 +134,7 @@ pub async fn handle_set_game_mode(
     let cmd = BotCommand::SetGameMode(game_mode);
     match sender.send_command(cmd).await {
         Ok(result) => Ok(result.message),
-        Err(e) => Err(BotError::Internal(format!("Command failed: {e}"))),
+        Err(e) => Err(e),
     }
 }
 
