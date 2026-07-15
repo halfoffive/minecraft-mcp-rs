@@ -76,10 +76,8 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig) {
         let is_safe = matches!(edit.mcp_address.as_str(), "127.0.0.1" | "::1" | "localhost");
         if !is_safe {
             ui.label(
-                egui::RichText::new(
-                    "⚠ HTTP transport has no TLS encryption. Only use on trusted networks or with a reverse proxy (e.g., nginx + TLS).",
-                )
-                .color(egui::Color32::from_rgb(220, 80, 80)),
+                egui::RichText::new(i18n::tr(TextKey::TlsWarning))
+                    .color(egui::Color32::from_rgb(220, 80, 80)),
             );
         }
     }

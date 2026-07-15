@@ -106,6 +106,20 @@ pub enum TextKey {
     /// "Bearer token for HTTP auth" hint text.
     TokenHint,
 
+    // ── MCP server status / warnings ───────────────────────────────
+    /// "MCP:" prefix label for the MCP server status line.
+    McpServerLabel,
+    /// "Running on {addr}" MCP server status.
+    McpServerRunning,
+    /// "Running on stdio" MCP server status.
+    McpServerStdio,
+    /// "Failed: {msg}" MCP server status.
+    McpServerFailed,
+    /// "Stopped" MCP server status.
+    McpServerStopped,
+    /// "⚠ No TLS — use trusted network or reverse proxy" warning.
+    TlsWarning,
+
     // ── Scanning section ───────────────────────────────────────────
     /// "Scanning" section header.
     Scanning,
@@ -292,6 +306,12 @@ pub fn key_name(key: TextKey) -> &'static str {
         TextKey::TransportStdio => "TransportStdio",
         TextKey::Token => "Token",
         TextKey::TokenHint => "TokenHint",
+        TextKey::McpServerLabel => "McpServerLabel",
+        TextKey::McpServerRunning => "McpServerRunning",
+        TextKey::McpServerStdio => "McpServerStdio",
+        TextKey::McpServerFailed => "McpServerFailed",
+        TextKey::McpServerStopped => "McpServerStopped",
+        TextKey::TlsWarning => "TlsWarning",
         TextKey::Scanning => "Scanning",
         TextKey::ChunkScanRadius => "ChunkScanRadius",
         TextKey::BlockPerceptionRadius => "BlockPerceptionRadius",

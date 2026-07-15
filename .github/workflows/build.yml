@@ -2,8 +2,14 @@
 # using native ARM runners where available.
 name: Build (multi-platform, multi-arch)
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
+    branches:
+      - master
     paths:
       - '.github/workflows/build.yml'
       - 'src/**'
@@ -66,19 +72,15 @@ jobs:
           key: ${{ matrix.label }}
 
       - name: Build
-        run: cargo build --release --locked
-
-      - name: Strip binary
-        if: runner.os != 'Windows'
-        run: strip target/release/minecraft-mcp-rs
+        run: cargo build --locked --target ${{ matrix.target }}
 
       - name: Stage artifact
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/release/minecraft-mcp-rs.exe" "minecraft-mcp-rs-${{ matrix.label }}.exe"
+            cp "target/${{ matrix.target }}/debug/minecraft-mcp-rs.exe" "minecraft-mcp-rs-${{ matrix.label }}.exe"
           else
-            cp "target/release/minecraft-mcp-rs" "minecraft-mcp-rs-${{ matrix.label }}"
+            cp "target/${{ matrix.target }}/debug/minecraft-mcp-rs" "minecraft-mcp-rs-${{ matrix.label }}"
           fi
 
       - name: Upload artifact
@@ -91,7 +93,6 @@ jobs:
   lint:
     name: Lint & Test
     runs-on: ubuntu-latest
-    needs: build
     steps:
       - name: Checkout
         uses: actions/checkout@v6
