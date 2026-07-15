@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-07-15
+
+### Added
+
+- **System locale auto-detection:** the UI now detects the OS locale via
+  `sys-locale` and uses it as the default language on first launch.
+  `AppConfig::language` still persists the user's explicit choice.
+
 ### Changed
 
 - **CI uses dev profile for non-release builds:** `.github/workflows/build.yml`
@@ -23,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **BotError propagation through MCP tools:** all MCP tool handlers
+  (`tools_chat`, `tools_block`, `tools_movement`, `tools_item`,
+  `tools_container`, `tools_combat`, `tools_act`) now propagate the actual
+  `BotError` from `send_command` instead of wrapping every failure in
+  `InternalError`. This lets MCP clients distinguish offline, timeout,
+  and validation errors.
 - **Disconnect during connection attempt:** `ClientBuilder::start()` in
   `connection.rs` is now wrapped in `tokio::select!` with
   `cancel_token.cancelled()`, so clicking Disconnect while azalea is still
@@ -38,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   panels, and the transport `ComboBox` collapsed label are now routed
   through `TextKey` translations. Switching the UI language now updates all
   of them on the next frame instead of leaving hard-coded English behind.
+- **i18n language sync:** the Settings panel now syncs the i18n language
+  before rendering labels so the UI reflects the change immediately on the
+  current frame.
+- **egui repaint after connection state changes:** connection state
+  transitions now request an egui repaint so the Status panel updates
+  without waiting for the next user interaction.
 
 ## [1.0.3] - 2026-07-15
 
