@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Disconnect during connection attempt:** `ClientBuilder::start()` in
+  `connection.rs` is now wrapped in `tokio::select!` with
+  `cancel_token.cancelled()`, so clicking Disconnect while azalea is still
+  trying to TCP-connect aborts the attempt immediately instead of waiting
+  for the ~5 s timeout to expire.
+- **Release console window:** `src/main.rs` now carries
+  `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` so
+  release builds on Windows no longer flash a black console window. Debug
+  builds retain the console for diagnostics.
+
 ## [1.0.3] - 2026-07-15
 
 ### Fixed — P0 (project correctness)
