@@ -335,7 +335,7 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     // (which would panic when touching the ECS after disconnect). The
     // ReceiverLease guard drops and returns the receiver to the slot, ready
     // for the next Spawn.
-        let handle_to_abort = {
+    let handle_to_abort = {
         let mut handle_guard = state
             .executor_handle
             .lock()
@@ -450,13 +450,7 @@ fn handle_add_player(bot: &Client, state: &BotState, info: &azalea::player::Play
         .map(|entity| {
             let position = bot
                 .get_entity_component::<azalea::entity::Position>(entity)
-                .map(|p| {
-                    BlockPos::new(
-                        p.x.round() as i32,
-                        p.y.round() as i32,
-                        p.z.round() as i32,
-                    )
-                })
+                .map(|p| BlockPos::new(p.x.round() as i32, p.y.round() as i32, p.z.round() as i32))
                 .unwrap_or(BlockPos::new(0, 0, 0));
             let id = bot
                 .get_entity_component::<azalea::world::MinecraftEntityId>(entity)
