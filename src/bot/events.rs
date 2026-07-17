@@ -1,6 +1,6 @@
 //! Event processing from the Minecraft client (chat, move, damage, etc.).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -64,6 +64,12 @@ pub(crate) static INJECTED_COMMAND_SENDER: Mutex<Option<BotCommandSender>> = Mut
 /// connection attempts. A value of `0` means "not set"; [`BotState::default`]
 /// falls back to `500` in that case.
 pub(crate) static INJECTED_SNAPSHOT_INTERVAL_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Guard flag: all INJECTED_* values have been set atomically.
+/// Set to true by ConnectionManager::connect after all four are written;
+/// cleared to false on disconnect. BotState::default reads this before
+/// accessing the individual statics; if false it falls back to defaults.
+pub(crate) static INJECTION_READY: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // BotState
@@ -329,12 +335,21 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     // (which would panic when touching the ECS after disconnect). The
     // ReceiverLease guard drops and returns the receiver to the slot, ready
     // for the next Spawn.
-    let aborted = {
+    let handle_to_abort = {
         let mut handle_guard = state
             .executor_handle
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        handle_guard.take().is_some()
+        handle_guard.take()
+    };
+    let aborted = if let Some(handle) = handle_to_abort {
+        handle.abort();
+        // Yield briefly to allow the aborted task to return the receiver
+        // via ReceiverLease::Drop before a fast reconnect fires Spawn.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        true
+    } else {
+        false
     };
     if aborted {
         info!("aborted command executor on disconnect");
@@ -344,6 +359,9 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     // prevents the per-tick `spawn_local` handle list from growing forever
     // across reconnects.
     abort_and_clear_tick_tasks(&state.tick_tasks).await;
+
+    // Signal that deps are no longer ready before clearing individual statics.
+    INJECTION_READY.store(false, Ordering::Release);
 
     // Clear the injected dependencies so the next connection (or a test in
     // the same process) starts from a clean slot. With `OnceLock` the first
@@ -432,11 +450,11 @@ fn handle_add_player(bot: &Client, state: &BotState, info: &azalea::player::Play
         .map(|entity| {
             let position = bot
                 .get_entity_component::<azalea::entity::Position>(entity)
-                .map(|p| BlockPos::new(p.x as i32, p.y as i32, p.z as i32))
+                .map(|p| BlockPos::new(p.x.round() as i32, p.y.round() as i32, p.z.round() as i32))
                 .unwrap_or(BlockPos::new(0, 0, 0));
             let id = bot
                 .get_entity_component::<azalea::world::MinecraftEntityId>(entity)
-                .map(|m| m.0 as u32)
+                .map(|m| u32::try_from(m.0).unwrap_or(0))
                 .unwrap_or(0);
             (id, position)
         })

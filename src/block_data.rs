@@ -91,6 +91,9 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "chest",
         "trapped_chest",
         "ender_chest",
+        // Netherite blocks
+        "ancient_debris",
+        "netherite_block",
     ] {
         m.insert(block, ToolType::Pickaxe);
     }
@@ -327,6 +330,18 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
     m.insert("calcite", 0.75);
     m.insert("bedrock", -1.0);
 
+    // Stone variants (stairs, slabs, walls)
+    m.insert("cobblestone_stairs", 2.0);
+    m.insert("cobblestone_slab", 2.0);
+    m.insert("cobblestone_wall", 2.0);
+    m.insert("stone_stairs", 1.5);
+    m.insert("stone_slab", 1.5);
+    m.insert("mossy_stone_bricks", 1.5);
+    m.insert("cracked_stone_bricks", 1.5);
+    m.insert("brick_stairs", 2.0);
+    m.insert("brick_slab", 2.0);
+    m.insert("bricks", 2.0);
+
     // Ores
     m.insert("coal_ore", 3.0);
     m.insert("iron_ore", 3.0);
@@ -345,44 +360,139 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
     m.insert("deepslate_redstone_ore", 4.5);
     m.insert("deepslate_copper_ore", 4.5);
 
+    // Deepslate variants
+    m.insert("deepslate_emerald_ore", 4.5);
+    m.insert("deepslate_lapis_ore", 4.5);
+    m.insert("deepslate_redstone_ore", 4.5);
+
     // Nether / End
     m.insert("netherrack", 0.4);
     m.insert("nether_quartz_ore", 3.0);
     m.insert("nether_gold_ore", 3.0);
     m.insert("end_stone", 3.0);
+    m.insert("purpur_block", 3.0);
+    m.insert("purpur_pillar", 3.0);
 
     // Wood
     m.insert("oak_log", 2.0);
     m.insert("spruce_log", 2.0);
     m.insert("birch_log", 2.0);
     m.insert("jungle_log", 2.0);
+    m.insert("acacia_log", 2.0);
+    m.insert("dark_oak_log", 2.0);
     m.insert("oak_planks", 2.0);
+    m.insert("spruce_planks", 2.0);
+    m.insert("birch_planks", 2.0);
+    m.insert("jungle_planks", 2.0);
+    m.insert("acacia_planks", 2.0);
+    m.insert("dark_oak_planks", 2.0);
+    m.insert("oak_stairs", 2.0);
+    m.insert("spruce_stairs", 2.0);
+    m.insert("birch_stairs", 2.0);
+    m.insert("oak_slab", 2.0);
+    m.insert("spruce_slab", 2.0);
+    m.insert("birch_slab", 2.0);
+    m.insert("oak_fence", 2.0);
+    m.insert("spruce_fence", 2.0);
+    m.insert("birch_fence", 2.0);
+    m.insert("oak_fence_gate", 2.0);
+    m.insert("oak_door", 3.0);
+    m.insert("spruce_door", 3.0);
+    m.insert("birch_door", 3.0);
     m.insert("crafting_table", 2.5);
     m.insert("bookshelf", 1.5);
+    m.insert("ladder", 0.4);
+    m.insert("barrel", 2.5);
 
     // Dirt & sand
     m.insert("dirt", 0.5);
     m.insert("grass_block", 0.6);
+    m.insert("coarse_dirt", 0.5);
+    m.insert("rooted_dirt", 0.5);
+    m.insert("dirt_path", 0.65);
     m.insert("sand", 0.5);
+    m.insert("red_sand", 0.5);
+    m.insert("suspicious_sand", 0.25);
     m.insert("gravel", 0.6);
     m.insert("clay", 0.6);
+    m.insert("mud", 0.5);
+    m.insert("muddy_mangrove_roots", 0.7);
     m.insert("soul_sand", 0.5);
+    m.insert("soul_soil", 0.5);
+    m.insert("farmland", 0.6);
+    m.insert("mycelium", 0.6);
+    m.insert("podzol", 0.5);
+    m.insert("powder_snow", 0.1);
+    m.insert("snow_block", 0.2);
+
+    // Leaves & plants
+    m.insert("oak_leaves", 0.2);
+    m.insert("spruce_leaves", 0.2);
+    m.insert("birch_leaves", 0.2);
+    m.insert("jungle_leaves", 0.2);
+    m.insert("acacia_leaves", 0.2);
+    m.insert("dark_oak_leaves", 0.2);
+    m.insert("azalea_leaves", 0.2);
+    m.insert("vine", 0.2);
+    m.insert("glow_lichen", 0.2);
+    m.insert("moss_block", 0.1);
+    m.insert("sculk", 0.2);
+
+    // Wool & glass
+    m.insert("white_wool", 0.8);
+    m.insert("orange_wool", 0.8);
+    m.insert("magenta_wool", 0.8);
+    m.insert("light_blue_wool", 0.8);
+    m.insert("yellow_wool", 0.8);
+    m.insert("lime_wool", 0.8);
+    m.insert("pink_wool", 0.8);
+    m.insert("gray_wool", 0.8);
+    m.insert("light_gray_wool", 0.8);
+    m.insert("cyan_wool", 0.8);
+    m.insert("purple_wool", 0.8);
+    m.insert("blue_wool", 0.8);
+    m.insert("brown_wool", 0.8);
+    m.insert("green_wool", 0.8);
+    m.insert("red_wool", 0.8);
+    m.insert("black_wool", 0.8);
+    m.insert("glass", 0.3);
+    m.insert("glass_pane", 0.3);
+    m.insert("white_stained_glass", 0.3);
+    m.insert("white_stained_glass_pane", 0.3);
 
     // Other
-    m.insert("oak_leaves", 0.2);
-    m.insert("white_wool", 0.8);
-    m.insert("glass", 0.3);
     m.insert("ice", 0.5);
+    m.insert("packed_ice", 0.5);
+    m.insert("blue_ice", 0.5);
     m.insert("snow", 0.1);
+    m.insert("hay_bale", 0.5);
+    m.insert("cobweb", 4.0);
 
     // Notable blocks
     m.insert("obsidian", 50.0);
     m.insert("furnace", 3.5);
+    m.insert("blast_furnace", 3.5);
+    m.insert("smoker", 3.5);
     m.insert("anvil", 5.0);
+    m.insert("chipped_anvil", 5.0);
+    m.insert("damaged_anvil", 5.0);
     m.insert("enchanting_table", 5.0);
+    m.insert("brewing_stand", 0.5);
+    m.insert("hopper", 3.0);
+    m.insert("dropper", 3.5);
+    m.insert("dispenser", 3.5);
+    m.insert("observer", 3.0);
     m.insert("ender_chest", 22.5);
+    m.insert("chest", 2.5);
+    m.insert("trapped_chest", 2.5);
     m.insert("iron_block", 5.0);
+    m.insert("gold_block", 5.0);
     m.insert("diamond_block", 5.0);
+    m.insert("emerald_block", 5.0);
+    m.insert("netherite_block", 50.0);
+
+    // Ancient debris (needs diamond+ pickaxe, drops as raw ancient debris)
+    m.insert("ancient_debris", 30.0);
 
     m
 });

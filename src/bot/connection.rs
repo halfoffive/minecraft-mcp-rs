@@ -314,6 +314,8 @@ impl ConnectionManager {
             .unwrap_or_else(|e| e.into_inner()) = Some(command_sender.clone());
         events::INJECTED_SNAPSHOT_INTERVAL_MS
             .store(snapshot_interval_ms, std::sync::atomic::Ordering::Relaxed);
+        // Signal that all four values are ready (read by BotState::default).
+        events::INJECTION_READY.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 

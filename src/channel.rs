@@ -225,7 +225,6 @@ impl ReceiverLease {
             if let Some(lease) = Self::take(slot) {
                 return Some(lease);
             }
-            tokio::task::yield_now().await;
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         None
