@@ -73,7 +73,7 @@ pub struct AppConfig {
     /// Authentication token presented by MCP clients over HTTP
     /// (default: a random UUID v4 generated per fresh [`AppConfig::default()`]
     /// / missing-field deserialization; override via the settings panel).
-    #[serde(default = "default_mcp_token")]
+    #[serde(default = "default_mcp_token", skip_serializing)]
     pub mcp_token: String,
     /// Transport the MCP server uses to communicate with clients
     /// (default: [`McpTransport::Http`]).

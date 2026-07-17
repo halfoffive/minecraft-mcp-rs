@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Block data sync:** added `ancient_debris` and `netherite_block` to
+  `BLOCK_TO_TOOL_TYPE` and `BLOCK_HARDNESS`. Synchronised all three tables
+  (TOOL_TYPE / HARDNESS / HARVEST_LEVEL) — 90+ missing block hardness values
+  added, all blocks in TOOL_TYPE now have matching hardness entries.
+- **Type conversion safety:** entity position in `handle_add_player` now uses
+  `f64.round() as i32` instead of truncation cast; `MinecraftEntityId` uses
+  `u32::try_from()` with fallback instead of bitcast.
+- **Executor abort safety:** `handle_disconnect` now calls `JoinHandle::abort()`
+  and yields 50 ms before reconnecting, giving `ReceiverLease` time to return
+  the receiver to the slot. The mutex lock is released before `.await` so the
+  async handler's `Send` bound is satisfied.
+- **Injection atomicity guard:** added `INJECTION_READY: AtomicBool` that is set
+  to `true` only after all four injected statics are written, and cleared to
+  `false` before clearing them on disconnect.
+- **Removed dead code:** deleted unused `BotError::ConnectionFailed` variant,
+  its Display impl, MCP error mapping, and associated test.
+- **Redundant yield removed:** `ReceiverLease::take_with_retry` no longer calls
+  `yield_now()` before `sleep(5ms)`.
+- **MCP token serialization:** `mcp_token` is now marked `skip_serializing` so
+  it is never written to serialised config output.
+
 ## [1.0.4] - 2026-07-15
 
 ### Added

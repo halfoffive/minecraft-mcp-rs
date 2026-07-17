@@ -27,13 +27,6 @@ pub enum BotError {
     /// The bot is not connected to a server.
     Offline(String),
 
-    /// A connection attempt failed.
-    ///
-    /// Currently the connection loop in `ConnectionManager::connect` reports
-    /// failures via `SharedState::last_error` instead of `BotError`, so this
-    /// variant is reserved for future use (e.g. MCP-level connection helpers).
-    ConnectionFailed(String),
-
     /// A bot command timed out.
     CommandTimeout {
         /// The command that timed out.
@@ -109,7 +102,6 @@ impl Display for BotError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             BotError::Offline(msg) => write!(f, "Bot is offline: {msg}"),
-            BotError::ConnectionFailed(msg) => write!(f, "Connection failed: {msg}"),
             BotError::CommandTimeout {
                 command,
                 timeout_secs,
@@ -177,8 +169,7 @@ impl From<BotError> for ErrorData {
                 Some(serde_json::json!({ "reason": "bot_disconnected" })),
             ),
 
-            BotError::ConnectionFailed(_)
-            | BotError::CommandTimeout { .. }
+            BotError::CommandTimeout { .. }
             | BotError::ChunkNotLoaded(_)
             | BotError::InventoryFull
             | BotError::MiningInterrupted { .. }
@@ -264,12 +255,6 @@ mod tests {
     fn test_display_offline() {
         let err = BotError::Offline("server unreachable".into());
         assert_eq!(err.to_string(), "Bot is offline: server unreachable");
-    }
-
-    #[test]
-    fn test_display_connection_failed() {
-        let err = BotError::ConnectionFailed("connection refused".into());
-        assert_eq!(err.to_string(), "Connection failed: connection refused");
     }
 
     #[test]
