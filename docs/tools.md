@@ -15,7 +15,7 @@ function, and tool parameters are annotated with
 | **Item** | `drop_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items` |
 | **Container** | `open_container`, `take_from_container`, `put_into_container`, `close_container` |
 | **Combat** | `attack_entity`, `shield_block` |
-| **Chat** | `send_chat`, `execute_command`, `set_gamemode` |
+| **Chat** | `send_chat`, `execute_command`, `set_game_mode` |
 | **Unified** | `act` — one tool that can move, smart-move, fly, mine, attack, or collect items and returns an environment snapshot |
 
 ## Notes

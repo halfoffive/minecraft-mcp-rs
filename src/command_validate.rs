@@ -99,6 +99,7 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         BotCommand::Jump
         | BotCommand::UseItem
         | BotCommand::EquipTool(_)
+        | BotCommand::EquipToolWithMaterial(_, _)
         | BotCommand::CloseContainer
         | BotCommand::ShieldBlock(_)
         | BotCommand::SetGameMode(_)
@@ -149,9 +150,9 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
                     "TakeFromContainer slot must be 0-53, got {slot}"
                 )));
             }
-            if *count == 0 {
+            if *count == 0 || *count > 64 {
                 return Err(BotError::InvalidParams(format!(
-                    "TakeFromContainer count must be > 0, got {count}"
+                    "TakeFromContainer count must be 1-64, got {count}"
                 )));
             }
             Ok(())
@@ -164,9 +165,9 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
                     "PutIntoContainer slot must be 0-53, got {slot}"
                 )));
             }
-            if *count == 0 {
+            if *count == 0 || *count > 64 {
                 return Err(BotError::InvalidParams(format!(
-                    "PutIntoContainer count must be > 0, got {count}"
+                    "PutIntoContainer count must be 1-64, got {count}"
                 )));
             }
             Ok(())
@@ -1132,6 +1133,7 @@ mod tests {
             BotCommand::UseItem => 1,
             BotCommand::UseItemWithSlot(_) => 1,
             BotCommand::EquipTool(_) => 1,
+            BotCommand::EquipToolWithMaterial(_, _) => 1,
             BotCommand::OpenContainer(_) => 1,
             BotCommand::TakeFromContainer(_, _) => 1,
             BotCommand::PutIntoContainer(_, _) => 1,

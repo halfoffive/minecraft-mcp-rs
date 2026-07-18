@@ -105,7 +105,7 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 | **Item / 物品** | `drop_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items` |
 | **Container / 容器** | `open_container`, `take_from_container`, `put_into_container`, `close_container` |
 | **Combat / 战斗** | `attack_entity`, `shield_block` |
-| **Chat / 聊天** | `send_chat`, `execute_command`, `set_gamemode` |
+| **Chat / 聊天** | `send_chat`, `execute_command`, `set_game_mode` |
 | **Unified / 统一** | `act` — one tool that can move, smart-move, fly, mine, attack, or collect items and returns an environment snapshot |
 
 上述工具按功能领域分类；`act` 是一个统一入口，能够根据传入参数执行移动、智能移动、飞行、挖掘、攻击或拾取物品，并返回环境快照。

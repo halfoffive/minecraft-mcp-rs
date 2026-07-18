@@ -6,12 +6,11 @@
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::Value;
 
 use crate::channel::BotCommandSender;
 use crate::error::BotError;
 use crate::state::SharedState;
-use crate::types::{BotCommand, ToolType};
+use crate::types::{BotCommand, MaterialTier, ToolType};
 
 // ── switch_hotbar_slot ─────────────────────────────────────────────────────
 
@@ -165,6 +164,23 @@ pub fn parse_tool_type(s: &str) -> Option<ToolType> {
     }
 }
 
+/// Parse a material tier string into a [`MaterialTier`] (case-insensitive).
+///
+/// Accepts the canonical tier names plus the common `wooden` / `golden`
+/// aliases. Returns `None` for anything unrecognised so the caller can report
+/// an `InvalidParams` error instead of silently ignoring the preference.
+pub fn parse_material_tier(s: &str) -> Option<MaterialTier> {
+    match s.to_lowercase().as_str() {
+        "wood" | "wooden" => Some(MaterialTier::Wood),
+        "gold" | "golden" => Some(MaterialTier::Gold),
+        "stone" => Some(MaterialTier::Stone),
+        "iron" => Some(MaterialTier::Iron),
+        "diamond" => Some(MaterialTier::Diamond),
+        "netherite" => Some(MaterialTier::Netherite),
+        _ => None,
+    }
+}
+
 /// Handle `equip_tool` MCP tool.
 pub async fn handle_equip_tool(
     state: &Arc<SharedState>,
@@ -181,27 +197,35 @@ pub async fn handle_equip_tool(
         }
     };
 
+    // Parse the optional material preference into a minimum tier. An invalid
+    // value is a client error rather than being silently ignored.
+    let material = match input.material_preference.as_deref() {
+        Some(s) => match parse_material_tier(s) {
+            Some(m) => Some(m),
+            None => {
+                return Err(BotError::InvalidParams(format!(
+                    "Unknown material preference: '{s}'. Valid tiers: wood, gold, stone, iron, diamond, netherite"
+                )));
+            }
+        },
+        None => None,
+    };
+
     if !state.is_online() {
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),
         ));
     }
 
-    let cmd = BotCommand::EquipTool(tool);
-    match sender.send_command(cmd).await {
-        Ok(result) => {
-            let mut json = serde_json::to_value(&result)
-                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))?;
-            if let Some(mat) = input.material_preference
-                && let Some(obj) = json.as_object_mut()
-            {
-                obj.insert("material_preference".to_string(), Value::String(mat));
-            }
-            serde_json::to_string(&json)
-                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
-        }
-        Err(e) => Err(e),
-    }
+    // Route to the material-aware command only when a preference is given, so
+    // callers without one keep the plain EquipTool behaviour.
+    let cmd = match material {
+        Some(m) => BotCommand::EquipToolWithMaterial(tool, m),
+        None => BotCommand::EquipTool(tool),
+    };
+    let result = sender.send_command(cmd).await?;
+    serde_json::to_string(&result)
+        .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
 }
 
 // ── collect_items ──────────────────────────────────────────────────────────
@@ -253,6 +277,7 @@ mod tests {
     use super::*;
     use crate::channel::create_command_channel;
     use crate::config::AppConfig;
+    use serde_json::Value;
 
     fn setup() -> (Arc<SharedState>, BotCommandSender) {
         let state = Arc::new(SharedState::new(AppConfig::default()));
@@ -464,8 +489,37 @@ mod tests {
             tool_type: "pickaxe".into(),
             material_preference: Some("diamond".into()),
         };
+        let result = handle_equip_tool(&state, &sender, input).await.unwrap();
+        // The preference must be wired into an EquipToolWithMaterial command
+        // (echoed back by the mock channel), not silently ignored.
+        assert!(result.contains("EquipToolWithMaterial"));
+        assert!(result.contains("Diamond"));
+    }
+
+    #[tokio::test]
+    async fn test_equip_tool_invalid_material_preference() {
+        let (state, sender) = make_echo_channel();
+        make_online(&state);
+        let input = EquipToolInput {
+            tool_type: "pickaxe".into(),
+            material_preference: Some("adamantium".into()),
+        };
         let result = handle_equip_tool(&state, &sender, input).await;
-        assert!(result.unwrap().contains("material_preference"));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref m)) if m.contains("material preference"))
+        );
+    }
+
+    #[test]
+    fn test_parse_material_tier() {
+        assert_eq!(parse_material_tier("diamond"), Some(MaterialTier::Diamond));
+        assert_eq!(
+            parse_material_tier("NETHERITE"),
+            Some(MaterialTier::Netherite)
+        );
+        assert_eq!(parse_material_tier("wooden"), Some(MaterialTier::Wood));
+        assert_eq!(parse_material_tier("golden"), Some(MaterialTier::Gold));
+        assert_eq!(parse_material_tier("unobtainium"), None);
     }
 
     #[test]

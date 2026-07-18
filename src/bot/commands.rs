@@ -526,6 +526,12 @@ impl<B: BotActions> CommandExecutor<B> {
 
     /// Dispatch a single command and return the result.
     pub(crate) async fn dispatch(&self, cmd: BotCommand) -> Result<BotResult, BotError> {
+        // Defense-in-depth: validate parameter bounds for every command before
+        // execution. MCP handlers validate too, but this central gate catches
+        // any handler that misses a bound (container slot/count, walk distance)
+        // and covers commands generated internally by compound operations.
+        crate::command_validate::validate_command(&cmd)?;
+
         // Check online status for commands that require a connection.
         if !self.state.is_online() {
             return Err(BotError::Offline("bot is not connected".into()));
@@ -552,7 +558,10 @@ impl<B: BotActions> CommandExecutor<B> {
             BotCommand::DropItem(slot, count) => self.handle_drop_item(slot, count),
             BotCommand::UseItem => self.handle_use_item(),
             BotCommand::UseItemWithSlot(slot) => self.handle_use_item_with_slot(slot),
-            BotCommand::EquipTool(tool) => self.handle_equip_tool(tool),
+            BotCommand::EquipTool(tool) => self.handle_equip_tool(tool, None),
+            BotCommand::EquipToolWithMaterial(tool, material) => {
+                self.handle_equip_tool(tool, Some(material))
+            }
 
             // ── Container ─────────────────────────────────────────
             BotCommand::OpenContainer(pos) => self.handle_open_container(pos).await,
@@ -821,8 +830,12 @@ impl<B: BotActions> CommandExecutor<B> {
         self.handle_use_item()
     }
 
-    fn handle_equip_tool(&self, tool: crate::types::ToolType) -> Result<BotResult, BotError> {
-        trace!(?tool, "EquipTool");
+    fn handle_equip_tool(
+        &self,
+        tool: crate::types::ToolType,
+        material: Option<crate::types::MaterialTier>,
+    ) -> Result<BotResult, BotError> {
+        trace!(?tool, ?material, "EquipTool");
         // `Hand` means "no specific tool needed" — nothing to equip.
         if tool == crate::types::ToolType::Hand {
             return Ok(BotResult {
@@ -832,9 +845,13 @@ impl<B: BotActions> CommandExecutor<B> {
             });
         }
 
+        // A material preference becomes a minimum harvest level: requesting
+        // Diamond keeps diamond/netherite tools and rejects anything lower.
+        let required_level = material.map(crate::block_data::harvest_level_of);
+
         // Search the inventory for a matching tool.
         let entries = self.bot.inventory_entries();
-        match find_tool_in_inventory(&tool, &entries, None) {
+        match find_tool_in_inventory(&tool, &entries, required_level) {
             Some((_material, slot)) if slot <= 8 => {
                 // Tool is in the hotbar — switch to it directly.
                 self.bot.switch_hotbar_slot(slot);
@@ -857,7 +874,7 @@ impl<B: BotActions> CommandExecutor<B> {
             }
             None => Err(BotError::ToolNotFound {
                 tool_type: tool,
-                material: None,
+                material,
             }),
         }
     }
@@ -1458,12 +1475,21 @@ fn find_obstacle_block(
     target: BlockPos,
 ) -> Option<String> {
     // Walk the integer line from current toward target (XZ plane) and
-    // return the first non-air block found in the snapshot.
-    let dx = (target.x - current.x).signum();
-    let dz = (target.z - current.z).signum();
-    let steps = ((target.x - current.x).abs()).max((target.z - current.z).abs());
+    // return the first non-air block found in the snapshot. Interpolate both
+    // axes proportionally so the scan follows the real line instead of a 45°
+    // diagonal (which overshot one axis and skipped intermediate cells).
+    let total_dx = target.x - current.x;
+    let total_dz = target.z - current.z;
+    let steps = total_dx.abs().max(total_dz.abs());
+    if steps == 0 {
+        return None;
+    }
     for i in 1..=steps {
-        let pos = BlockPos::new(current.x + dx * i, current.y, current.z + dz * i);
+        let pos = BlockPos::new(
+            current.x + total_dx * i / steps,
+            current.y,
+            current.z + total_dz * i / steps,
+        );
         if let Some(&idx) = snapshot.block_index.get(&pos)
             && !snapshot.blocks[idx].block_type.is_empty()
             && snapshot.blocks[idx].block_type != "air"
@@ -1483,7 +1509,7 @@ mod tests {
     use super::*;
     use crate::channel::{BotCommandSender, create_command_channel};
     use crate::config::AppConfig;
-    use crate::types::{BlockEntry, EntityEntry, SelfPlayer, ToolType};
+    use crate::types::{BlockEntry, EntityEntry, MaterialTier, SelfPlayer, ToolType};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -2099,18 +2125,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drop_item_count_zero_is_noop() {
-        // A count of 0 must drop nothing: the bot action is never invoked and
-        // the result reports "Dropped 0 items". Previously `drop_item` clamped
-        // the loop to `count.max(1)` and silently dropped one item.
+    async fn test_drop_item_count_zero_rejected_by_validation() {
+        // A count of 0 is rejected by the central validate_command gate in
+        // dispatch (consistent with the MCP layer, which also rejects it), so
+        // the bot action is never invoked.
         let (executor, sender, _state, log) = make_executor();
         let handle = spawn_executor(executor);
 
         let result = send_and_await(&sender, BotCommand::DropItem(2, 0)).await;
-        assert!(result.is_ok());
-        let br = result.unwrap();
-        assert!(br.success);
-        assert_eq!(br.message, "Dropped 0 items");
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -2586,6 +2609,126 @@ mod tests {
 
         drop(sender);
         handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_equip_tool_with_material_accepts_meeting_tier() {
+        // Iron pickaxe in hotbar slot 2; requesting an Iron minimum succeeds.
+        let (executor, sender, _state, log) = make_executor();
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            inv.resize(9, None);
+            inv[2] = Some(ItemStack {
+                item_id: "iron_pickaxe".into(),
+                count: 1,
+            });
+        }
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(
+            &sender,
+            BotCommand::EquipToolWithMaterial(ToolType::Pickaxe, MaterialTier::Iron),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_equip_tool_with_material_rejects_below_preference() {
+        // Only an iron pickaxe is available; requesting a Diamond minimum must
+        // fail with ToolNotFound rather than silently equipping the iron one.
+        let (executor, sender, _state, log) = make_executor();
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            inv.resize(9, None);
+            inv[2] = Some(ItemStack {
+                item_id: "iron_pickaxe".into(),
+                count: 1,
+            });
+        }
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(
+            &sender,
+            BotCommand::EquipToolWithMaterial(ToolType::Pickaxe, MaterialTier::Diamond),
+        )
+        .await;
+        assert!(matches!(result, Err(BotError::ToolNotFound { .. })));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // dispatch validation gate (defense-in-depth) tests
+    // ═══════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_dispatch_rejects_container_slot_over_max() {
+        // slot 54 exceeds the schema max of 53 — the central validate_command
+        // gate in dispatch must reject it as InvalidParams.
+        let (executor, sender, _state, _log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::TakeFromContainer(54, 1)).await;
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_rejects_container_count_over_max() {
+        // count 65 exceeds the schema max of 64.
+        let (executor, sender, _state, _log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::PutIntoContainer(0, 65)).await;
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_rejects_walk_distance_over_max() {
+        // distance 2000 exceeds the schema max of 1000.
+        let (executor, sender, _state, _log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let result =
+            send_and_await(&sender, BotCommand::WalkDirection(Direction::North, 2000)).await;
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[test]
+    fn test_find_obstacle_block_interpolates_line() {
+        use std::collections::HashMap;
+        // The obstacle at (1,64,5) lies on the true line from (0,64,0) to
+        // (2,64,10). The old 45° diagonal scan visited (i,64,i) and would have
+        // missed it; proportional interpolation must find it.
+        let obstacle = BlockPos::new(1, 64, 5);
+        let mut block_index = HashMap::new();
+        block_index.insert(obstacle, 0usize);
+        let snapshot = crate::types::WorldSnapshot {
+            blocks: vec![BlockEntry {
+                position: obstacle,
+                block_type: "stone".into(),
+                block_state: None,
+            }],
+            block_index,
+            ..Default::default()
+        };
+
+        let found =
+            find_obstacle_block(&snapshot, BlockPos::new(0, 64, 0), BlockPos::new(2, 64, 10));
+        assert_eq!(found, Some("stone".to_string()));
     }
 
     // ═══════════════════════════════════════════════════════════════

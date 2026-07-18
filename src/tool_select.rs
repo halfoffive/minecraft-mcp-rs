@@ -437,6 +437,20 @@ mod tests {
         assert_eq!(sel.material, Some(MaterialTier::Iron));
     }
 
+    #[test]
+    fn test_select_tool_diamond_pickaxe_for_ancient_debris() {
+        // Ancient debris requires harvest level 3 (diamond+). A diamond
+        // pickaxe must be accepted — regression for the earlier bug that
+        // required netherite (level 4) and wrongly rejected diamond.
+        let inv = vec![Some(ItemStack {
+            item_id: "diamond_pickaxe".to_string(),
+            count: 1,
+        })];
+        let sel = select_tool_for_block("ancient_debris", &inv);
+        assert_eq!(sel.tool_type, ToolType::Pickaxe);
+        assert_eq!(sel.material, Some(MaterialTier::Diamond));
+    }
+
     // ── select_tool_for_block ─────────────────────────────────
 
     #[test]

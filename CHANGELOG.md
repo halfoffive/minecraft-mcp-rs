@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Ancient debris harvest level:** corrected `ancient_debris` from harvest
+  level 4 (netherite) to 3 (diamond+); a diamond pickaxe can now mine it,
+  matching vanilla. Previously a diamond-only inventory was wrongly refused
+  with `ToolNotFound`.
+- **`equip_tool` material preference wired:** the `material_preference` MCP
+  parameter is now honoured (previously echoed into the response but ignored).
+  It maps to a minimum material tier via the new
+  `BotCommand::EquipToolWithMaterial(ToolType, MaterialTier)`; an unknown tier
+  returns `InvalidParams`. Requesting a tier higher than any tool in the
+  inventory yields `ToolNotFound`.
+- **Centralized command validation:** `CommandExecutor::dispatch` now runs
+  `command_validate::validate_command` on every command, closing runtime gaps
+  where MCP handlers omitted upper-bound checks (container `slot` > 53 /
+  `count` > 64, `walk_direction` distance > 1000). `validate_command` was
+  previously defined and tested but never invoked in production.
+- **`find_obstacle_block` interpolation:** the SmartMove obstacle scan now
+  interpolates both axes along the true line instead of stepping a 45°
+  diagonal, so it no longer overshoots one axis or skips intermediate cells.
+- **Docs tool name:** corrected `set_gamemode` to the actual registered tool
+  name `set_game_mode` in the README and the English/Chinese tool references.
 - **Block data sync:** added `ancient_debris` and `netherite_block` to
   `BLOCK_TO_TOOL_TYPE` and `BLOCK_HARDNESS`. Synchronised all three tables
   (TOOL_TYPE / HARDNESS / HARVEST_LEVEL) — 90+ missing block hardness values
@@ -20,9 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and yields 50 ms before reconnecting, giving `ReceiverLease` time to return
   the receiver to the slot. The mutex lock is released before `.await` so the
   async handler's `Send` bound is satisfied.
-- **Injection atomicity guard:** added `INJECTION_READY: AtomicBool` that is set
-  to `true` only after all four injected statics are written, and cleared to
-  `false` before clearing them on disconnect.
+- **Removed dead `INJECTION_READY` flag:** the guard flag was written on
+  connect/disconnect but never read; its doc comment falsely claimed
+  `BotState::default` consulted it. Deleted along with the now-unused
+  `AtomicBool` import in `bot/events.rs`.
 - **Removed dead code:** deleted unused `BotError::ConnectionFailed` variant,
   its Display impl, MCP error mapping, and associated test.
 - **Redundant yield removed:** `ReceiverLease::take_with_retry` no longer calls

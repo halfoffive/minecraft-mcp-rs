@@ -1,6 +1,6 @@
 //! Event processing from the Minecraft client (chat, move, damage, etc.).
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -64,12 +64,6 @@ pub(crate) static INJECTED_COMMAND_SENDER: Mutex<Option<BotCommandSender>> = Mut
 /// connection attempts. A value of `0` means "not set"; [`BotState::default`]
 /// falls back to `500` in that case.
 pub(crate) static INJECTED_SNAPSHOT_INTERVAL_MS: AtomicU64 = AtomicU64::new(0);
-
-/// Guard flag: all INJECTED_* values have been set atomically.
-/// Set to true by ConnectionManager::connect after all four are written;
-/// cleared to false on disconnect. BotState::default reads this before
-/// accessing the individual statics; if false it falls back to defaults.
-pub(crate) static INJECTION_READY: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // BotState
@@ -359,9 +353,6 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     // prevents the per-tick `spawn_local` handle list from growing forever
     // across reconnects.
     abort_and_clear_tick_tasks(&state.tick_tasks).await;
-
-    // Signal that deps are no longer ready before clearing individual statics.
-    INJECTION_READY.store(false, Ordering::Release);
 
     // Clear the injected dependencies so the next connection (or a test in
     // the same process) starts from a clean slot. With `OnceLock` the first

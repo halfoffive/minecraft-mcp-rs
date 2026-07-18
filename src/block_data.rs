@@ -682,11 +682,12 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
         m.insert(block, 2u8);
     }
 
-    // Level 3: needs diamond+ (obsidian).
+    // Level 3: needs diamond+ (obsidian, ancient debris). A diamond pickaxe
+    // is sufficient to mine and drop ancient debris in vanilla Minecraft.
     m.insert("obsidian", 3u8);
+    m.insert("ancient_debris", 3u8);
 
-    // Level 4: needs netherite (ancient debris, netherite block, respawn anchor).
-    m.insert("ancient_debris", 4u8);
+    // Level 4: needs netherite (netherite block only).
     m.insert("netherite_block", 4u8);
 
     // Bedrock is unbreakable regardless of tool.
@@ -1135,8 +1136,10 @@ mod tests {
         assert_eq!(HARVEST_LEVEL.get("deepslate_diamond_ore").copied(), Some(2));
         // Needs diamond+.
         assert_eq!(HARVEST_LEVEL.get("obsidian").copied(), Some(3));
+        // Ancient debris needs a diamond pickaxe (level 3), not netherite.
+        assert_eq!(HARVEST_LEVEL.get("ancient_debris").copied(), Some(3));
         // Needs netherite.
-        assert_eq!(HARVEST_LEVEL.get("ancient_debris").copied(), Some(4));
+        assert_eq!(HARVEST_LEVEL.get("netherite_block").copied(), Some(4));
         // Unbreakable.
         assert_eq!(HARVEST_LEVEL.get("bedrock").copied(), Some(u8::MAX));
     }

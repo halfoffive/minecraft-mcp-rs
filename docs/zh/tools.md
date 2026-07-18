@@ -14,7 +14,7 @@
 | **物品（Item）** | `drop_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items` |
 | **容器（Container）** | `open_container`, `take_from_container`, `put_into_container`, `close_container` |
 | **战斗（Combat）** | `attack_entity`, `shield_block` |
-| **聊天（Chat）** | `send_chat`, `execute_command`, `set_gamemode` |
+| **聊天（Chat）** | `send_chat`, `execute_command`, `set_game_mode` |
 | **统一（Unified）** | `act` —— 一个可以移动、智能移动、飞行、挖掘、攻击或收集物品，并返回环境快照的工具 |
 
 ## 说明

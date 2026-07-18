@@ -163,6 +163,15 @@ pub enum BotCommand {
     UseItemWithSlot(u8),
     /// Equip a tool type.
     EquipTool(ToolType),
+    /// Equip a tool of the given type with a minimum material tier.
+    ///
+    /// Like [`BotCommand::EquipTool`], but only accepts a tool whose material
+    /// meets or exceeds `MaterialTier` (measured by
+    /// [`crate::block_data::harvest_level_of`]). Requesting `Diamond` selects a
+    /// diamond or netherite tool and rejects anything lower; requesting `Wood`
+    /// imposes no floor. Note that `Gold` shares `Stone`'s harvest level, so a
+    /// gold preference behaves like a stone preference.
+    EquipToolWithMaterial(ToolType, MaterialTier),
     /// Open a container at the given position.
     OpenContainer(BlockPos),
     /// Take items from a container slot.
@@ -517,6 +526,7 @@ mod tests {
             BotCommand::UseItem => 1,
             BotCommand::UseItemWithSlot(_) => 1,
             BotCommand::EquipTool(_) => 1,
+            BotCommand::EquipToolWithMaterial(_, _) => 1,
             BotCommand::OpenContainer(_) => 1,
             BotCommand::TakeFromContainer(_, _) => 1,
             BotCommand::PutIntoContainer(_, _) => 1,
