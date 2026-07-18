@@ -98,18 +98,21 @@ pub async fn handle_take_from_container(
     sender: &BotCommandSender,
     input: TakeFromContainerInput,
 ) -> Result<String, BotError> {
+    // Validate count first: a malformed parameter should be reported as
+    // InvalidParams regardless of whether a container is open or the bot
+    // is online.  This matches the convention in tools_item.rs.
+    let count = input.count.unwrap_or(1);
+    if count == 0 {
+        return Err(BotError::InvalidParams(
+            "Count must be greater than 0".to_string(),
+        ));
+    }
+
     check_container_open(state)?;
 
     if !state.is_online() {
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),
-        ));
-    }
-
-    let count = input.count.unwrap_or(1);
-    if count == 0 {
-        return Err(BotError::InvalidParams(
-            "Count must be greater than 0".to_string(),
         ));
     }
 
@@ -144,18 +147,19 @@ pub async fn handle_put_into_container(
     sender: &BotCommandSender,
     input: PutIntoContainerInput,
 ) -> Result<String, BotError> {
+    // Validate count first: same reasoning as handle_take_from_container.
+    let count = input.count.unwrap_or(1);
+    if count == 0 {
+        return Err(BotError::InvalidParams(
+            "Count must be greater than 0".to_string(),
+        ));
+    }
+
     check_container_open(state)?;
 
     if !state.is_online() {
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),
-        ));
-    }
-
-    let count = input.count.unwrap_or(1);
-    if count == 0 {
-        return Err(BotError::InvalidParams(
-            "Count must be greater than 0".to_string(),
         ));
     }
 
@@ -271,15 +275,19 @@ mod tests {
     #[tokio::test]
     async fn test_take_from_container_zero_count() {
         let (state, sender) = setup();
-        // Even with no container open, we need a container to be "open"
-        // to reach the count check. But check_container_open runs first.
+        // With the new validation order, count==0 is rejected before
+        // container-open checks, so we get a count-specific error even
+        // without a container being open.
         let input = TakeFromContainerInput {
             slot: 0,
             count: Some(0),
         };
         let result = handle_take_from_container(&state, &sender, input).await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("Count must be greater than 0")),
+            "expected count==0 error, got: {result:?}"
+        );
     }
 
     #[tokio::test]

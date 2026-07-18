@@ -153,14 +153,15 @@ pub fn install_system_cjk_fonts(ctx: &egui::Context) {
         Arc::new(egui::FontData::from_owned(bytes)),
     );
 
-    // Put "cjk" first in Proportional so any non-Latin glyph resolves to
-    // the system CJK font; Latin glyphs still render fine because the CJK
-    // fonts include Latin coverage.
+    // Append CJK font at the end of Proportional as a fallback, so Latin
+    // glyphs stay at the primary font (Ubuntu-Light) and only non-Latin
+    // glyphs fall through to the system CJK font.  egui 0.34 searches all
+    // fonts in the list before giving up, so appending is sufficient.
     fonts
         .families
         .entry(egui::FontFamily::Proportional)
         .or_default()
-        .insert(0, "cjk".to_owned());
+        .push("cjk".to_owned());
 
     // Append "cjk" as the last resort for Monospace so Latin code-style
     // text keeps using Hack/NotoEmoji and only falls back to CJK when a

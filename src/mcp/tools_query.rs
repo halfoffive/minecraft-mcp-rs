@@ -83,12 +83,25 @@ pub fn get_nearby_blocks(
     radius: u32,
     filter_type: Option<String>,
 ) -> Result<String, BotError> {
+    if !(1..=100).contains(&radius) {
+        return Err(BotError::InvalidParams(format!(
+            "radius must be in range 1..=100, got {radius}"
+        )));
+    }
     if !state.is_online() {
         return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
     let snapshot = state.read_snapshot();
     let center = snapshot.self_player.position;
     let r = clamp_to_i32(radius);
+
+    // Pre-compute the lowercased filter once outside the hot closure so we
+    // don't allocate a new `String` per block when filtering thousands of
+    // nearby blocks.
+    let ft_lower = filter_type
+        .as_deref()
+        .filter(|ft| !ft.is_empty())
+        .map(|ft| ft.to_lowercase());
 
     let blocks: Vec<&crate::types::BlockEntry> = snapshot
         .blocks
@@ -98,9 +111,9 @@ pub fn get_nearby_blocks(
                 && (b.position.y - center.y).abs() <= r
                 && (b.position.z - center.z).abs() <= r
         })
-        .filter(|b| match &filter_type {
-            Some(ft) if !ft.is_empty() => b.block_type.to_lowercase().contains(&ft.to_lowercase()),
-            _ => true,
+        .filter(|b| match &ft_lower {
+            Some(ft) => b.block_type.to_lowercase().contains(ft.as_str()),
+            None => true,
         })
         .collect();
 
@@ -110,6 +123,11 @@ pub fn get_nearby_blocks(
 
 /// Get entities near the bot within the given Chebyshev (square) radius.
 pub fn get_nearby_entities(state: &Arc<SharedState>, radius: u32) -> Result<String, BotError> {
+    if !(1..=100).contains(&radius) {
+        return Err(BotError::InvalidParams(format!(
+            "radius must be in range 1..=100, got {radius}"
+        )));
+    }
     if !state.is_online() {
         return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
@@ -408,7 +426,9 @@ mod tests {
     #[test]
     fn test_get_nearby_entities_large_radius() {
         let state = state_with_snapshot();
-        let result = get_nearby_entities(&state, 200).unwrap();
+        // radius = 100 (the maximum allowed by runtime validation) still
+        // catches both nearby and far entities.
+        let result = get_nearby_entities(&state, 100).unwrap();
         assert!(result.contains("zombie"));
         assert!(result.contains("creeper"));
     }
@@ -569,19 +589,21 @@ mod tests {
         assert_eq!(clamp_to_i32(i32::MAX as u32), i32::MAX);
     }
 
-    /// End-to-end: an oversized `u32` radius must not panic and must not
-    /// silently return zero matches because of `as i32` wrap-around.
+    /// End-to-end: an oversized `u32` radius is now rejected at runtime
+    /// (not silently clamped). The `#[schemars(range(min = 1, max = 100))]`
+    /// JSON Schema annotation is now enforced.
     #[test]
     fn test_get_nearby_blocks_oversized_radius_does_not_panic() {
         let state = state_with_snapshot();
-        // u32::MAX would wrap to -1 with a bare `as i32` cast and make
-        // the filter drop every block. `clamp_to_i32` saturates to
-        // i32::MAX, so the filter keeps everything.
+        // u32::MAX is rejected by runtime bounds check instead of being
+        // silently clamped (and potentially wrapping via `as i32`).
         let result = get_nearby_blocks(&state, u32::MAX, None);
         assert!(
-            result.is_ok(),
-            "oversized radius must not error: {result:?}"
+            result.is_err(),
+            "u32::MAX must be rejected by radius validation, got: {result:?}"
         );
+        // Also verify the error is InvalidParams, not a panic.
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
     }
 
     /// Same regression for `get_nearby_entities`.
@@ -590,8 +612,9 @@ mod tests {
         let state = state_with_snapshot();
         let result = get_nearby_entities(&state, u32::MAX);
         assert!(
-            result.is_ok(),
-            "oversized radius must not error: {result:?}"
+            result.is_err(),
+            "u32::MAX must be rejected by radius validation, got: {result:?}"
         );
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
     }
 }

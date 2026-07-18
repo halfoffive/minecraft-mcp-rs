@@ -29,6 +29,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `yield_now()` before `sleep(5ms)`.
 - **MCP token serialization:** `mcp_token` is now marked `skip_serializing` so
   it is never written to serialised config output.
+- **Bot connection thread panic resilience:** `Runtime::new()` failure no
+  longer panics the connection thread. A `ClearGuard` RAII guard ensures
+  `clear_connecting()` always runs, preventing the `bot_connecting` flag from
+  being permanently stuck (which previously blocked all subsequent Connect
+  attempts until process restart).
+- **`walk_direction` integer overflow:** `distance as i32` has been replaced
+  with `clamp_to_i32(distance)`, and all coordinate arithmetic now uses
+  `saturating_add` / `saturating_mul`.  A malicious `distance > i32::MAX` no
+  longer silently wraps to a negative offset (which made the bot walk in the
+  opposite direction).
+- **MCP tool radius runtime validation:** `get_nearby_blocks` and
+  `get_nearby_entities` now reject `radius` outside 1..=100 at runtime,
+  matching the `#[schemars(range)]` JSON Schema contract.  Previously an
+  out-of-bounds radius silently clamped (or in the integer-overflow case,
+  produced incorrect results).
+- **`handle_collect_items` semantics:** variable renamed from `collected` to
+  `visited`; the result message now reads "Visited N item drop location(s);
+  auto-pickup expected on proximity".  `goto` success means the bot reached
+  the position, not that the server processed the pickup — the old message
+  was misleading to LLM consumers.
+- **`handle_place_block` result message:** `"slot:N"` internal prefixes are
+  stripped from the success message so the LLM sees a clean block type
+  instead of an opaque hotbar index.
+- **`get_nearby_blocks` filter performance:** `filter_type.to_lowercase()` is
+  now pre-computed outside the block-scanning closure so it isn't re-allocated
+  per block (up to thousands of allocations at radius 100).
+- **Container tool validation order:** `count == 0` is now checked before
+  `check_container_open` / `is_online` in both
+  `handle_take_from_container` and `handle_put_into_container`, matching
+  the convention in `tools_item.rs` (parameter errors before state errors).
+
+### Changed
+
+- **CJK font fallback strategy in egui:** the system CJK font is now
+  *appended* to `Proportional` instead of *prepended*, so Latin glyphs
+  consistently render with Ubuntu-Light and only non-Latin glyphs fall
+  through to the system CJK font.
+- **UI language sync optimisation:** `MinecraftApp` caches `last_language`
+  and only re-reads `AppConfig::language` when the value actually differs,
+  eliminating a per-frame `RwLock` acquisition.
 
 ## [1.0.4] - 2026-07-15
 

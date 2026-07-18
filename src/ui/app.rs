@@ -55,6 +55,29 @@ fn join_with_timeout(handle: JoinHandle<()>, timeout: Duration) -> Result<(), Du
     }
 }
 
+/// RAII guard that calls [`SharedState::clear_connecting`] on drop.
+///
+/// Wrapping the bot connection thread body with this guard ensures the
+/// `bot_connecting` flag is always cleared — even if a panic unwinds
+/// through the thread (e.g. `Runtime::new().expect()`). Without it, a
+/// panic in the connection thread would leave `bot_connecting` permanently
+/// `true`, and `try_begin_connecting` would reject every subsequent
+/// Connect attempt until the process restarts.
+///
+/// # Safety for panics
+///
+/// The guard *only* touches an `AtomicBool` in `drop`, which is safe
+/// during unwinding. If the thread panics, `clear_connecting` still
+/// executes (unwinding calls `Drop`), so the user can retry Connect
+/// without restarting the application.
+struct ClearGuard<'a>(&'a SharedState);
+
+impl Drop for ClearGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_connecting();
+    }
+}
+
 /// Main egui application shell.
 pub struct MinecraftApp {
     /// Shared state accessed lock-free for the world snapshot,
@@ -84,6 +107,9 @@ pub struct MinecraftApp {
     /// Local edit buffers for the settings panel.  Initialised from
     /// [`SharedState`] config on first frame.
     edit_config: Option<EditConfig>,
+    /// Cached language from the last frame; lets us avoid a per-frame
+    /// `read_config` acquisition just to synchronise `i18n::current()`.
+    last_language: Language,
 }
 
 /// Mutable copy of every [`AppConfig`] field for the settings panel.
@@ -182,6 +208,7 @@ impl MinecraftApp {
         // click (see `connect_bot`) so compound ops can issue sub-commands.
         // The MCP server thread holds its own clone and is the primary
         // consumer of the command channel.
+        let initial_lang = state.read_config().language;
         Self {
             state,
             sender,
@@ -190,6 +217,7 @@ impl MinecraftApp {
             bot_thread: None,
             mcp_handle: Some(mcp_handle),
             edit_config: None,
+            last_language: initial_lang,
         }
     }
 
@@ -231,8 +259,25 @@ impl MinecraftApp {
         let handle = std::thread::Builder::new()
             .name("bot-connection".into())
             .spawn(move || {
-                let rt = tokio::runtime::Runtime::new()
-                    .expect("Failed to create tokio runtime for bot connection");
+                // RAII guard: `ClearGuard` calls `state.clear_connecting()`
+                // on drop, so the flag is cleared even if this thread panics
+                // (e.g. during `Runtime::new()` below).  Without this, a
+                // panic would leave `bot_connecting` permanently `true`,
+                // and the user would be unable to Connect again without
+                // restarting the whole application.
+                let _clear_guard = ClearGuard(&state);
+
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to create tokio runtime for bot connection"
+                        );
+                        // _clear_guard drops → clear_connecting() runs
+                        return;
+                    }
+                };
                 let manager = ConnectionManager::new(config, Arc::clone(&state));
 
                 rt.block_on(async move {
@@ -242,7 +287,9 @@ impl MinecraftApp {
                 });
 
                 // Clear the connecting flag in case the loop exited without
-                // doing it (e.g. due to an early error return).
+                // doing it (e.g. due to an early error return).  Also acts
+                // as the explicit clear on the normal (non-panic) exit path,
+                // since the `ClearGuard` clears unconditionally on drop.
                 state.clear_connecting();
                 tracing::info!("Bot connection thread exited");
             })
@@ -323,14 +370,13 @@ impl App for MinecraftApp {
     /// and margins.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // ── Per-frame language sync ─────────────────────────────────
-        // Keep the active i18n language in lock-step with the persisted
-        // AppConfig value.  Cheap RwLock write, only fires when the value
-        // actually changes (e.g. after a fresh config load on startup or
-        // when the user applies edits).  The settings panel also calls
-        // `i18n::set` directly when the dropdown changes so the new
-        // language applies on the next frame without a reconnect.
+        // Synchronise `i18n::current()` with the persisted `AppConfig`
+        // only when the language actually changes.  We check against a
+        // cached `last_language` to avoid a `read_config` RwLock
+        // acquisition on every frame.
         let cfg_lang = self.state.read_config().language;
-        if crate::ui::i18n::current() != cfg_lang {
+        if self.last_language != cfg_lang {
+            self.last_language = cfg_lang;
             crate::ui::i18n::set(cfg_lang);
         }
 

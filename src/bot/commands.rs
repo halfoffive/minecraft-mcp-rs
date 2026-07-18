@@ -15,6 +15,7 @@ use tracing::{debug, trace, warn};
 use crate::block_data::ItemStack;
 use crate::bot::ops::CompoundOpExecutor;
 use crate::channel::{BotCommandReceiver, BotCommandSender, ReceiverLease};
+use crate::command_validate::clamp_to_i32;
 use crate::error::BotError;
 use crate::state::SharedState;
 use crate::tool_select::find_tool_in_inventory;
@@ -621,9 +622,17 @@ impl<B: BotActions> CommandExecutor<B> {
         match direction_to_vector(dir) {
             Some((dx, dy, dz)) => {
                 let current = self.state.read_snapshot().self_player.position;
-                let d = distance as i32;
-                let target =
-                    BlockPos::new(current.x + dx * d, current.y + dy * d, current.z + dz * d);
+                // Clamp to i32 range so a malicious or malformed `distance`
+                // (u32 > i32::MAX) doesn't silently wrap to a negative
+                // offset, which would make the bot walk in the opposite
+                // direction.  Saturating add guards the coordinate
+                // arithmetic against overflow from extreme inputs.
+                let d = clamp_to_i32(distance);
+                let target = BlockPos::new(
+                    current.x.saturating_add(dx.saturating_mul(d)),
+                    current.y.saturating_add(dy.saturating_mul(d)),
+                    current.z.saturating_add(dz.saturating_mul(d)),
+                );
                 self.bot.goto(&target).await?;
 
                 if !self.state.is_online() {
@@ -714,9 +723,13 @@ impl<B: BotActions> CommandExecutor<B> {
             }
         }
         self.bot.block_interact(&pos);
+        // Strip the internal "slot:N" prefix (if any) from the result
+        // message so the LLM sees a clean block type name rather than
+        // an opaque hotbar index like "Placed slot:3 at ...".
+        let display_type = block_type.strip_prefix("slot:").unwrap_or(&block_type);
         Ok(BotResult {
             success: true,
-            message: format!("Placed {} at {}", block_type, pos),
+            message: format!("Placed {} at {}", display_type, pos),
             data: None,
         })
     }
@@ -1257,24 +1270,26 @@ impl<B: BotActions> CommandExecutor<B> {
             return Ok(BotResult {
                 success: true,
                 message: "No items to collect".into(),
-                data: Some(serde_json::json!({"collected": 0})),
+                data: Some(serde_json::json!({"visited": 0})),
             });
         }
 
-        let mut collected: u32 = 0;
+        let mut visited: u32 = 0;
         for target in item_targets {
             // Walk to the item; auto-pickup occurs on proximity.
             if self.bot.goto(&target).await.is_ok() {
                 // Brief pause for the server to process pickup.
                 sleep(Duration::from_millis(200)).await;
-                collected += 1;
+                visited += 1;
             }
         }
 
         Ok(BotResult {
             success: true,
-            message: format!("Collected {collected} item(s)"),
-            data: Some(serde_json::json!({"collected": collected})),
+            message: format!(
+                "Visited {visited} item drop location(s); auto-pickup expected on proximity"
+            ),
+            data: Some(serde_json::json!({"visited": visited})),
         })
     }
 
