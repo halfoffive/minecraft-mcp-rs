@@ -1,0 +1,51 @@
+# 本文件镜像 .github/workflows/deploy-docs.yml，适配 AtomGit Action 平台语法。
+#
+# 关键差异（与 GitHub 版本不同）：
+# - 不包含 GitHub Pages 部署步骤（AtomGit 静态站点托管不在本 spec 范围，仅构建 VitePress
+#   站点并把产物作为 artifact 上传）。
+# - 部署到 AtomGit Pages（若平台支持）需后续 spec 扩展。
+# - bun 通过 shell 安装（curl -fsSL https://bun.sh/install | bash），不依赖 setup-bun
+#   action；bun 为自包含运行时，可直接执行 bun install 与 bun run docs:build，无需单独安装 Node。
+# - 工作流目录为 .gitcode/workflows/（AtomGit Action 约定）。
+#
+name: Build VitePress site (AtomGit)
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'docs/**'
+      - '.gitcode/workflows/deploy-docs.yml'
+  workflow_dispatch:
+
+permissions:
+  repository: read
+
+# 并发控制：排队，不取消正在运行的构建。
+# AtomGit exceed-action 仅支持 IGNORE / QUEUE（不支持 CANCEL），
+# 此处用 QUEUE 等价 GitHub 原版的 cancel-in-progress: false。
+concurrency:
+  enable: true
+  max: 1
+  exceed-action: QUEUE
+
+jobs:
+  build:
+    runs-on: [ubuntu-24, x64, small]
+    steps:
+      - name: Checkout
+        uses: checkout
+        with:
+          fetch-depth: 0 # 若未启用 lastUpdated 则非必需，保留以与原版一致
+      - name: Install bun, dependencies and build with VitePress
+        shell: bash
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          export PATH="$HOME/.bun/bin:$PATH"
+          bun install
+          bun run docs:build
+      - name: Upload artifact
+        uses: upload-artifact
+        with:
+          name: vitepress-site
+          path: docs/.vitepress/dist

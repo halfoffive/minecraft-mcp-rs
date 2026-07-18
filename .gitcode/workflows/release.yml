@@ -1,0 +1,214 @@
+# AtomGit Action 流水线：镜像 .github/workflows/release.yml
+#
+# 说明：
+# (a) 本文件镜像 GitHub .github/workflows/release.yml 的 v* 标签触发构建 + 打包 + 发布能力，
+#     适配 AtomGit Action 语法（内置 action 不带版本号、三段式 runner 标签、rustup 安装 Rust nightly、
+#     ATOMGIT_* 上下文变量、permissions: repository: write 等）。
+# (b) 矩阵与 .gitcode/workflows/build.yml 一致，共 3 个条目：linux-x86_64、linux-aarch64、windows-x86_64。
+#     macOS-aarch64 与 windows-aarch64 在 AtomGit 平台无托管 runner，需自托管 runner
+#     （runs-on: [self-hosted, ...]），v1 不纳入默认矩阵。
+# (c) Release 发布步骤的 AtomGit release API 端点未在已获取文档中明确，整个 curl 调用以注释模板给出，
+#     需在 AtomGit 平台确认端点与字段后启用。
+# (d) 下载链接 base_url 暂用 https://atomgit.com/<repo>/releases/download/<tag> 占位，
+#     实际 URL 模式需以平台为准。
+# (e) AtomGit Action 工作流目录为 .gitcode/workflows/。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on:
+      - ${{ matrix.runner }}
+      - ${{ matrix.arch }}
+      - small
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24
+            arch: x64
+            label: linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24
+            arch: arm64
+            label: linux-aarch64
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2022
+            arch: x64
+            label: windows-x86_64
+
+    steps:
+      - name: Checkout
+        uses: checkout
+
+      - name: Install Rust nightly
+        shell: bash
+        run: |
+          rustup toolchain install nightly --component rust-src --profile minimal
+          rustup default nightly
+          rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Strip binary
+        if: ${{ runner.os != 'Windows' }}
+        run: strip target/${{ matrix.target }}/release/minecraft-mcp-rs
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/minecraft-mcp-rs.exe" "minecraft-mcp-rs-${{ matrix.label }}.exe"
+          else
+            cp "target/${{ matrix.target }}/release/minecraft-mcp-rs" "minecraft-mcp-rs-${{ matrix.label }}"
+          fi
+
+      - name: Package artifact (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $base = "minecraft-mcp-rs-${{ matrix.label }}"
+          $exe = "${base}.exe"
+
+          # .zip via built-in PowerShell
+          Compress-Archive -Path $exe -DestinationPath "${base}.zip" -Force
+
+          # .7z via 7-Zip (install if not present)
+          $sevenZip = "C:\Program Files\7-Zip\7z.exe"
+          if (-not (Test-Path $sevenZip)) {
+            choco install 7zip -y --no-progress
+          }
+          & $sevenZip a -t7z -mx=9 "${base}.7z" $exe
+
+      - name: Package artifact (Unix)
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        run: |
+          base="minecraft-mcp-rs-${{ matrix.label }}"
+          tar -cJf "${base}.tar.xz" "$base"
+          tar -czf "${base}.tar.gz" "$base"
+
+      - name: Upload artifact
+        uses: upload-artifact
+        with:
+          name: minecraft-mcp-rs-${{ matrix.label }}
+          path: minecraft-mcp-rs-${{ matrix.label }}.*
+
+  lint:
+    name: Lint & Test
+    runs-on: [ubuntu-24, x64, small]
+    steps:
+      - name: Checkout
+        uses: checkout
+
+      - name: Install Rust nightly
+        shell: bash
+        run: |
+          rustup toolchain install nightly --component rust-src,rustfmt,clippy --profile minimal
+          rustup default nightly
+
+      - name: Run tests
+        run: cargo test --locked --all-targets
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+  release:
+    name: Create AtomGit Release
+    needs: [build, lint]
+    runs-on: [ubuntu-24, x64, small]
+    permissions:
+      repository: write
+    steps:
+      - name: Checkout
+        uses: checkout
+
+      - name: Download all artifacts
+        uses: download-artifact
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts for release
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f -exec cp {} release-assets/ \;
+          ls -la release-assets/
+
+      - name: Generate bilingual release notes
+        shell: bash
+        run: |
+          tag="${ATOMGIT_REF##*/}"
+          repo="${ATOMGIT_REPOSITORY}"
+          # 下载链接 base_url 暂用 atomgit.com 占位，实际 URL 模式需以平台为准。
+          base_url="https://atomgit.com/${repo}/releases/download/${tag}"
+
+          cat > release-body.md <<EOF
+          ## Downloads | 下载
+
+          | Platform | Architecture | Format | Download |
+          |----------|--------------|--------|----------|
+          | Windows | x86_64 | zip | [minecraft-mcp-rs-windows-x86_64.zip](${base_url}/minecraft-mcp-rs-windows-x86_64.zip) |
+          | Windows | x86_64 | 7z | [minecraft-mcp-rs-windows-x86_64.7z](${base_url}/minecraft-mcp-rs-windows-x86_64.7z) |
+          | Linux | x86_64 | tar.xz | [minecraft-mcp-rs-linux-x86_64.tar.xz](${base_url}/minecraft-mcp-rs-linux-x86_64.tar.xz) |
+          | Linux | x86_64 | tar.gz | [minecraft-mcp-rs-linux-x86_64.tar.gz](${base_url}/minecraft-mcp-rs-linux-x86_64.tar.gz) |
+          | Linux | aarch64 | tar.xz | [minecraft-mcp-rs-linux-aarch64.tar.xz](${base_url}/minecraft-mcp-rs-linux-aarch64.tar.xz) |
+          | Linux | aarch64 | tar.gz | [minecraft-mcp-rs-linux-aarch64.tar.gz](${base_url}/minecraft-mcp-rs-linux-aarch64.tar.gz) |
+
+          | 平台 | 架构 | 格式 | 下载 |
+          |------|------|------|------|
+          | Windows | x86_64 | zip | [minecraft-mcp-rs-windows-x86_64.zip](${base_url}/minecraft-mcp-rs-windows-x86_64.zip) |
+          | Windows | x86_64 | 7z | [minecraft-mcp-rs-windows-x86_64.7z](${base_url}/minecraft-mcp-rs-windows-x86_64.7z) |
+          | Linux | x86_64 | tar.xz | [minecraft-mcp-rs-linux-x86_64.tar.xz](${base_url}/minecraft-mcp-rs-linux-x86_64.tar.xz) |
+          | Linux | x86_64 | tar.gz | [minecraft-mcp-rs-linux-x86_64.tar.gz](${base_url}/minecraft-mcp-rs-linux-x86_64.tar.gz) |
+          | Linux | aarch64 | tar.xz | [minecraft-mcp-rs-linux-aarch64.tar.xz](${base_url}/minecraft-mcp-rs-linux-aarch64.tar.xz) |
+          | Linux | aarch64 | tar.gz | [minecraft-mcp-rs-linux-aarch64.tar.gz](${base_url}/minecraft-mcp-rs-linux-aarch64.tar.gz) |
+          EOF
+
+          cat release-body.md
+
+      - name: Create Release
+        shell: bash
+        run: |
+          echo "AtomGit release API 端点未确认，以下为模板，需在平台确认后启用。"
+          echo "Release notes 已生成至 release-body.md；资产已就绪于 release-assets/。"
+          echo
+          echo "----- curl 模板开始 -----"
+          cat <<'TEMPLATE'
+          # 以下端点与字段需以 AtomGit 平台为准（参考 https://docs.atomgit.com ）。
+          # 1) 创建 release（响应中的 id / upload_url 用于后续资产上传，字段名以平台为准）：
+          # tag="${ATOMGIT_REF##*/}"
+          # repo="${ATOMGIT_REPOSITORY}"
+          # response=$(curl -sS -X POST \
+          #   -H "Authorization: Bearer ${ATOMGIT_TOKEN}" \
+          #   -H "Content-Type: application/json" \
+          #   -d "{\"tag_name\":\"${tag}\",\"name\":\"${tag}\",\"body\":\"$(cat release-body.md)\",\"draft\":false,\"prerelease\":false}" \
+          #   "https://api.atomgit.com/repos/${repo}/releases")
+          # release_id=$(echo "${response}" | jq -r .id)
+          #
+          # 2) 上传资产（端点与字段需以平台为准）：
+          # for asset in release-assets/*; do
+          #   name=$(basename "${asset}")
+          #   curl -sS -X POST \
+          #     -H "Authorization: Bearer ${ATOMGIT_TOKEN}" \
+          #     -H "Content-Type: application/octet-stream" \
+          #     --data-binary "@${asset}" \
+          #     "https://api.atomgit.com/repos/${repo}/releases/${release_id}/assets?name=${name}"
+          # done
+          TEMPLATE
+          echo "----- curl 模板结束 -----"

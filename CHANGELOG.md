@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **AtomGit Action pipelines:** added `.gitcode/workflows/` with three workflows
+  mirroring the GitHub Actions setup and adapted to AtomGit platform
+  constraints — `build.yml` (dev binary matrix build + lint/test), `release.yml`
+  (`v*`-tag release build + packaging + publish), and `deploy-docs.yml`
+  (VitePress site build, artifact upload only). Platform differences vs GitHub:
+  workflow directory is `.gitcode/workflows/`; built-in actions have no version
+  suffix (`uses: checkout` / `upload-artifact` / `download-artifact`); runner
+  labels are three-segment lists (e.g. `[ubuntu-24, x64, small]`); Rust nightly
+  is installed via `rustup toolchain install nightly`; context vars are
+  `ATOMGIT_*` (`ATOMGIT_REF` / `ATOMGIT_REPOSITORY` / `ATOMGIT_TOKEN`); the
+  matrix covers only `linux-x86_64` / `linux-aarch64` / `windows-x86_64`
+  (AtomGit docs expose no macOS hosted runner and only `windows-2022` x64 —
+  `macos-aarch64` and `windows-aarch64` need self-hosted runners and are out
+  of v1's default matrix); v1 enables no cargo cache (AtomGit cache action
+  name unconfirmed); `concurrency.exceed-action` is `IGNORE` for build and
+  `QUEUE` for deploy-docs (AtomGit supports only IGNORE/QUEUE, no
+  cancel-in-progress equivalent); the release publish step is a commented curl
+  template because the AtomGit release API endpoint is unconfirmed — enable
+  after platform confirmation (download-link `base_url` uses atomgit.com as a
+  placeholder); `deploy-docs.yml` uploads the site as an artifact only (no
+  GitHub Pages / AtomGit Pages deployment). Primary host remains GitHub; the
+  AtomGit pipelines need no real-run verification (per user requirement) and
+  are picked up automatically once the repo is mirrored/hosted on AtomGit.
+
 ### Fixed
 
 - **Ancient debris harvest level:** corrected `ancient_debris` from harvest

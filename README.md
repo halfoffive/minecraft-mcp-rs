@@ -213,6 +213,41 @@ CI and other clones need them on disk to resolve dependencies.
 
 这些目录已提交到 git，并由 `Cargo.toml` 中的 `[patch.crates-io]` 节引用。请勿将它们加入 `.gitignore`；CI 及其他克隆仓库需要这些文件在本地才能正确解析依赖。
 
+## Continuous Integration
+
+The repository ships two parallel CI/CD setups:
+
+- **GitHub Actions** (`.github/workflows/`) — `build.yml`, `release.yml`,
+  `deploy-docs.yml`. This is the primary pipeline.
+- **AtomGit Action** (`.gitcode/workflows/`) — mirrors the three GitHub
+  workflows for AtomGit-hosted mirrors: `build.yml` (dev binary matrix +
+  lint/test), `release.yml` (`v*`-tag release build + packaging), and
+  `deploy-docs.yml` (VitePress site build, artifact upload only).
+
+Platform differences (AtomGit): the build matrix covers only `linux-x86_64` /
+`linux-aarch64` / `windows-x86_64` (no macOS / Windows-arm64 hosted runners);
+Rust nightly is installed via `rustup`; no cargo cache; the release-publish
+step is a commented curl template pending AtomGit release API confirmation;
+`deploy-docs.yml` uploads the site as an artifact (no Pages deployment). The
+primary host remains GitHub; the AtomGit pipelines require no real-run
+verification and are picked up automatically once the repo is mirrored to
+AtomGit.
+
+本仓库提供两套并行的 CI/CD 配置：
+
+- **GitHub Actions**（`.github/workflows/`）—— `build.yml`、`release.yml`、
+  `deploy-docs.yml`，为主流水线。
+- **AtomGit Action**（`.gitcode/workflows/`）—— 镜像上述三个工作流，供 AtomGit
+  托管镜像使用：`build.yml`（dev 二进制矩阵构建 + lint/test）、`release.yml`
+  （`v*` 标签触发的 release 构建与打包）、`deploy-docs.yml`（VitePress 站点构建，
+  仅上传制品）。
+
+平台差异（AtomGit）：构建矩阵仅覆盖 `linux-x86_64` / `linux-aarch64` /
+`windows-x86_64`（无 macOS / Windows-arm64 托管 runner）；通过 `rustup` 安装
+Rust nightly；未启用 cargo 缓存；release 发布步骤为待确认的 curl 模板（注释形式）；
+`deploy-docs.yml` 仅上传站点制品（不做 Pages 部署）。主托管仍为 GitHub，AtomGit
+流水线无需实际运行验证，仓库镜像到 AtomGit 后会被自动识别。
+
 ## Configuration
 
 All settings have sensible defaults and can be changed at runtime through the
