@@ -343,6 +343,8 @@ impl Default for WorldSnapshot {
                 gamemode: GameMode::Survival,
                 held_item_slot: 0,
                 inventory: Vec::new(),
+                position_precise: None,
+                yaw: None,
             },
             timestamp: 0,
             chunk_summary: Vec::new(),
@@ -361,6 +363,19 @@ pub struct InventorySlot {
 }
 
 /// Information about the local player.
+///
+/// `position` is the integer block-position (floored) used throughout the
+/// bot/MCP layer for pathfinding and block lookups. For higher-precision
+/// rendering (e.g. the top-down [`crate::mcp::render::render_topdown`] view),
+/// `position_precise` carries the original floating-point coordinates.
+/// Likewise `yaw` exposes the player's horizontal look direction (radians,
+/// Minecraft convention: 0 = south, +π/2 = west, ±π = north, −π/2 = east),
+/// enabling the renderer to draw a heading arrow at the player's pixel.
+///
+/// Both `position_precise` and `yaw` are `#[serde(skip)]` so the JSON
+/// contract for `SelfPlayer` is unchanged — they are derived fields that
+/// the snapshot updater fills in when the bot is online, and `None`
+/// otherwise (e.g. tests, default construction).
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SelfPlayer {
     pub uuid: String,
@@ -372,6 +387,22 @@ pub struct SelfPlayer {
     pub held_item_slot: u8,
     /// Full player inventory (36 main slots). Empty when not online.
     pub inventory: Vec<InventorySlot>,
+    /// Sub-block-precision position `[x, y, z]` (Minecraft world units).
+    ///
+    /// Populated by [`SnapshotUpdater`](crate::bot::snapshot_updater::SnapshotUpdater)
+    /// from `azalea::entity::Position`. Used by the top-down renderer to
+    /// place the player marker at the correct sub-pixel offset and avoid
+    /// the up-to-1-block truncation bias of `position`.
+    #[serde(skip)]
+    pub position_precise: Option<[f64; 3]>,
+    /// Horizontal look direction in radians (Minecraft convention).
+    ///
+    /// Populated by [`SnapshotUpdater`](crate::bot::snapshot_updater::SnapshotUpdater)
+    /// from `azalea::entity::metadata::Player`. Used by the top-down
+    /// renderer to draw a small heading arrow at the player's pixel so
+    /// multimodal LLMs can tell which way the bot is facing.
+    #[serde(skip)]
+    pub yaw: Option<f32>,
 }
 
 /// A block entry in the world.
@@ -729,6 +760,8 @@ mod tests {
             gamemode: GameMode::Survival,
             held_item_slot: 0,
             inventory: Vec::new(),
+            position_precise: None,
+            yaw: None,
         };
         assert_eq!(player.uuid, "abc-123");
         assert_eq!(player.username, "Steve");
@@ -764,6 +797,8 @@ mod tests {
                 gamemode: GameMode::Survival,
                 held_item_slot: 1,
                 inventory: Vec::new(),
+                position_precise: None,
+                yaw: None,
             },
             timestamp: 1234567890,
             chunk_summary: vec![(0, 0), (1, 0)],

@@ -127,6 +127,29 @@ async fn build_snapshot_inner(
     let local_gamemode = bot.component::<azalea::local_player::LocalGameMode>();
     let profile = bot.profile();
 
+    // Sub-block-precision position. The integer `BlockPos` is used for
+    // pathfinding and block lookups, but the top-down renderer needs the
+    // exact floating-point coordinates to place the player marker at the
+    // correct sub-pixel offset (otherwise the centre can be off by up to
+    // 1 block — see the `position_precise` regression test).
+    let position_precise: [f64; 3] = [position.x, position.y, position.z];
+
+    // Player heading (yaw). Minecraft's yaw convention is:
+    //   0      = facing +Z (south)
+    //   +π/2   = facing -X (west)
+    //   ±π     = facing -Z (north)
+    //   -π/2   = facing +X (east)
+    // The renderer converts yaw to a (dx, dz) screen offset for the
+    // heading arrow.
+    //
+    // `azalea::entity::LookDirection` exposes `y_rot()` which returns the
+    // player's horizontal look angle in radians. It is `None` only briefly
+    // before the first `ClientboundPlayerLookAtPacket` is processed (e.g.
+    // very first tick after spawn).
+    let yaw: Option<f32> = bot
+        .get_component::<azalea::entity::LookDirection>()
+        .map(|look| look.y_rot());
+
     let inventory = read_inventory(bot);
 
     let self_player = SelfPlayer {
@@ -142,6 +165,8 @@ async fn build_snapshot_inner(
         gamemode: azalea_gamemode_to_ours(local_gamemode.current),
         held_item_slot: bot.selected_hotbar_slot(),
         inventory,
+        position_precise: Some(position_precise),
+        yaw,
     };
 
     // ── Read old snapshot ────────────────────────────────────
@@ -206,6 +231,14 @@ async fn build_snapshot_inner(
         // 16 blocks within the chunk, y spans the full build height
         // (-64..320). Only non-air blocks are recorded to avoid bloating
         // the snapshot with empty positions.
+        //
+        // Section-level scan optimisation: a chunk has 24 vertical sections
+        // (16×16×16 = 4096 blocks each). Before scanning a section, we read
+        // its `block_count` (number of non-air blocks) from the chunk's
+        // `sections` array. If `block_count == 0`, the entire section is
+        // air and we skip its 4096 `get_block_state` calls — for typical
+        // surface chunks this skips ~23/24 sections, reducing the per-chunk
+        // scan from 98304 calls to ~4096 (only the surface section).
         for &(chunk_x, chunk_z) in &dirty_chunks {
             let dist = ((chunk_x - player_chunk.0).abs()).max((chunk_z - player_chunk.1).abs());
             if dist > chunk_scan_radius {
@@ -213,22 +246,50 @@ async fn build_snapshot_inner(
             }
             let base_x = chunk_x * 16;
             let base_z = chunk_z * 16;
-            for dx in 0..16i32 {
-                for dy in -64..320i32 {
-                    for dz in 0..16i32 {
-                        let pos = BlockPos::new(base_x + dx, dy, base_z + dz);
-                        let az_pos = azalea::core::position::BlockPos::new(pos.x, pos.y, pos.z);
-                        if let Some(block_state) = world_guard.get_block_state(az_pos) {
-                            if block_state.is_air() {
-                                continue;
-                            }
-                            let block_name = block_state_to_name(block_state);
-                            if block_name != "air" {
-                                new_blocks.push(BlockEntry {
-                                    position: pos,
-                                    block_type: block_name,
-                                    block_state: None,
-                                });
+
+            // Build the list of section indices to scan. We hold the
+            // chunk's read lock just long enough to read each section's
+            // `block_count`, then release before the per-block scan
+            // (which acquires its own lock through `world.get_block_state`).
+            let chunk_pos = azalea::core::position::ChunkPos::new(chunk_x, chunk_z);
+            let sections_to_scan: Vec<usize> =
+                if let Some(chunk_arc) = world_guard.chunks.get(&chunk_pos) {
+                    let chunk_guard = chunk_arc.read();
+                    chunk_guard
+                        .sections
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| s.block_count > 0)
+                        .map(|(i, _)| i)
+                        .collect()
+                } else {
+                    // Chunk not loaded (shouldn't happen for a dirty chunk,
+                    // but be defensive): fall back to scanning all 24
+                    // sections so we don't silently drop blocks.
+                    (0..24).collect()
+                };
+
+            for section_idx in sections_to_scan {
+                // Section 0 covers y=-64..-48, section 1 covers y=-48..-32,
+                // ..., section 23 covers y=304..320.
+                let section_min_y = -64 + (section_idx as i32) * 16;
+                for dx in 0..16i32 {
+                    for dy in 0..16i32 {
+                        for dz in 0..16i32 {
+                            let pos = BlockPos::new(base_x + dx, section_min_y + dy, base_z + dz);
+                            let az_pos = azalea::core::position::BlockPos::new(pos.x, pos.y, pos.z);
+                            if let Some(block_state) = world_guard.get_block_state(az_pos) {
+                                if block_state.is_air() {
+                                    continue;
+                                }
+                                let block_name = block_state_to_name(block_state);
+                                if block_name != "air" {
+                                    new_blocks.push(BlockEntry {
+                                        position: pos,
+                                        block_type: block_name,
+                                        block_state: None,
+                                    });
+                                }
                             }
                         }
                     }

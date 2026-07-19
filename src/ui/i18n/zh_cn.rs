@@ -116,6 +116,12 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::LangEn => "English",
         TextKey::LangZhCn => "简体中文",
 
+        // ── World view preview panel ───────────────────────────────────
+        TextKey::Preview => "世界视图预览",
+        TextKey::WorldView => "世界视图：",
+        TextKey::Refresh => "刷新",
+        TextKey::WorldViewPlaceholder => "暂无缓存的截图 — 点击「刷新」渲染当前快照。",
+
         // ── Catch-all: never panic, surface the variant name ───────────
         _ => super::key_name(key),
     }

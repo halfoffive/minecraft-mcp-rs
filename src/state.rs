@@ -92,6 +92,41 @@ pub enum McpServerStatus {
 }
 
 // ---------------------------------------------------------------------------
+// WorldViewCache — caches the last get_world_view PNG response
+// ---------------------------------------------------------------------------
+
+/// Cached `get_world_view` response so identical re-renders return instantly.
+///
+/// Stored in [`SharedState::last_world_view`] behind a `Mutex`. The MCP
+/// `get_world_view` tool checks this before re-rendering: if
+/// `snapshot_timestamp`, `radius`, and `scale` all match the current
+/// request, the cached PNG bytes are returned without invoking
+/// [`render_topdown`](crate::mcp::render::render_topdown) again.
+///
+/// Only one entry is cached (overwritten on each fresh render), keeping
+/// memory bounded — the typical 65×65 PNG is ~3 KB so even at `scale=8`
+/// (520×520) the cache never exceeds a few hundred KB.
+#[derive(Debug, Clone)]
+pub struct WorldViewCache {
+    /// `WorldSnapshot::timestamp` of the snapshot the PNG was rendered from.
+    /// If the snapshot's timestamp changes (a new tick updated the world),
+    /// the cache is invalidated.
+    pub snapshot_timestamp: u64,
+    /// Half-extent of the cached render. Must match the request's `radius`.
+    pub radius: u8,
+    /// Pixel-per-block scale of the cached render (1/2/4/8). Must match the
+    /// request's `scale`.
+    pub scale: u8,
+    /// Base64-encoded PNG bytes ready to embed in MCP `Content::Image`.
+    pub png_base64: String,
+    /// Optional JSON annotation payload embedded alongside the image in a
+    /// multi-content response (centre coords, radius, scale, yaw,
+    /// timestamp). Stored so a cache hit can return both image + text
+    /// without re-running the renderer.
+    pub annotation_json: String,
+}
+
+// ---------------------------------------------------------------------------
 // SharedState
 // ---------------------------------------------------------------------------
 
@@ -165,6 +200,13 @@ pub struct SharedState {
     /// both the event handler (on the ECS thread) and the command executor
     /// (on the LocalSet) need to access it.
     goto_notify: Arc<Notify>,
+    /// Cached `get_world_view` PNG response (single-entry, overwrite on miss).
+    ///
+    /// See [`WorldViewCache`] for the cache-key semantics. Stored behind a
+    /// `Mutex` because writers (the MCP `get_world_view` tool on the MCP
+    /// thread) and readers (the UI preview panel on the egui thread) run on
+    /// different threads.
+    last_world_view: Mutex<Option<WorldViewCache>>,
 }
 
 impl SharedState {
@@ -185,6 +227,8 @@ impl SharedState {
                 gamemode: crate::types::GameMode::Survival,
                 held_item_slot: 0,
                 inventory: Vec::new(),
+                position_precise: None,
+                yaw: None,
             },
             timestamp: 0,
             chunk_summary: vec![],
@@ -207,6 +251,7 @@ impl SharedState {
             shutdown_token: Mutex::new(CancellationToken::new()),
             bot_ecs: Mutex::new(None),
             goto_notify: Arc::new(Notify::new()),
+            last_world_view: Mutex::new(None),
         }
     }
 
@@ -564,6 +609,51 @@ impl SharedState {
     pub fn goto_notify(&self) -> Arc<Notify> {
         Arc::clone(&self.goto_notify)
     }
+
+    // ── World view cache ──────────────────────────────────────────────────
+
+    /// Read the cached `get_world_view` response (if any).
+    ///
+    /// Returns a clone of the cached [`WorldViewCache`]. Callers compare
+    /// `snapshot_timestamp`, `radius`, and `scale` against the current
+    /// request to decide whether the cache is still valid.
+    ///
+    /// Returns `None` when no render has been cached yet (e.g. before the
+    /// first `get_world_view` call, or after [`clear_world_view_cache`]
+    /// was invoked).
+    pub fn get_world_view_cache(&self) -> Option<WorldViewCache> {
+        let guard = self
+            .last_world_view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.clone()
+    }
+
+    /// Store a freshly-rendered `get_world_view` response, overwriting any
+    /// previous cache entry.
+    ///
+    /// The cache holds exactly one entry (the most recent render) so memory
+    /// stays bounded — a 65×65 PNG at `scale=8` is at most a few hundred KB.
+    pub fn set_world_view_cache(&self, cache: WorldViewCache) {
+        let mut guard = self
+            .last_world_view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some(cache);
+    }
+
+    /// Clear the cached `get_world_view` response.
+    ///
+    /// Called when the bot goes offline (so the UI preview panel doesn't
+    /// keep showing a stale render after disconnect) or when the user
+    /// explicitly requests a refresh.
+    pub fn clear_world_view_cache(&self) {
+        let mut guard = self
+            .last_world_view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = None;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +725,8 @@ mod tests {
                 gamemode: crate::types::GameMode::Survival,
                 held_item_slot: 0,
                 inventory: Vec::new(),
+                position_precise: None,
+                yaw: None,
             },
             timestamp: 42,
             chunk_summary: vec![(0, 0)],
@@ -698,6 +790,8 @@ mod tests {
                         gamemode: crate::types::GameMode::Survival,
                         held_item_slot: 0,
                         inventory: Vec::new(),
+                        position_precise: None,
+                        yaw: None,
                     },
                     timestamp: i,
                     chunk_summary: vec![],
@@ -742,6 +836,8 @@ mod tests {
                 gamemode: crate::types::GameMode::Survival,
                 held_item_slot: 0,
                 inventory: Vec::new(),
+                position_precise: None,
+                yaw: None,
             },
             timestamp: 1,
             chunk_summary: vec![],
@@ -785,6 +881,8 @@ mod tests {
                 gamemode: crate::types::GameMode::Survival,
                 held_item_slot: 0,
                 inventory: Vec::new(),
+                position_precise: None,
+                yaw: None,
             },
             timestamp: 1,
             chunk_summary: vec![],

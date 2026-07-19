@@ -33,11 +33,28 @@ pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
     // ── Last Error ────────────────────────────────────────────────────
     // Display a prominent red banner if the bot/MCP layer has reported an
     // error.  When there is no error, nothing is rendered (no empty row).
+    // The "×" button next to the message lets the user dismiss the banner
+    // without restarting the app — useful when the error has been
+    // acknowledged and the user wants to see the rest of the status panel
+    // without the banner taking up space.
     if let Some(msg) = state.last_error() {
-        ui.colored_label(
-            egui::Color32::RED,
-            format!("{} {}", i18n::tr(TextKey::Error), msg),
-        );
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                egui::Color32::RED,
+                format!("{} {}", i18n::tr(TextKey::Error), msg),
+            );
+            // Dismiss button — a small "×" styled as a button. Clicking
+            // clears `last_error` so the banner disappears on the next
+            // frame. We use a Button with no background to keep the row
+            // compact.
+            let dismiss = egui::Button::new("×")
+                .small()
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::NONE);
+            if ui.add(dismiss).clicked() {
+                state.clear_last_error();
+            }
+        });
         ui.separator();
     }
 
@@ -47,6 +64,12 @@ pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
         ui.label(i18n::tr(TextKey::Connection));
         if is_online {
             ui.colored_label(egui::Color32::GREEN, i18n::tr(TextKey::Online));
+        } else if state.is_connecting() {
+            // Connecting state: show a spinner next to the "Connecting…"
+            // label so the user can see the app is actively trying to
+            // connect (rather than just stuck on a static label).
+            ui.add(egui::Spinner::new());
+            ui.colored_label(egui::Color32::YELLOW, i18n::tr(TextKey::Connecting));
         } else {
             ui.colored_label(egui::Color32::RED, i18n::tr(TextKey::Offline));
         }

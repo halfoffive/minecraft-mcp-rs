@@ -20,3 +20,6 @@ rustc-ice-*.txt
 node_modules/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+
+# WorkBuddy agent workspace (memory, skills, tmp scripts)
+.workbuddy/
