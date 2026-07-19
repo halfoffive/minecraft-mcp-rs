@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`SelfPlayer::position_precise` and `yaw` fields:** sub-block-precision
+  player position (`[f64; 3]`) and horizontal look direction (`f32`, via
+  `azalea::entity::LookDirection::y_rot()`). Both `#[serde(skip)]` so the
+  JSON contract is unchanged. Populated by `SnapshotUpdater` for use by
+  the top-down renderer.
+- **World view cache:** `SharedState` gains `WorldViewCache` with
+  `get_world_view_cache()` / `set_world_view_cache()` /
+  `clear_world_view_cache()` accessors. Cache key is
+  `(snapshot_timestamp, radius, scale)`. Single-entry, bounded memory.
+- **Enhanced top-down renderer:** `render_topdown_enhanced` supports
+  `scale` (1/2/4/8 pixels per block), Y-axis brightness modulation
+  (higher blocks → brighter), sub-block-precision centre via
+  `position_precise`, and a yaw heading arrow at the player marker.
+- **`get_world_view` multi-content response:** now returns
+  `[image, text-annotation]` — the JSON annotation includes centre
+  coords, radius, scale, yaw, and timestamp. Added `scale` parameter
+  to `GetWorldViewInput`.
+- **Section-level chunk scanning:** `SnapshotUpdater` scans dirty chunks
+  section by section (16×16×16), skipping entirely-air sections via
+  `section.block_count == 0`. Reduces per-chunk `get_block_state` calls
+  from 98304 to ~4096 for typical surface chunks.
+- **UI error dismiss button:** red error banner in the status panel now
+  has a "×" button that clears `last_error`.
+- **UI connecting spinner:** an `egui::Spinner` appears next to the
+  "Connecting…" label when the bot is in a connection attempt.
+- **UI world-view preview panel:** a new collapsing section after Status
+  shows the cached `get_world_view` PNG (decoded to an egui texture).
+  Includes a "Refresh" button that clears the cache and re-renders at
+  `radius=8, scale=2`.
+- **`WorldViewCache` struct and accessors:** for caching the most recent
+  `get_world_view` response. Stored in `SharedState::last_world_view`.
+- **`rmcp` patch:** added `impl IntoContents for Vec<Content>` so the
+  `#[tool]` macro accepts `Vec<Content>` return types for multi-content
+  MCP tool responses.
+
+### Changed
+
+- `color_map` in `render.rs` expanded: added planks, glass, wool,
+  concrete, terracotta, glazed terracotta, bricks, plants, functional
+  blocks, nether, end, and containers. Over 400 new block-type mappings.
+- `render_topdown` background changed from transparent (alpha=0) to
+  opaque sky-blue (alpha=255 everywhere), fixing rendering quirks on
+  MCP clients that display black for alpha=0 pixels.
+- Block lookup in `render_topdown` uses a flat `Vec<Option<...>>`
+  indexed by `px * size + py` instead of the previous `HashMap`,
+  eliminating per-block hashing overhead on large snapshots (5000+
+  blocks).
+- `get_world_view` in `server.rs` now passes `input.scale` to the
+  renderer and returns `Vec<Content>`.
+
 ## [1.0.5] - 2026-07-19
 
 ### Added

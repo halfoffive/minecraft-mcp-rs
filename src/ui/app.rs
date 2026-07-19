@@ -25,7 +25,7 @@ use crate::channel::{BotCommandReceiver, BotCommandSender};
 use crate::config::{AppConfig, McpTransport};
 use crate::state::SharedState;
 use crate::ui::i18n::Language;
-use crate::ui::{mcp_config, settings, status};
+use crate::ui::{mcp_config, preview, settings, status};
 
 /// Join a [`JoinHandle`] on a background OS thread, bounded by `timeout`.
 ///
@@ -110,6 +110,13 @@ pub struct MinecraftApp {
     /// Cached language from the last frame; lets us avoid a per-frame
     /// `read_config` acquisition just to synchronise `i18n::current()`.
     last_language: Language,
+    /// Texture handle for the world-view preview panel. Persisted across
+    /// frames so we don't re-upload the same PNG every redraw.
+    preview_texture: Option<egui::TextureHandle>,
+    /// Cached annotation JSON from the last preview render. When the cached
+    /// PNG's annotation differs, we rebuild the texture; otherwise we reuse
+    /// it (saves a base64 decode + PNG decode every frame).
+    preview_last_annotation: Option<String>,
 }
 
 /// Mutable copy of every [`AppConfig`] field for the settings panel.
@@ -218,6 +225,8 @@ impl MinecraftApp {
             mcp_handle: Some(mcp_handle),
             edit_config: None,
             last_language: initial_lang,
+            preview_texture: None,
+            preview_last_annotation: None,
         }
     }
 
@@ -410,6 +419,18 @@ impl App for MinecraftApp {
                     crate::ui::i18n::tr(crate::ui::i18n::TextKey::Status),
                     |ui| {
                         status::status_panel(ui, &self.state);
+                    },
+                );
+
+                ui.collapsing(
+                    crate::ui::i18n::tr(crate::ui::i18n::TextKey::Preview),
+                    |ui| {
+                        preview::preview_panel(
+                            ui,
+                            &self.state,
+                            &mut self.preview_texture,
+                            &mut self.preview_last_annotation,
+                        );
                     },
                 );
 

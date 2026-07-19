@@ -1735,6 +1735,8 @@ mod tests {
                 gamemode: GameMode::Survival,
                 held_item_slot: 0,
                 inventory: Vec::new(),
+                position_precise: None,
+                yaw: None,
             },
             timestamp: 1,
             chunk_summary: vec![(0, 0), (1, 0)],

@@ -247,6 +247,17 @@ pub enum TextKey {
     LangEn,
     /// "简体中文" selectable value.
     LangZhCn,
+
+    // ── World view preview panel ────────────────────────────────────
+    /// "World View Preview" collapsible panel header.
+    Preview,
+    /// "World View:" label inside the preview panel.
+    WorldView,
+    /// "Refresh" button label inside the preview panel.
+    Refresh,
+    /// Placeholder shown when no render is cached yet.
+    /// "No render cached yet — click Refresh to render the current snapshot."
+    WorldViewPlaceholder,
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -374,6 +385,10 @@ pub fn key_name(key: TextKey) -> &'static str {
         TextKey::Language => "Language",
         TextKey::LangEn => "LangEn",
         TextKey::LangZhCn => "LangZhCn",
+        TextKey::Preview => "Preview",
+        TextKey::WorldView => "WorldView",
+        TextKey::Refresh => "Refresh",
+        TextKey::WorldViewPlaceholder => "WorldViewPlaceholder",
     }
 }
 

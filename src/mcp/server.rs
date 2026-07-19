@@ -143,14 +143,14 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Renders a top-down PNG image of nearby blocks and entities. Returns base64 PNG for multimodal models. Radius 1-32.",
+        description = "Renders a top-down PNG image of nearby blocks and entities for multimodal models. Returns [image, text-annotation] contents: the image is a base64 PNG, the text is a JSON object with centre coords, radius, scale, yaw, and timestamp. Radius 1-32, scale 1/2/4/8 (pixels per block).",
         annotations(read_only_hint = true)
     )]
     async fn get_world_view(
         &self,
         Parameters(input): Parameters<GetWorldViewInput>,
-    ) -> Result<rmcp::model::Content, BotError> {
-        crate::mcp::tools_query::get_world_view(&self.state, input.radius)
+    ) -> Result<Vec<rmcp::model::Content>, BotError> {
+        crate::mcp::tools_query::get_world_view(&self.state, input.radius, input.scale)
     }
 
     // ── Movement tools ───────────────────────────────────────

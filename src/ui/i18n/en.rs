@@ -118,6 +118,14 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::LangEn => "English",
         TextKey::LangZhCn => "简体中文",
 
+        // ── World view preview panel ───────────────────────────────────
+        TextKey::Preview => "World View Preview",
+        TextKey::WorldView => "World View:",
+        TextKey::Refresh => "Refresh",
+        TextKey::WorldViewPlaceholder => {
+            "No render cached yet — click Refresh to render the current snapshot."
+        }
+
         // ── Catch-all: never panic, surface the variant name ───────────
         _ => super::key_name(key),
     }

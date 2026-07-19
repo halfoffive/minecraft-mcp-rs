@@ -248,6 +248,8 @@ mod tests {
                 gamemode: GameMode::Survival,
                 held_item_slot: 0,
                 inventory: Vec::new(),
+                position_precise: None,
+                yaw: None,
             },
             timestamp: 0,
             chunk_summary: vec![(0, 0)],
@@ -469,6 +471,8 @@ mod tests {
             gamemode: GameMode::Creative,
             held_item_slot: 3,
             inventory: Vec::new(),
+            position_precise: None,
+            yaw: None,
         };
         let new = SnapshotBuilder::new(old)
             .with_self_player(new_player.clone())

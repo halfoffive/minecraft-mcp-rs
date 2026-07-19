@@ -208,36 +208,139 @@ pub fn get_server_info(state: &Arc<SharedState>) -> Result<String, BotError> {
 #[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct GetWorldViewInput {
     /// Half-extent of the top-down view in blocks (1-32). The rendered image
-    /// is (2*radius+1) x (2*radius+1) pixels.
+    /// is `(2*radius+1) x (2*radius+1)` blocks.
     #[schemars(range(min = 1, max = 32))]
     pub radius: u8,
+    /// Pixels per block (1/2/4/8). Higher values produce a larger image
+    /// for multimodal LLMs that prefer higher-resolution input. `0` and
+    /// unsupported values fall back to `1` (legacy 1-pixel-per-block
+    /// render). Defaults to `1` so existing clients see no change.
+    ///
+    /// The image dimensions are `(2*radius+1) * scale` per side — for
+    /// example `radius=8, scale=4` produces a `68 * 4 = 272x272` PNG.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 8))]
+    pub scale: u8,
 }
 
 /// Render a top-down PNG of the world around the bot and return it as MCP
-/// image content.
+/// multi-content (image + text annotation).
 ///
-/// Validates `radius` is in `1..=32`, checks online status, renders the
-/// snapshot via [`crate::mcp::render::render_topdown`], base64-encodes the
-/// PNG bytes, and wraps them in `Content::Image` with `mime_type: "image/png"`.
-/// On error, returns a [`BotError`] so rmcp can convert it to a standard MCP
-/// error response.
+/// The response is a `Vec<Content>` containing:
+///
+/// 1. The PNG image as base64 (`Content::Image`, mime `image/png`).
+/// 2. A text annotation (`Content::Text`) with JSON metadata: centre
+///    coordinates, radius, scale, yaw (if known), and snapshot timestamp.
+///    Multimodal LLMs can read this side-by-side with the image to anchor
+///    pixel coordinates back to world coordinates.
+///
+/// ## Caching
+///
+/// Before re-rendering, the function checks
+/// [`SharedState::get_world_view_cache`]. If the cached entry's
+/// `snapshot_timestamp`, `radius`, and `scale` all match the current
+/// request, the cached PNG + annotation are returned without invoking
+/// [`render_topdown_enhanced`](crate::mcp::render::render_topdown_enhanced)
+/// again. This makes repeated `get_world_view` calls between snapshot
+/// ticks effectively free.
+///
+/// Validates `radius` is in `1..=32` and the bot is online; on error
+/// returns a [`BotError`] so rmcp converts it to a standard MCP error
+/// response.
 pub fn get_world_view(
     state: &Arc<SharedState>,
     radius: u8,
-) -> Result<rmcp::model::Content, BotError> {
+    scale: u8,
+) -> Result<Vec<rmcp::model::Content>, BotError> {
     if !(1..=32).contains(&radius) {
         return Err(BotError::InvalidParams(format!(
             "radius must be 1-32, got {radius}"
         )));
     }
+    // scale is clamped inside render_topdown_enhanced; we don't reject
+    // out-of-range values here, just fall back to 1 (so existing clients
+    // passing `scale=0` or omitting it entirely get the legacy behaviour).
     if !state.is_online() {
         return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
 
+    // Clamp scale to a supported value (1/2/4/8). Invalid inputs fall
+    // back to 1 so the annotation JSON accurately reflects what was
+    // rendered — clients reading `scale: 0` would otherwise mis-render.
+    let scale = if crate::mcp::render::VALID_SCALES.contains(&scale) {
+        scale
+    } else {
+        crate::mcp::render::DEFAULT_SCALE
+    };
+
     let snapshot = state.read_snapshot();
-    let png_bytes = crate::mcp::render::render_topdown(&snapshot, radius)?;
+    let snapshot_ts = snapshot.timestamp;
+
+    // Cache hit: same timestamp + radius + scale → return cached bytes.
+    if let Some(cache) = state.get_world_view_cache()
+        && cache.snapshot_timestamp == snapshot_ts
+        && cache.radius == radius
+        && cache.scale == scale
+    {
+        tracing::trace!(
+            snapshot_ts,
+            radius,
+            scale,
+            "get_world_view cache hit — returning cached PNG"
+        );
+        return Ok(vec![
+            rmcp::model::Content::image(cache.png_base64, "image/png"),
+            rmcp::model::Content::text(cache.annotation_json.clone()),
+        ]);
+    }
+
+    // Cache miss: re-render.
+    tracing::debug!(
+        snapshot_ts,
+        radius,
+        scale,
+        "get_world_view cache miss — re-rendering"
+    );
+    let png_bytes = crate::mcp::render::render_topdown_enhanced(&snapshot, radius, scale)?;
     let encoded = crate::mcp::render::base64_encode(&png_bytes);
-    Ok(rmcp::model::Content::image(encoded, "image/png"))
+
+    // Build the JSON annotation. Carries enough metadata for a multimodal
+    // LLM to anchor pixel coords back to world coords (centre, radius,
+    // scale) and to know which way the bot is facing (yaw).
+    let (center_x, center_y, center_z) = snapshot
+        .self_player
+        .position_precise
+        .map(|p| (p[0], p[1], p[2]))
+        .unwrap_or((
+            snapshot.self_player.position.x as f64,
+            snapshot.self_player.position.y as f64,
+            snapshot.self_player.position.z as f64,
+        ));
+    let annotation = serde_json::json!({
+        "center": [center_x, center_y, center_z],
+        "radius": radius,
+        "scale": scale,
+        "yaw": snapshot.self_player.yaw,
+        "snapshot_timestamp": snapshot_ts,
+        "image_size": ((2 * radius as u32 + 1) * scale.max(1) as u32),
+        "block_count": snapshot.blocks.len(),
+        "entity_count": snapshot.entities.len(),
+    });
+    let annotation_json = annotation.to_string();
+
+    // Store in cache for the next call.
+    state.set_world_view_cache(crate::state::WorldViewCache {
+        snapshot_timestamp: snapshot_ts,
+        radius,
+        scale,
+        png_base64: encoded.clone(),
+        annotation_json: annotation_json.clone(),
+    });
+
+    Ok(vec![
+        rmcp::model::Content::image(encoded, "image/png"),
+        rmcp::model::Content::text(annotation_json),
+    ])
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +419,8 @@ mod tests {
                         count: 64,
                     },
                 ],
+                position_precise: None,
+                yaw: None,
             },
             timestamp: 42,
             chunk_summary: vec![(0, 0), (-1, 0)],
@@ -515,17 +620,22 @@ mod tests {
 
     // -- get_world_view --------------------------------------------------------
 
-    /// Verify that `Content::Image` is returned for a valid online call.
+    /// Verify that the multi-content response `[image, text]` is returned
+    /// for a valid online call.
     #[test]
-    fn test_get_world_view_online_returns_image() {
+    fn test_get_world_view_online_returns_image_and_text() {
         let state = state_with_snapshot();
-        let content = get_world_view(&state, 4).unwrap();
-        let raw = content.raw;
-        match raw {
+        let contents = get_world_view(&state, 4, 1).unwrap();
+        assert_eq!(
+            contents.len(),
+            2,
+            "response should contain [image, text-annotation]"
+        );
+        // First content: image.
+        match &contents[0].raw {
             rmcp::model::RawContent::Image(img) => {
                 assert_eq!(img.mime_type, "image/png");
                 assert!(!img.data.is_empty(), "base64 data should be non-empty");
-                // The decoded bytes should start with the PNG magic header.
                 let decoded = base64::engine::general_purpose::STANDARD
                     .decode(&img.data)
                     .expect("base64 decode");
@@ -537,26 +647,41 @@ mod tests {
             }
             other => panic!("expected Image content, got: {other:?}"),
         }
+        // Second content: text annotation (JSON).
+        match &contents[1].raw {
+            rmcp::model::RawContent::Text(text) => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&text.text).expect("annotation should be valid JSON");
+                assert_eq!(parsed["radius"], 4);
+                assert_eq!(parsed["scale"], 1);
+                assert!(
+                    parsed["center"].is_array(),
+                    "annotation should include centre"
+                );
+                assert!(parsed["snapshot_timestamp"].is_u64());
+            }
+            other => panic!("expected Text content, got: {other:?}"),
+        }
     }
 
     #[test]
     fn test_get_world_view_offline_returns_error() {
         let state = offline_state();
-        let result = get_world_view(&state, 4);
+        let result = get_world_view(&state, 4, 1);
         assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[test]
     fn test_get_world_view_invalid_radius_zero() {
         let state = state_with_snapshot();
-        let result = get_world_view(&state, 0);
+        let result = get_world_view(&state, 0, 1);
         assert!(matches!(result, Err(BotError::InvalidParams(_))));
     }
 
     #[test]
     fn test_get_world_view_invalid_radius_too_large() {
         let state = state_with_snapshot();
-        let result = get_world_view(&state, 33);
+        let result = get_world_view(&state, 33, 1);
         assert!(matches!(result, Err(BotError::InvalidParams(_))));
     }
 
@@ -565,12 +690,148 @@ mod tests {
         let state = state_with_snapshot();
         // radius = 1 and radius = 32 should both succeed.
         for radius in [1u8, 32] {
-            let content = get_world_view(&state, radius).unwrap();
+            let contents = get_world_view(&state, radius, 1).unwrap();
             assert!(
-                matches!(content.raw, rmcp::model::RawContent::Image(_)),
+                matches!(contents[0].raw, rmcp::model::RawContent::Image(_)),
                 "radius {radius} should produce image content"
             );
         }
+    }
+
+    /// Different scale values should all succeed and produce valid image
+    /// content. Scale 8 produces a much larger PNG than scale 1.
+    #[test]
+    fn test_get_world_view_scale_values() {
+        let state = state_with_snapshot();
+        for scale in [1u8, 2, 4, 8] {
+            let contents = get_world_view(&state, 4, scale).unwrap();
+            match &contents[0].raw {
+                rmcp::model::RawContent::Image(img) => {
+                    let decoded = base64::engine::general_purpose::STANDARD
+                        .decode(&img.data)
+                        .expect("base64 decode");
+                    assert!(
+                        decoded.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+                        "scale {scale} should produce a valid PNG"
+                    );
+                }
+                other => panic!("scale {scale}: expected Image content, got: {other:?}"),
+            }
+        }
+    }
+
+    /// Invalid scale values (0, 3, 5, 9) should fall back to scale=1
+    /// rather than erroring — the schema advertises 1-8 but the renderer
+    /// clamps gracefully to keep clients from breaking.
+    #[test]
+    fn test_get_world_view_invalid_scale_falls_back_to_1() {
+        let state = state_with_snapshot();
+        for invalid_scale in [0u8, 3, 5, 9, 100, 255] {
+            let contents = get_world_view(&state, 2, invalid_scale).unwrap();
+            // Annotation should report scale=1 (the fallback).
+            match &contents[1].raw {
+                rmcp::model::RawContent::Text(text) => {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&text.text).expect("valid JSON");
+                    assert_eq!(
+                        parsed["scale"], 1,
+                        "invalid scale {invalid_scale} should fall back to 1"
+                    );
+                }
+                other => panic!("expected Text content, got: {other:?}"),
+            }
+        }
+    }
+
+    /// Two consecutive calls with the same snapshot timestamp + radius +
+    /// scale should hit the cache — the second call returns the cached
+    /// bytes without re-rendering. We verify this by checking that the
+    /// annotation JSON contains the same snapshot_timestamp on both calls.
+    #[test]
+    fn test_get_world_view_cache_hit_on_repeat_call() {
+        let state = state_with_snapshot();
+        let first = get_world_view(&state, 4, 1).unwrap();
+        let second = get_world_view(&state, 4, 1).unwrap();
+        // Both should return 2-element [image, text] responses.
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        // Annotation timestamps should match (same snapshot).
+        let first_ts = match &first[1].raw {
+            rmcp::model::RawContent::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t.text).unwrap();
+                v["snapshot_timestamp"].as_u64().unwrap()
+            }
+            _ => panic!("expected text"),
+        };
+        let second_ts = match &second[1].raw {
+            rmcp::model::RawContent::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t.text).unwrap();
+                v["snapshot_timestamp"].as_u64().unwrap()
+            }
+            _ => panic!("expected text"),
+        };
+        assert_eq!(
+            first_ts, second_ts,
+            "cache hit should return same timestamp"
+        );
+    }
+
+    /// A snapshot update (new timestamp) should invalidate the cache —
+    /// the second call should re-render with the new timestamp.
+    #[test]
+    fn test_get_world_view_cache_invalidates_on_snapshot_update() {
+        let state = state_with_snapshot();
+        let first = get_world_view(&state, 4, 1).unwrap();
+        let first_ts = match &first[1].raw {
+            rmcp::model::RawContent::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t.text).unwrap();
+                v["snapshot_timestamp"].as_u64().unwrap()
+            }
+            _ => panic!("expected text"),
+        };
+
+        // Update the snapshot with a new timestamp.
+        let mut snap = state.read_snapshot().as_ref().clone();
+        snap.timestamp = first_ts + 1;
+        state.update_snapshot(snap);
+
+        let second = get_world_view(&state, 4, 1).unwrap();
+        let second_ts = match &second[1].raw {
+            rmcp::model::RawContent::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t.text).unwrap();
+                v["snapshot_timestamp"].as_u64().unwrap()
+            }
+            _ => panic!("expected text"),
+        };
+        assert_ne!(
+            first_ts, second_ts,
+            "snapshot update should invalidate cache"
+        );
+    }
+
+    /// A change in radius or scale should also invalidate the cache.
+    #[test]
+    fn test_get_world_view_cache_invalidates_on_radius_change() {
+        let state = state_with_snapshot();
+        let first = get_world_view(&state, 4, 1).unwrap();
+        let second = get_world_view(&state, 8, 1).unwrap();
+        let first_r = match &first[1].raw {
+            rmcp::model::RawContent::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t.text).unwrap();
+                v["radius"].as_u64().unwrap()
+            }
+            _ => panic!("expected text"),
+        };
+        let second_r = match &second[1].raw {
+            rmcp::model::RawContent::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t.text).unwrap();
+                v["radius"].as_u64().unwrap()
+            }
+            _ => panic!("expected text"),
+        };
+        assert_ne!(first_r, second_r, "radius change should re-render");
+        assert_eq!(first_r, 4);
+        assert_eq!(second_r, 8);
     }
 
     // ── clamp_to_i32 (P0-#1) ───────────────────────────────────────

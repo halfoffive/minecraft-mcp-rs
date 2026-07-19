@@ -285,6 +285,18 @@ impl IntoContents for Content {
     }
 }
 
+/// Allow tool handlers to return a `Vec<Content>` for multi-content
+/// responses (e.g. an image plus a text annotation alongside it).
+///
+/// Without this impl, `#[tool]`-annotated async fns can only return a
+/// single `Content` (or `String`). With it, the macro happily accepts
+/// `Vec<Content>` and forwards the entire list to `CallToolResult`.
+impl IntoContents for Vec<Content> {
+    fn into_contents(self) -> Vec<Content> {
+        self
+    }
+}
+
 impl IntoContents for String {
     fn into_contents(self) -> Vec<Content> {
         vec![Content::text(self)]
