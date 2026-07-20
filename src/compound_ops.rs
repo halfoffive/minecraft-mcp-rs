@@ -103,7 +103,7 @@ pub fn find_standable_neighbor(
     snapshot: &crate::types::WorldSnapshot,
     target: crate::types::BlockPos,
 ) -> Option<crate::types::BlockPos> {
-    // Check 8 horizontal neighbours at 3 Y levels (y-1, y, y+1).
+    // Check 8 horizontal neighbours at 3 Y levels (same Y, y+1, y-1).
     // Priority: same Y first, then y+1 (step up), then y-1 (step down).
     let offsets_y: [i32; 3] = [0, 1, -1];
 
@@ -116,6 +116,14 @@ pub fn find_standable_neighbor(
             // snapshot, which we treat as air) and the block below it is
             // solid (non-air). Use the O(1) `block_index` instead of a
             // linear `blocks.iter().find()` scan.
+            //
+            // NOTE: This is a simplified solidity check — "not air" is
+            // treated as "solid". Real Minecraft has non-air, non-solid
+            // blocks (e.g. water, tall grass, torches) that would fail
+            // this check. For pathfinding purposes this is conservative
+            // (the bot may reject some actually-standable positions)
+            // but never unsafe (it will never try to stand above air
+            // or a non-solid block).
             let pos_is_clear = snapshot
                 .block_index
                 .get(&pos)

@@ -530,6 +530,20 @@ pub fn harvest_level_of(material: MaterialTier) -> u8 {
     }
 }
 
+/// Returns the minimum [`MaterialTier`] required to meet a given harvest level.
+///
+/// Returns `None` if the level exceeds the highest known tier (Netherite = 4).
+pub fn minimum_material_for_harvest_level(level: u8) -> Option<MaterialTier> {
+    match level {
+        0 => Some(MaterialTier::Wood),
+        1 => Some(MaterialTier::Stone),
+        2 => Some(MaterialTier::Iron),
+        3 => Some(MaterialTier::Diamond),
+        4 => Some(MaterialTier::Netherite),
+        _ => None,
+    }
+}
+
 /// Required harvest level for a block type.
 ///
 /// The level means: "the tool must have at least this harvest level to make
