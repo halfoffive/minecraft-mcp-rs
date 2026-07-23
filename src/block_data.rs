@@ -184,10 +184,6 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "green_wool",
         "red_wool",
         "black_wool",
-        "glass",
-        "glass_pane",
-        "white_stained_glass",
-        "white_stained_glass_pane",
         "vine",
         "glow_lichen",
     ] {
@@ -670,8 +666,6 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
         "deepslate_copper_ore",
         "lapis_ore",
         "deepslate_lapis_ore",
-        "redstone_ore",
-        "deepslate_redstone_ore",
     ] {
         m.insert(block, 1u8);
     }
@@ -681,6 +675,8 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
     for &block in &[
         "gold_ore",
         "deepslate_gold_ore",
+        "redstone_ore",
+        "deepslate_redstone_ore",
         "diamond_ore",
         "deepslate_diamond_ore",
         "emerald_ore",
@@ -812,7 +808,8 @@ mod tests {
     fn test_best_tool_for_block_special() {
         assert_eq!(best_tool_for_block("white_wool"), ToolType::Shears);
         assert_eq!(best_tool_for_block("oak_leaves"), ToolType::Shears);
-        assert_eq!(best_tool_for_block("glass"), ToolType::Shears);
+        assert_eq!(best_tool_for_block("glass"), ToolType::Hand);
+        assert_eq!(best_tool_for_block("glass_pane"), ToolType::Hand);
     }
 
     #[test]
@@ -1135,6 +1132,7 @@ mod tests {
         // Hand-mineable (no tool required).
         assert_eq!(HARVEST_LEVEL.get("oak_log").copied(), Some(0));
         assert_eq!(HARVEST_LEVEL.get("dirt").copied(), Some(0));
+        assert_eq!(HARVEST_LEVEL.get("glass").copied(), Some(0));
         // `stone` and friends: needs stone+ pickaxe. Vanilla MC's
         // `stone` block requires a pickaxe, so we tag it level 1
         // (stone tier) so the tool selector refuses wood pickaxes.
@@ -1145,7 +1143,15 @@ mod tests {
         // Needs stone+ pickaxe (i.e. harvest level 1).
         assert_eq!(HARVEST_LEVEL.get("cobblestone").copied(), Some(1));
         assert_eq!(HARVEST_LEVEL.get("iron_ore").copied(), Some(1));
+        assert_eq!(HARVEST_LEVEL.get("coal_ore").copied(), Some(1));
+        assert_eq!(HARVEST_LEVEL.get("lapis_ore").copied(), Some(1));
         // Needs iron+ pickaxe (i.e. harvest level 2).
+        assert_eq!(HARVEST_LEVEL.get("gold_ore").copied(), Some(2));
+        assert_eq!(HARVEST_LEVEL.get("redstone_ore").copied(), Some(2));
+        assert_eq!(
+            HARVEST_LEVEL.get("deepslate_redstone_ore").copied(),
+            Some(2)
+        );
         assert_eq!(HARVEST_LEVEL.get("diamond_ore").copied(), Some(2));
         assert_eq!(HARVEST_LEVEL.get("deepslate_diamond_ore").copied(), Some(2));
         // Needs diamond+.

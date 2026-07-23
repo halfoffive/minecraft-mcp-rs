@@ -78,9 +78,27 @@ impl CompoundOpExecutor {
                     if item.is_null() {
                         None
                     } else {
-                        let item_id = item.get("item_id")?.as_str()?.to_string();
-                        let count_raw = item.get("count")?.as_u64()?;
-                        let count = u8::try_from(count_raw).ok()?;
+                        let item_id = match item.get("item_id").and_then(|v| v.as_str()) {
+                            Some(id) => id.to_string(),
+                            None => {
+                                warn!(?item, "inventory item missing item_id field");
+                                return None;
+                            }
+                        };
+                        let count_raw = match item.get("count").and_then(|v| v.as_u64()) {
+                            Some(c) => c,
+                            None => {
+                                warn!(?item, "inventory item missing or invalid count field");
+                                return None;
+                            }
+                        };
+                        let count = match u8::try_from(count_raw) {
+                            Ok(c) => c,
+                            Err(_) => {
+                                warn!(count_raw, "inventory item count out of u8 range");
+                                return None;
+                            }
+                        };
                         Some(ItemStack { item_id, count })
                     }
                 })
