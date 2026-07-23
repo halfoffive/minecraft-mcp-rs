@@ -53,6 +53,8 @@ pub fn calculate_mine_time(block_type: &str, tool_type: ToolType, material: Mate
 
     let speed = if tool_type == ToolType::Hand {
         1.0
+    } else if !is_correct_tool(tool_type, block_type) {
+        1.0
     } else {
         *MATERIAL_TIER_SPEED.get(&material).unwrap_or(&1.0)
     };
@@ -144,9 +146,9 @@ mod tests {
 
     #[test]
     fn test_mine_time_stone_with_iron_axe_wrong_tool() {
-        // stone hardness = 1.5, iron speed = 6.0, wrong tool = 5×
+        // stone hardness = 1.5, wrong tool = speed 1.0, wrong tool = 5×
         let time = calculate_mine_time("stone", ToolType::Axe, MaterialTier::Iron);
-        assert!((time - 1.875).abs() < f64::EPSILON); // 1.5 * 1.5 / 6.0 * 5 = 1.875
+        assert!((time - 11.25).abs() < f64::EPSILON); // 1.5 * 1.5 / 1.0 * 5 = 11.25
     }
 
     #[test]
@@ -195,16 +197,30 @@ mod tests {
     fn test_mine_time_sword_is_wrong_tool() {
         // sword on stone: wrong tool, gets penalty
         let time = calculate_mine_time("stone", ToolType::Sword, MaterialTier::Iron);
-        // 1.5 * 1.5 / 6.0 * 5.0 = 1.875
-        assert!((time - 1.875).abs() < f64::EPSILON);
+        // 1.5 * 1.5 / 1.0 * 5.0 = 11.25
+        assert!((time - 11.25).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_mine_time_unknown_block_wrong_tool() {
-        // unknown block defaults to Hand and doesn't require a tool, so even a
-        // non-matching tool incurs no penalty.
+        // unknown block defaults to Hand and doesn't require a tool, wrong tool
+        // gets no speed bonus (same as hand), no penalty.
         let time = calculate_mine_time("unknown_block", ToolType::Pickaxe, MaterialTier::Iron);
-        // hardness 1.0 * 1.5 / 6.0 * 1.0 = 0.25
-        assert!((time - 0.25).abs() < f64::EPSILON);
+        // hardness 1.0 * 1.5 / 1.0 * 1.0 = 1.5
+        assert!((time - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_mine_time_wrong_tool_speed_equals_hand() {
+        let axe_time = calculate_mine_time("stone", ToolType::Axe, MaterialTier::Iron);
+        let hand_time = calculate_mine_time("stone", ToolType::Hand, MaterialTier::Wood);
+        assert!((axe_time - hand_time).abs() < f64::EPSILON);
+        assert!((axe_time - 11.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_mine_time_correct_tool_still_gets_speed() {
+        let time = calculate_mine_time("stone", ToolType::Pickaxe, MaterialTier::Iron);
+        assert!((time - 0.375).abs() < f64::EPSILON);
     }
 }
