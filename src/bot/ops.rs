@@ -26,7 +26,7 @@ use crate::compound_ops::{
 };
 use crate::error::BotError;
 use crate::mining_calc::calculate_mine_time;
-use crate::tool_select::{find_tool_in_inventory, select_tool_for_block};
+use crate::tool_select::{build_tool_alternatives, find_tool_in_inventory, select_tool_for_block};
 use crate::types::{BlockPos, BotCommand, BotResult, MaterialTier, ToolType};
 
 // ---------------------------------------------------------------------------
@@ -151,6 +151,10 @@ impl CompoundOpExecutor {
                 return Err(BotError::ToolNotFound {
                     tool_type: required_tool,
                     material: None,
+                    alternatives: build_tool_alternatives(
+                        required_tool,
+                        selection.required_harvest_level,
+                    ),
                 });
             }
 
@@ -260,6 +264,7 @@ impl CompoundOpExecutor {
                             OperationEvent::Failed(BotError::ToolNotFound {
                                 tool_type: t,
                                 material: None,
+                                alternatives: vec![],
                             }),
                         );
                         continue;
@@ -307,7 +312,22 @@ impl CompoundOpExecutor {
                         );
                         continue;
                     }
-                    sleep(Duration::from_secs_f64(mine_time)).await;
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs_f64(mine_time)) => {}
+                        _ = async {
+                            while executor.state.is_online() {
+                                sleep(Duration::from_millis(100)).await;
+                            }
+                        } => {
+                            state = op.advance(
+                                state,
+                                OperationEvent::Failed(BotError::MiningInterrupted {
+                                    reason: "bot went offline during mining".into(),
+                                }),
+                            );
+                            continue;
+                        }
+                    }
 
                     // Step 10: Verify block broken — Task 2.5 (M-12): use
                     // `block_index` for O(1) lookup. Treat "air" as "block
@@ -398,6 +418,7 @@ impl CompoundOpExecutor {
             return Err(BotError::ToolNotFound {
                 tool_type: ToolType::Hand, // generic fallback (no block item)
                 material: None,
+                alternatives: vec![],
             });
         }
 
@@ -546,13 +567,20 @@ impl CompoundOpExecutor {
 
         state = op.advance(state, OperationEvent::Start);
 
+        // Resolve standable neighbor once up front so we don't try to path
+        // into the container block itself.
+        let snapshot = executor.state.read_snapshot();
+        let move_target = find_standable_neighbor(&snapshot, pos).ok_or_else(|| {
+            warn!(?pos, "no standable position adjacent to container");
+            BotError::Internal("no standable position adjacent to target".into())
+        })?;
+
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
             match op.current_action(&state) {
-                Some(BotCommand::MoveTo(target)) => {
-                    // Task 2.6: dispatch errors must transition the state
-                    // machine to `Failed(_)` rather than `?`-returning out
-                    // of the executor.
-                    let result = match executor.dispatch(BotCommand::MoveTo(target)).await {
+                Some(BotCommand::MoveTo(_)) => {
+                    // Always move to the standable neighbour, not the
+                    // container position itself.
+                    let result = match executor.dispatch(BotCommand::MoveTo(move_target)).await {
                         Ok(r) => r,
                         Err(e) => {
                             state = op.advance(state, OperationEvent::Failed(e));
@@ -563,7 +591,7 @@ impl CompoundOpExecutor {
                         state = op.advance(
                             state,
                             OperationEvent::Failed(BotError::PathfindingFailed {
-                                target,
+                                target: move_target,
                                 reason: result.message,
                             }),
                         );
@@ -641,6 +669,7 @@ impl CompoundOpExecutor {
             return Err(BotError::ToolNotFound {
                 tool_type,
                 material: None,
+                alternatives: vec![],
             });
         }
 
@@ -676,6 +705,7 @@ impl CompoundOpExecutor {
                             OperationEvent::Failed(BotError::ToolNotFound {
                                 tool_type: t,
                                 material: None,
+                                alternatives: vec![],
                             }),
                         );
                         continue;
@@ -1254,7 +1284,7 @@ mod tests {
     #[tokio::test]
     async fn test_open_container_happy_path() {
         let pos = BlockPos::new(10, 64, 20);
-        let snapshot = make_empty_snapshot();
+        let snapshot = make_snapshot_with_block(pos, "chest");
         let (executor, _mock, _state) = setup(vec![], snapshot);
 
         let result = CompoundOpExecutor::execute_open_container(&executor, pos).await;
@@ -1404,7 +1434,7 @@ mod tests {
     #[tokio::test]
     async fn test_open_container_state_machine_reaches_all_states() {
         let pos = BlockPos::new(5, 64, 5);
-        let snapshot = make_empty_snapshot();
+        let snapshot = make_snapshot_with_block(pos, "chest");
         let (executor, _mock, _state) = setup(vec![], snapshot);
 
         let result = CompoundOpExecutor::execute_open_container(&executor, pos).await;

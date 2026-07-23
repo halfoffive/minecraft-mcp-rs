@@ -47,6 +47,8 @@ pub enum BotError {
         tool_type: ToolType,
         /// An optional material requirement.
         material: Option<MaterialTier>,
+        /// Suggested alternatives (e.g. ["Iron Pickaxe"]).
+        alternatives: Vec<String>,
     },
 
     /// A target position is too far away from the bot.
@@ -113,10 +115,18 @@ impl Display for BotError {
             BotError::ToolNotFound {
                 tool_type,
                 material,
-            } => match material {
-                Some(mat) => write!(f, "Tool not found: {tool_type} ({mat})"),
-                None => write!(f, "Tool not found: {tool_type}"),
-            },
+                alternatives,
+            } => {
+                let mut msg = match material {
+                    Some(mat) => format!("Tool not found: {tool_type} ({mat})"),
+                    None => format!("Tool not found: {tool_type}"),
+                };
+                if !alternatives.is_empty() {
+                    msg.push_str("; use ");
+                    msg.push_str(&alternatives.join(" or "));
+                }
+                write!(f, "{msg}")
+            }
             BotError::TooFar {
                 target,
                 current,
@@ -189,10 +199,12 @@ impl From<BotError> for ErrorData {
             BotError::ToolNotFound {
                 tool_type,
                 material,
+                alternatives,
             } => {
                 let detail = serde_json::json!({
                     "tool_type": tool_type.to_string(),
                     "material": material.as_ref().map(|m| m.to_string()),
+                    "alternatives": alternatives,
                 });
                 (ErrorCode::INVALID_PARAMS, Some(detail))
             }
@@ -293,6 +305,7 @@ mod tests {
         let err = BotError::ToolNotFound {
             tool_type: ToolType::Pickaxe,
             material: Some(MaterialTier::Diamond),
+            alternatives: vec![],
         };
         assert_eq!(err.to_string(), "Tool not found: pickaxe (diamond)");
     }
@@ -302,8 +315,22 @@ mod tests {
         let err = BotError::ToolNotFound {
             tool_type: ToolType::Sword,
             material: None,
+            alternatives: vec![],
         };
         assert_eq!(err.to_string(), "Tool not found: sword");
+    }
+
+    #[test]
+    fn test_display_tool_not_found_with_alternatives() {
+        let err = BotError::ToolNotFound {
+            tool_type: ToolType::Pickaxe,
+            material: None,
+            alternatives: vec!["Iron Pickaxe".to_string(), "Diamond Pickaxe".to_string()],
+        };
+        assert_eq!(
+            err.to_string(),
+            "Tool not found: pickaxe; use Iron Pickaxe or Diamond Pickaxe"
+        );
     }
 
     #[test]
@@ -442,12 +469,14 @@ mod tests {
         let err = BotError::ToolNotFound {
             tool_type: ToolType::Axe,
             material: Some(MaterialTier::Iron),
+            alternatives: vec!["Iron Axe".to_string()],
         };
         let mcp: ErrorData = err.into();
         assert_eq!(mcp.code, ErrorCode::INVALID_PARAMS);
         let data = mcp.data.unwrap();
         assert_eq!(data["tool_type"], "axe");
         assert_eq!(data["material"], "iron");
+        assert_eq!(data["alternatives"][0], "Iron Axe");
     }
 
     #[test]

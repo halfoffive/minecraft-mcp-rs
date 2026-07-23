@@ -273,6 +273,7 @@ async fn handle_spawn(bot: Client, state: &BotState) {
                      fired Event::Spawn before ConnectionManager completed \
                      dependency injection)"
                 );
+                state.shared_state.clear_bot_ecs();
                 request_repaint(state);
                 trace!("bot spawned without executor — not marking online");
                 return;
@@ -299,6 +300,7 @@ async fn handle_spawn(bot: Client, state: &BotState) {
                  100ms retry window — executor not started (this is expected \
                  if the previous executor is still shutting down)"
             );
+            state.shared_state.clear_bot_ecs();
         }
     }
 
@@ -368,6 +370,7 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     *INJECTED_COMMAND_SENDER
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = None;
+    INJECTED_SNAPSHOT_INTERVAL_MS.store(0, Ordering::Relaxed);
 
     // Tell azalea to end the client so ClientBuilder::start returns and the
     // connection loop can retry. Without this the bot thread may hang waiting

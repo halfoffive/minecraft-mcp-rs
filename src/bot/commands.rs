@@ -18,7 +18,7 @@ use crate::channel::{BotCommandReceiver, BotCommandSender, ReceiverLease};
 use crate::command_validate::clamp_to_i32;
 use crate::error::BotError;
 use crate::state::SharedState;
-use crate::tool_select::find_tool_in_inventory;
+use crate::tool_select::{build_tool_alternatives, find_tool_in_inventory};
 use crate::types::{ActAction, ActResult, BlockPos, BotCommand, BotResult, Direction, GameMode};
 use crate::utils::to_snake_case;
 
@@ -295,9 +295,10 @@ impl BotActions for RealBotClient {
     fn attack_entity(&self, entity_id: u32) -> Result<(), BotError> {
         // azalea 0.15.1: entity_id_by_minecraft_id was renamed to
         // ecs_entity_by_minecraft_entity and takes a MinecraftEntityId.
+        let eid = clamp_to_i32(entity_id);
         let entity = self
             .client
-            .ecs_entity_by_minecraft_entity(azalea::world::MinecraftEntityId(entity_id as i32))
+            .ecs_entity_by_minecraft_entity(azalea::world::MinecraftEntityId(eid))
             .ok_or_else(|| BotError::Internal(format!("entity with id {} not found", entity_id)))?;
         self.client.attack(entity);
         Ok(())
@@ -867,7 +868,7 @@ impl<B: BotActions> CommandExecutor<B> {
                 // can't hotbar-select it directly. Moving items between the
                 // main inventory and hotbar requires a container click flow
                 // (deferred to a future version).
-                Err(BotError::Internal(format!(
+                Err(BotError::InvalidParams(format!(
                     "{tool:?} found in main inventory but not in hotbar; \
                      move it to a hotbar slot first"
                 )))
@@ -875,6 +876,7 @@ impl<B: BotActions> CommandExecutor<B> {
             None => Err(BotError::ToolNotFound {
                 tool_type: tool,
                 material,
+                alternatives: build_tool_alternatives(tool, required_level),
             }),
         }
     }
@@ -1068,7 +1070,7 @@ impl<B: BotActions> CommandExecutor<B> {
         trace!(radius, "QueryNearbyBlocks");
         let snapshot = self.state.read_snapshot();
         let pos = snapshot.self_player.position;
-        let r = radius as i32;
+        let r = clamp_to_i32(radius);
         let blocks: Vec<_> = snapshot
             .blocks
             .iter()
@@ -1091,7 +1093,7 @@ impl<B: BotActions> CommandExecutor<B> {
         trace!(radius, "QueryNearbyEntities");
         let snapshot = self.state.read_snapshot();
         let pos = snapshot.self_player.position;
-        let r = radius as i32;
+        let r = clamp_to_i32(radius);
         let entities: Vec<_> = snapshot
             .entities
             .iter()
@@ -1260,7 +1262,7 @@ impl<B: BotActions> CommandExecutor<B> {
         trace!(radius, "CollectItems");
         let snapshot = self.state.read_snapshot();
         let player_pos = snapshot.self_player.position;
-        let r = radius as i32;
+        let r = clamp_to_i32(radius);
 
         // Filter for item entities within radius. Entity types from azalea
         // for dropped items contain "item" (e.g. "item", "item_frame").

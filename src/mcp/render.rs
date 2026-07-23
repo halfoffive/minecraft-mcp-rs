@@ -396,7 +396,14 @@ fn draw_yaw_arrow(img: &mut RgbaImage, cx: u32, cy: u32, yaw: f32, scale: u8) {
 /// - **Nether**: netherrack, obsidian, glowstone, nether bricks, soul sand
 /// - **End**: end stone, purpur, end stone bricks
 pub fn color_map(block_type: &str) -> Rgba<u8> {
-    match block_type.to_lowercase().as_str() {
+    let lowercased;
+    let key = if block_type.chars().any(|c| c.is_uppercase()) {
+        lowercased = block_type.to_lowercase();
+        lowercased.as_str()
+    } else {
+        block_type
+    };
+    match key {
         // ── Terrain ──────────────────────────────────────────────
         "grass" | "grass_block" | "grass_path" | "dirt_path" => Rgba([34, 139, 34, 255]),
         "dirt" | "coarse_dirt" | "podzol" | "farmland" | "rooted_dirt" => Rgba([139, 90, 43, 255]),

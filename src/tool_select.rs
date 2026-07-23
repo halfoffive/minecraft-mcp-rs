@@ -1,6 +1,9 @@
 //! Tool / inventory selection logic for mining and combat.
 
-use crate::block_data::{BLOCK_TO_TOOL_TYPE, ItemStack, MATERIAL_PRIORITY, harvest_level_of};
+use crate::block_data::{
+    BLOCK_TO_TOOL_TYPE, ItemStack, MATERIAL_PRIORITY, harvest_level_of,
+    minimum_material_for_harvest_level,
+};
 use crate::types::{MaterialTier, ToolType};
 
 /// The result of selecting a tool for a specific block.
@@ -10,6 +13,7 @@ pub struct ToolSelection {
     pub material: Option<MaterialTier>,
     pub hotbar_slot: Option<u8>,
     pub needs_move_to_hotbar: bool,
+    pub required_harvest_level: Option<u8>,
 }
 
 impl ToolSelection {
@@ -20,6 +24,7 @@ impl ToolSelection {
             material: None,
             hotbar_slot: None,
             needs_move_to_hotbar: false,
+            required_harvest_level: None,
         }
     }
 }
@@ -120,6 +125,7 @@ pub fn select_tool_for_block(block_type: &str, inventory: &[Option<ItemStack>]) 
             material: Some(material),
             hotbar_slot: Some(slot),
             needs_move_to_hotbar: false,
+            required_harvest_level,
         };
     }
 
@@ -138,11 +144,33 @@ pub fn select_tool_for_block(block_type: &str, inventory: &[Option<ItemStack>]) 
                 material: Some(material),
                 hotbar_slot: None,
                 needs_move_to_hotbar: true,
+                required_harvest_level,
             };
         }
     }
 
-    ToolSelection::hand()
+    ToolSelection {
+        required_harvest_level,
+        ..ToolSelection::hand()
+    }
+}
+
+/// Builds a human-readable list of suggested alternative tools.
+///
+/// Returns a vector of strings like `["Iron Pickaxe"]` suggesting the minimum
+/// tier tool that meets the harvest level requirement. Returns an empty vec
+/// when no specific tool is required (level 0 / unknown block).
+pub fn build_tool_alternatives(
+    tool_type: ToolType,
+    required_harvest_level: Option<u8>,
+) -> Vec<String> {
+    let mut alts = Vec::new();
+    if let Some(level) = required_harvest_level
+        && let Some(mat) = minimum_material_for_harvest_level(level)
+    {
+        alts.push(format!("{mat} {tool_type}"));
+    }
+    alts
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +201,7 @@ mod tests {
             material: Some(MaterialTier::Diamond),
             hotbar_slot: Some(3),
             needs_move_to_hotbar: false,
+            required_harvest_level: None,
         };
         assert_eq!(sel.tool_type, ToolType::Pickaxe);
         assert_eq!(sel.material, Some(MaterialTier::Diamond));
