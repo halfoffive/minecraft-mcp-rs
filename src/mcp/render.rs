@@ -232,8 +232,8 @@ pub fn render_topdown_enhanced(
         // Round to nearest pixel (sub-block precision) rather than floor.
         // The previous `as i32` cast truncated, biasing the centre by up
         // to 1 block.
-        let px = (dx.round() as i32 + r) as u32;
-        let py = (dz.round() as i32 + r) as u32;
+        let px = ((dx.round() as i32 + r) as u32).min(block_size - 1);
+        let py = ((dz.round() as i32 + r) as u32).min(block_size - 1);
         let colour = color_map(&block.block_type);
         let idx = (px as usize) * block_size_usize + (py as usize);
         match &mut column_best[idx] {

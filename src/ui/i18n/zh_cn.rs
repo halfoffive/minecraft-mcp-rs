@@ -120,6 +120,7 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::Preview => "世界视图预览",
         TextKey::WorldView => "世界视图：",
         TextKey::Refresh => "刷新",
+        TextKey::RefreshTooltip => "以半径8、缩放2重新渲染当前快照",
         TextKey::WorldViewPlaceholder => "暂无缓存的截图 — 点击「刷新」渲染当前快照。",
 
         // ── Catch-all: never panic, surface the variant name ───────────
@@ -217,6 +218,11 @@ mod tests {
             TextKey::Language,
             TextKey::LangEn,
             TextKey::LangZhCn,
+            TextKey::Preview,
+            TextKey::WorldView,
+            TextKey::Refresh,
+            TextKey::RefreshTooltip,
+            TextKey::WorldViewPlaceholder,
         ];
         for k in all {
             assert!(!lookup(k).is_empty(), "lookup returned empty for {k:?}");

@@ -255,6 +255,8 @@ pub enum TextKey {
     WorldView,
     /// "Refresh" button label inside the preview panel.
     Refresh,
+    /// Tooltip for the Refresh button.
+    RefreshTooltip,
     /// Placeholder shown when no render is cached yet.
     /// "No render cached yet — click Refresh to render the current snapshot."
     WorldViewPlaceholder,
@@ -388,6 +390,7 @@ pub fn key_name(key: TextKey) -> &'static str {
         TextKey::Preview => "Preview",
         TextKey::WorldView => "WorldView",
         TextKey::Refresh => "Refresh",
+        TextKey::RefreshTooltip => "RefreshTooltip",
         TextKey::WorldViewPlaceholder => "WorldViewPlaceholder",
     }
 }

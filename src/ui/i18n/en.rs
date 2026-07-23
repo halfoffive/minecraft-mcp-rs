@@ -122,6 +122,7 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::Preview => "World View Preview",
         TextKey::WorldView => "World View:",
         TextKey::Refresh => "Refresh",
+        TextKey::RefreshTooltip => "Re-render the current snapshot at radius=8, scale=2",
         TextKey::WorldViewPlaceholder => {
             "No render cached yet — click Refresh to render the current snapshot."
         }
@@ -226,6 +227,11 @@ mod tests {
             TextKey::Language,
             TextKey::LangEn,
             TextKey::LangZhCn,
+            TextKey::Preview,
+            TextKey::WorldView,
+            TextKey::Refresh,
+            TextKey::RefreshTooltip,
+            TextKey::WorldViewPlaceholder,
         ];
         for k in all {
             assert!(!lookup(k).is_empty(), "lookup returned empty for {k:?}");

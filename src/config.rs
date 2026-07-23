@@ -127,12 +127,20 @@ impl AppConfig {
         if self.mc_port == 0 {
             return Err("mc_port must not be 0".into());
         }
+        if (self.mc_port as u32) > 65535 {
+            return Err("mc_port must be <= 65535".into());
+        }
         if self.mcp_port == 0 {
             return Err("mcp_port must not be 0".into());
         }
-        self.mcp_address
-            .parse::<std::net::IpAddr>()
-            .map_err(|_| "mcp_address must be a valid IP address (e.g. 127.0.0.1 or 0.0.0.0)")?;
+        if (self.mcp_port as u32) > 65535 {
+            return Err("mcp_port must be <= 65535".into());
+        }
+        if self.mcp_address != "localhost" {
+            self.mcp_address
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| "mcp_address must be a valid IP address (e.g. 127.0.0.1 or 0.0.0.0) or \"localhost\"")?;
+        }
         if self.chunk_scan_radius < 1 || self.chunk_scan_radius > 16 {
             return Err(format!(
                 "chunk_scan_radius must be between 1 and 16, got {}",
@@ -144,6 +152,18 @@ impl AppConfig {
                 "block_perception_radius must be between 8 and 64, got {}",
                 self.block_perception_radius
             ));
+        }
+        if self.snapshot_interval_ms == 0 {
+            return Err("snapshot_interval_ms must be greater than 0".into());
+        }
+        if self.reconnect_initial_delay_ms == 0 {
+            return Err("reconnect_initial_delay_ms must be greater than 0".into());
+        }
+        if self.reconnect_max_delay_ms == 0 {
+            return Err("reconnect_max_delay_ms must be greater than 0".into());
+        }
+        if self.reconnect_max_delay_ms < self.reconnect_initial_delay_ms {
+            return Err("reconnect_max_delay_ms must be >= reconnect_initial_delay_ms".into());
         }
         if self.command_timeout_secs == 0 {
             return Err("command_timeout_secs must be greater than 0".into());
@@ -409,6 +429,54 @@ mod tests {
 
         config.mcp_address = "::1".to_string();
         assert!(config.validate().is_ok(), "valid IPv6 should pass");
+    }
+
+    #[test]
+    fn test_validate_accepts_localhost() {
+        let mut config = AppConfig::default();
+        config.mcp_address = "localhost".to_string();
+        assert!(
+            config.validate().is_ok(),
+            "localhost should pass validation"
+        );
+    }
+
+    // -- Validation: ports -------------------------------------------------
+
+    #[test]
+    fn test_validate_rejects_port_too_high() {
+        let mut config = AppConfig::default();
+        config.mcp_port = 65535;
+        assert!(config.validate().is_ok(), "port 65535 should be valid");
+    }
+
+    // -- Validation: snapshot_interval_ms ----------------------------------
+
+    #[test]
+    fn test_validate_rejects_zero_snapshot_interval() {
+        let mut config = AppConfig::default();
+        config.snapshot_interval_ms = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("snapshot_interval_ms"), "got: {err}");
+    }
+
+    // -- Validation: reconnect delays --------------------------------------
+
+    #[test]
+    fn test_validate_rejects_zero_reconnect_initial_delay() {
+        let mut config = AppConfig::default();
+        config.reconnect_initial_delay_ms = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("reconnect_initial_delay_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_rejects_max_delay_less_than_initial() {
+        let mut config = AppConfig::default();
+        config.reconnect_initial_delay_ms = 5000;
+        config.reconnect_max_delay_ms = 1000;
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("reconnect_max_delay_ms"), "got: {err}");
     }
 
     // -- Validation: command_timeout_secs ------------------------------------
