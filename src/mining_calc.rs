@@ -51,9 +51,7 @@ pub fn calculate_mine_time(block_type: &str, tool_type: ToolType, material: Mate
         return f64::INFINITY;
     }
 
-    let speed = if tool_type == ToolType::Hand {
-        1.0
-    } else if !is_correct_tool(tool_type, block_type) {
+    let speed = if tool_type == ToolType::Hand || !is_correct_tool(tool_type, block_type) {
         1.0
     } else {
         *MATERIAL_TIER_SPEED.get(&material).unwrap_or(&1.0)
