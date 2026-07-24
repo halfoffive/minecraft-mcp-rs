@@ -442,6 +442,12 @@ impl SharedState {
         self.run_stats.read().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Set the connection timestamp (or clear it on disconnect).
+    pub fn set_connected_since(&self, since: Option<std::time::Instant>) {
+        let mut guard = self.run_stats.write().unwrap_or_else(|e| e.into_inner());
+        guard.connected_since = since;
+    }
+
     /// Store (or clear) the container handle.
     ///
     /// If a previous handle was stored, it is dropped and the container

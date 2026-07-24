@@ -837,6 +837,7 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
         BotCommand::UseItem,
         BotCommand::UseItemWithSlot(0),
         BotCommand::EquipTool(ToolType::Pickaxe),
+        BotCommand::EquipToolWithMaterial(ToolType::Pickaxe, MaterialTier::Diamond),
         BotCommand::OpenContainer(BlockPos::new(0, 64, 0)),
         BotCommand::TakeFromContainer(0, 1),
         BotCommand::PutIntoContainer(0, 1),
@@ -865,8 +866,8 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
 
     assert_eq!(
         commands.len(),
-        33,
-        "should have exactly 33 BotCommand variants (including v2 + UseItemWithSlot)"
+        34,
+        "should have exactly 34 BotCommand variants (including EquipToolWithMaterial + v2 + UseItemWithSlot)"
     );
 
     for cmd in commands {

@@ -283,13 +283,11 @@ async fn build_snapshot_inner(
                                     continue;
                                 }
                                 let block_name = block_state_to_name(block_state);
-                                if block_name != "air" {
-                                    new_blocks.push(BlockEntry {
-                                        position: pos,
-                                        block_type: block_name,
-                                        block_state: None,
-                                    });
-                                }
+                                new_blocks.push(BlockEntry {
+                                    position: pos,
+                                    block_type: block_name,
+                                    block_state: None,
+                                });
                             }
                         }
                     }

@@ -489,26 +489,41 @@ fn extract_bearer_token(header: &str) -> Option<&str> {
 /// Check whether the request's `Authorization` header carries the expected
 /// Bearer token.
 ///
+/// Returns false if:
+/// - No Authorization header is present
+/// - The header doesn't start with "Bearer "
+/// - The extracted token is empty (when expected_token is non-empty)
+/// - The token doesn't match expected_token
+///
 /// Reads the expected token from `state.config().mcp_token` on every request so
 /// configuration changes take effect immediately.
 fn is_bearer_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
+    if expected_token.is_empty() {
+        return true;
+    }
     headers
         .get("Authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(extract_bearer_token)
-        .is_some_and(|token| token == expected_token)
+        .is_some_and(|token| !token.is_empty() && token == expected_token)
 }
 
 /// Axum middleware that enforces the configured Bearer token.
 ///
-/// Returns 401 Unauthorized for missing or mismatched tokens. Valid requests
-/// are forwarded to the inner MCP streamable HTTP handler.
+/// Returns 401 Unauthorized for missing, empty, or mismatched tokens when
+/// a token is configured. If the configured token is empty, authentication
+/// is disabled (all requests pass through). Valid requests are forwarded
+/// to the inner MCP streamable HTTP handler.
 async fn bearer_auth_middleware(
     State(state): State<Arc<SharedState>>,
     request: Request,
     next: Next,
 ) -> Response {
     let expected_token = state.read_config().mcp_token.clone();
+    // If no token is configured, skip authentication entirely
+    if expected_token.is_empty() {
+        return next.run(request).await;
+    }
     if is_bearer_authorized(request.headers(), &expected_token) {
         next.run(request).await
     } else {
@@ -572,7 +587,11 @@ pub async fn serve_http(state: Arc<SharedState>, sender: BotCommandSender, addr:
         })
         .await
     {
+        let msg = format!("MCP HTTP server error: {e}");
         error!(error = %e, "MCP HTTP server error");
+        state_for_status.set_mcp_server_status(McpServerStatus::Failed(msg.clone()));
+        state_for_status.set_last_error(msg);
+        return;
     }
 
     state_for_status.set_mcp_server_status(McpServerStatus::Stopped);
@@ -677,14 +696,15 @@ mod tests {
             .await;
         assert!(matches!(result, Err(BotError::Offline(_))));
 
+        // Parameter validation passes (slot 0, count 1 are valid), then
+        // offline check runs before container-open check.
         let result = server
             .take_from_container(Parameters(TakeFromContainerInput {
                 slot: 0,
                 count: Some(1),
             }))
             .await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        assert!(matches!(result, Err(BotError::Offline(_))));
 
         let result = server
             .put_into_container(Parameters(PutIntoContainerInput {
@@ -692,14 +712,12 @@ mod tests {
                 count: Some(1),
             }))
             .await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        assert!(matches!(result, Err(BotError::Offline(_))));
 
         let result = server
             .close_container(Parameters(CloseContainerInput {}))
             .await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     /// Combat tool integration tests — verify offline/entity-not-found rejection.
@@ -709,11 +727,12 @@ mod tests {
         let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
         let server = McpBotServer::new(state, sender);
 
+        // Offline check comes before entity existence check, so even with
+        // a valid entity_id we should get Offline error when bot is not connected.
         let result = server
             .attack_entity(Parameters(AttackEntityInput { entity_id: 42 }))
             .await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("not found")));
+        assert!(matches!(result, Err(BotError::Offline(_))));
 
         let result = server
             .shield_block(Parameters(ShieldBlockInput { blocking: true }))
@@ -1034,5 +1053,19 @@ mod tests {
 
         let headers = HeaderMap::new();
         assert!(!is_bearer_authorized(&headers, &expected));
+    }
+
+    #[test]
+    fn test_is_bearer_authorized_rejects_empty_token_when_configured() {
+        // When a token is configured, an empty Bearer token must be rejected.
+        let expected_token = "secret-token";
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Bearer ".parse().unwrap());
+        assert!(!is_bearer_authorized(&headers, expected_token));
+
+        // Also reject "Bearer" with no token at all.
+        let mut headers2 = HeaderMap::new();
+        headers2.insert("Authorization", "Bearer".parse().unwrap());
+        assert!(!is_bearer_authorized(&headers2, expected_token));
     }
 }

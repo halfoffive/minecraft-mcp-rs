@@ -95,6 +95,20 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig) {
     );
 }
 
+/// Format a host string for use in a URL, wrapping IPv6 addresses in
+/// square brackets per RFC 3986 (e.g. `::1` → `[::1]`).
+///
+/// - If `host` parses as an [`std::net::IpAddr::V6`], returns `[host]`.
+/// - If `host` parses as an [`std::net::IpAddr::V4`], returns it unchanged.
+/// - If `host` is a hostname like `localhost` (fails `IpAddr::parse`),
+///   returns it unchanged.
+fn format_host_for_url(host: &str) -> String {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(_)) => format!("[{host}]"),
+        _ => host.to_owned(),
+    }
+}
+
 /// Build the MCP client config JSON for the given [`EditConfig`].
 ///
 /// Returns a pretty-printed JSON string.  The shape branches on
@@ -106,7 +120,8 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig) {
 fn build_mcp_config_json(edit: &EditConfig) -> String {
     let json = match edit.mcp_transport {
         McpTransport::Http => {
-            let url = format!("http://{}:{}/mcp", edit.mcp_address, edit.mcp_port);
+            let host = format_host_for_url(&edit.mcp_address);
+            let url = format!("http://{host}:{}/mcp", edit.mcp_port);
             serde_json::json!({
                 "mcpServers": {
                     "minecraft": {
@@ -145,7 +160,87 @@ mod tests {
     use super::*;
     use crate::config::AppConfig;
 
+    // -- format_host_for_url tests -----------------------------------------
+
+    #[test]
+    fn test_format_host_ipv4_no_brackets() {
+        assert_eq!(format_host_for_url("127.0.0.1"), "127.0.0.1");
+        assert_eq!(format_host_for_url("192.168.1.1"), "192.168.1.1");
+        assert_eq!(format_host_for_url("0.0.0.0"), "0.0.0.0");
+    }
+
+    #[test]
+    fn test_format_host_ipv6_with_brackets() {
+        assert_eq!(format_host_for_url("::1"), "[::1]");
+        assert_eq!(format_host_for_url("2001:db8::1"), "[2001:db8::1]");
+        assert_eq!(format_host_for_url("fe80::1"), "[fe80::1]");
+    }
+
+    #[test]
+    fn test_format_host_hostname_no_brackets() {
+        assert_eq!(format_host_for_url("localhost"), "localhost");
+        assert_eq!(format_host_for_url("example.com"), "example.com");
+    }
+
     // -- HTTP transport -----------------------------------------------------
+
+    #[test]
+    fn test_mcp_config_http_json_ipv4() {
+        let mut edit = EditConfig::from(&AppConfig::default());
+        edit.mcp_transport = McpTransport::Http;
+        edit.mcp_address = "127.0.0.1".to_string();
+        edit.mcp_port = 3000;
+        edit.mcp_token = "my-token".to_string();
+
+        let json = build_mcp_config_json(&edit);
+
+        assert!(
+            json.contains(r#""url": "http://127.0.0.1:3000/mcp""#),
+            "wrong IPv4 url: {json}"
+        );
+        assert!(
+            json.contains("Authorization"),
+            "missing Authorization: {json}"
+        );
+        assert!(json.contains("Bearer"), "missing Bearer: {json}");
+        assert!(json.contains("my-token"), "missing token: {json}");
+        assert!(
+            !json.contains("\"command\""),
+            "should not contain command in HTTP mode: {json}"
+        );
+    }
+
+    #[test]
+    fn test_mcp_config_http_json_ipv6() {
+        let mut edit = EditConfig::from(&AppConfig::default());
+        edit.mcp_transport = McpTransport::Http;
+        edit.mcp_address = "::1".to_string();
+        edit.mcp_port = 3000;
+        edit.mcp_token = "test-token".to_string();
+
+        let json = build_mcp_config_json(&edit);
+
+        assert!(
+            json.contains(r#""url": "http://[::1]:3000/mcp""#),
+            "wrong IPv6 url (should have brackets): {json}"
+        );
+    }
+
+    #[test]
+    fn test_mcp_config_http_json_localhost() {
+        let mut edit = EditConfig::from(&AppConfig::default());
+        edit.mcp_transport = McpTransport::Http;
+        edit.mcp_address = "localhost".to_string();
+        edit.mcp_port = 8080;
+        edit.mcp_token = "".to_string();
+
+        let json = build_mcp_config_json(&edit);
+
+        assert!(
+            json.contains(r#""url": "http://localhost:8080/mcp""#),
+            "wrong localhost url: {json}"
+        );
+    }
 
     #[test]
     fn test_mcp_config_http_json() {

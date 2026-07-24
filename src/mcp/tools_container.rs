@@ -59,13 +59,13 @@ pub async fn handle_open_container(
         return Err(BotError::InvalidParams(e));
     }
 
-    check_container_not_open(state)?;
-
     if !state.is_online() {
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),
         ));
     }
+
+    check_container_not_open(state)?;
 
     let cmd = BotCommand::OpenContainer(BlockPos::new(input.x, input.y, input.z));
     match sender.send_command(cmd).await {
@@ -98,23 +98,29 @@ pub async fn handle_take_from_container(
     sender: &BotCommandSender,
     input: TakeFromContainerInput,
 ) -> Result<String, BotError> {
-    // Validate count first: a malformed parameter should be reported as
+    // Validate parameters first: malformed parameters should be reported as
     // InvalidParams regardless of whether a container is open or the bot
     // is online.  This matches the convention in tools_item.rs.
-    let count = input.count.unwrap_or(1);
-    if count == 0 {
-        return Err(BotError::InvalidParams(
-            "Count must be greater than 0".to_string(),
-        ));
+    if input.slot > 53 {
+        return Err(BotError::InvalidParams(format!(
+            "Container slot must be 0-53, got {}",
+            input.slot
+        )));
     }
-
-    check_container_open(state)?;
+    let count = input.count.unwrap_or(1);
+    if count < 1 || count > 64 {
+        return Err(BotError::InvalidParams(format!(
+            "Count must be between 1 and 64, got {count}"
+        )));
+    }
 
     if !state.is_online() {
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),
         ));
     }
+
+    check_container_open(state)?;
 
     let cmd = BotCommand::TakeFromContainer(input.slot, count);
     match sender.send_command(cmd).await {
@@ -147,21 +153,27 @@ pub async fn handle_put_into_container(
     sender: &BotCommandSender,
     input: PutIntoContainerInput,
 ) -> Result<String, BotError> {
-    // Validate count first: same reasoning as handle_take_from_container.
-    let count = input.count.unwrap_or(1);
-    if count == 0 {
-        return Err(BotError::InvalidParams(
-            "Count must be greater than 0".to_string(),
-        ));
+    // Validate parameters first: same reasoning as handle_take_from_container.
+    if input.slot > 53 {
+        return Err(BotError::InvalidParams(format!(
+            "Container slot must be 0-53, got {}",
+            input.slot
+        )));
     }
-
-    check_container_open(state)?;
+    let count = input.count.unwrap_or(1);
+    if count < 1 || count > 64 {
+        return Err(BotError::InvalidParams(format!(
+            "Count must be between 1 and 64, got {count}"
+        )));
+    }
 
     if !state.is_online() {
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),
         ));
     }
+
+    check_container_open(state)?;
 
     let cmd = BotCommand::PutIntoContainer(input.slot, count);
     match sender.send_command(cmd).await {
@@ -186,13 +198,13 @@ pub async fn handle_close_container(
     sender: &BotCommandSender,
     _input: CloseContainerInput,
 ) -> Result<String, BotError> {
-    check_container_open(state)?;
-
     if !state.is_online() {
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),
         ));
     }
+
+    check_container_open(state)?;
 
     let cmd = BotCommand::CloseContainer;
     match sender.send_command(cmd).await {
@@ -262,14 +274,14 @@ mod tests {
     #[tokio::test]
     async fn test_take_from_container_offline() {
         let (state, sender) = setup();
-        // No container open — should get "No container is currently open"
+        // Parameters are valid, but bot is offline — should get Offline error
+        // (offline check comes before container-open check)
         let input = TakeFromContainerInput {
             slot: 0,
             count: Some(1),
         };
         let result = handle_take_from_container(&state, &sender, input).await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     #[tokio::test]
@@ -285,7 +297,7 @@ mod tests {
         let result = handle_take_from_container(&state, &sender, input).await;
         assert!(
             matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("Count must be greater than 0")),
+                if msg.contains("Count must be between 1 and 64")),
             "expected count==0 error, got: {result:?}"
         );
     }
@@ -293,14 +305,13 @@ mod tests {
     #[tokio::test]
     async fn test_take_from_container_default_count() {
         let (state, sender) = setup();
-        // No container open — error expected
+        // Default count=1 is valid, but bot is offline — should get Offline error
         let input = TakeFromContainerInput {
             slot: 5,
             count: None,
         };
         let result = handle_take_from_container(&state, &sender, input).await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     // ── put_into_container ──────────────────────────────────────
@@ -312,9 +323,9 @@ mod tests {
             slot: 0,
             count: Some(1),
         };
+        // Parameters valid but bot offline — Offline error expected
         let result = handle_put_into_container(&state, &sender, input).await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
     // ── close_container ─────────────────────────────────────────

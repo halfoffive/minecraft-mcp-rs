@@ -426,36 +426,41 @@ impl CompoundOpExecutor {
             return Err(BotError::Offline("bot is not connected".into()));
         }
 
-        // Step 1: Find item in inventory
+        // Step 1 & 2: Find item in inventory, prefer hotbar (slots 0-8) first.
+        // Only hotbar slots can be selected directly; an item in the main
+        // inventory (slot 9-35) can't be switched to without an inventory-move
+        // flow, so surface a clear error instead of letting the executor
+        // reject slot >= 9.
         let inventory = Self::query_inventory(executor).await?;
-        let has_item = inventory
+
+        // First, look in hotbar (slots 0-8) — take the first match
+        let hotbar_slot = inventory
             .iter()
-            .any(|slot| slot.as_ref().is_some_and(|item| item.item_id == block_type));
+            .take(9)
+            .position(|s| s.as_ref().is_some_and(|item| item.item_id == block_type));
 
-        if !has_item {
-            return Err(BotError::ToolNotFound {
-                tool_type: ToolType::Hand, // generic fallback (no block item)
-                material: None,
-                alternatives: vec![],
-            });
-        }
+        if let Some(s) = hotbar_slot {
+            executor
+                .dispatch(BotCommand::SwitchHotbarSlot(s as u8))
+                .await?;
+        } else {
+            // Not in hotbar — check main inventory
+            let has_in_main = inventory
+                .iter()
+                .skip(9)
+                .any(|s| s.as_ref().is_some_and(|item| item.item_id == block_type));
 
-        // Step 2: Select in hotbar. Only hotbar slots (0-8) can be selected
-        // directly; an item in the main inventory (slot 9-35) can't be
-        // switched to without an inventory-move flow, so surface a clear
-        // error instead of letting the executor reject slot >= 9.
-        let slot = inventory
-            .iter()
-            .position(|s| s.as_ref().is_some_and(|item| item.item_id == block_type))
-            .and_then(|i| u8::try_from(i).ok());
-
-        if let Some(s) = slot {
-            if s > 8 {
+            if has_in_main {
                 return Err(BotError::Internal(format!(
-                    "{block_type} is in main inventory slot {s}; move it to a hotbar slot (0-8) before placing"
+                    "{block_type} is in main inventory; move it to a hotbar slot (0-8) before placing"
                 )));
+            } else {
+                return Err(BotError::ToolNotFound {
+                    tool_type: ToolType::Hand,
+                    material: None,
+                    alternatives: vec![],
+                });
             }
-            executor.dispatch(BotCommand::SwitchHotbarSlot(s)).await?;
         }
 
         // Build state machine
@@ -1278,6 +1283,66 @@ mod tests {
                 .iter()
                 .any(|b| b.position == pos && b.block_type == "stone")
         );
+    }
+
+    // ── execute_place_block: item in both hotbar and main inventory uses hotbar ──
+
+    #[tokio::test]
+    async fn test_place_block_prefers_hotbar_over_main_inventory() {
+        let pos = BlockPos::new(10, 64, 20);
+        let snapshot = make_snapshot_with_block(pos, "air");
+        let mut inventory: Vec<Option<ItemStack>> = vec![None; 36];
+        inventory[15] = Some(ItemStack {
+            item_id: "cobblestone".into(),
+            count: 64,
+        });
+        inventory[3] = Some(ItemStack {
+            item_id: "cobblestone".into(),
+            count: 64,
+        });
+        let (executor, mock, state) = setup(inventory, snapshot);
+        *mock.next_place_type.lock().unwrap() = Some("cobblestone".into());
+
+        let result =
+            CompoundOpExecutor::execute_place_block(&executor, pos, "cobblestone".into()).await;
+
+        assert!(result.is_ok(), "expected success, got: {:?}", result);
+        let final_snapshot = state.read_snapshot();
+        assert_eq!(
+            final_snapshot.self_player.held_item_slot, 3,
+            "should select hotbar slot 3, not main inventory slot 15"
+        );
+    }
+
+    // ── execute_place_block: item only in main inventory errors ──
+
+    #[tokio::test]
+    async fn test_place_block_item_only_in_main_inventory_errors() {
+        let pos = BlockPos::new(10, 64, 20);
+        let snapshot = make_snapshot_with_block(pos, "air");
+        let mut inventory: Vec<Option<ItemStack>> = vec![None; 36];
+        inventory[20] = Some(ItemStack {
+            item_id: "dirt".into(),
+            count: 64,
+        });
+        let (executor, _mock, _state) = setup(inventory, snapshot);
+
+        let result = CompoundOpExecutor::execute_place_block(&executor, pos, "dirt".into()).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            BotError::Internal(msg) => {
+                assert!(
+                    msg.contains("main inventory"),
+                    "expected error mentioning main inventory, got: {msg}"
+                );
+                assert!(
+                    msg.contains("hotbar slot (0-8)"),
+                    "expected error mentioning hotbar, got: {msg}"
+                );
+            }
+            other => panic!("expected BotError::Internal, got: {other:?}"),
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════

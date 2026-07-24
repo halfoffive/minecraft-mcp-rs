@@ -261,11 +261,12 @@ impl MinecraftApp {
 
         let config = self.state.read_config().clone();
         let state = Arc::clone(&self.state);
+        let state_for_spawn_error = Arc::clone(&self.state);
         let receiver = Arc::clone(&self.command_receiver);
         let sender = self.sender.clone();
         let egui_ctx = self.egui_ctx.clone();
 
-        let handle = std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name("bot-connection".into())
             .spawn(move || {
                 // RAII guard: `ClearGuard` calls `state.clear_connecting()`
@@ -295,17 +296,18 @@ impl MinecraftApp {
                     }
                 });
 
-                // Clear the connecting flag in case the loop exited without
-                // doing it (e.g. due to an early error return).  Also acts
-                // as the explicit clear on the normal (non-panic) exit path,
-                // since the `ClearGuard` clears unconditionally on drop.
-                state.clear_connecting();
                 tracing::info!("Bot connection thread exited");
-            })
-            .expect("Failed to spawn bot connection thread");
-
-        self.bot_thread = Some(handle);
-        tracing::info!("Bot connection thread spawned");
+            }) {
+            Ok(handle) => {
+                self.bot_thread = Some(handle);
+                tracing::info!("Bot connection thread spawned");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to spawn bot connection thread");
+                state_for_spawn_error.set_last_error(format!("Failed to spawn bot thread: {e}"));
+                state_for_spawn_error.clear_connecting();
+            }
+        }
     }
 }
 
@@ -314,7 +316,6 @@ impl Drop for MinecraftApp {
         // Signal the bot to stop retrying and let the connection thread
         // exit cleanly when the window is closed.
         self.state.request_disconnect();
-        self.state.set_online(false);
 
         // Trigger MCP server graceful shutdown so the stdio/HTTP transport
         // returns promptly. After this, `serve_http`'s `with_graceful_shutdown`

@@ -105,10 +105,11 @@ pub async fn handle_walk_direction(
         }
     };
 
-    if input.distance == 0 {
-        return Err(BotError::InvalidParams(
-            "Distance must be greater than 0".to_string(),
-        ));
+    if input.distance < 1 || input.distance > 1000 {
+        return Err(BotError::InvalidParams(format!(
+            "Distance must be between 1 and 1000, got {}",
+            input.distance
+        )));
     }
 
     if !state.is_online() {
@@ -467,6 +468,58 @@ mod tests {
         };
         let result = handle_walk_direction(&state, &sender, input).await;
         assert!(matches!(result, Err(BotError::InvalidParams(_))));
+    }
+
+    #[tokio::test]
+    async fn test_walk_direction_distance_too_large() {
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = WalkDirectionInput {
+            direction: "north".into(),
+            distance: 1001,
+        };
+        let result = handle_walk_direction(&state, &sender, input).await;
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("1 and 1000")),
+            "expected distance-too-large error, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_walk_direction_max_distance_valid() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        make_online(&state);
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            assert!(
+                matches!(
+                    wrapped.command,
+                    BotCommand::WalkDirection(Direction::South, 1000)
+                ),
+                "expected WalkDirection(South, 1000) at max distance, got: {:?}",
+                wrapped.command
+            );
+            wrapped
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .expect("should respond");
+        });
+
+        let input = WalkDirectionInput {
+            direction: "south".into(),
+            distance: 1000,
+        };
+        let result = handle_walk_direction(&state, &sender, input).await.unwrap();
+        let json: Value = serde_json::from_str(&result).expect("valid JSON");
+        assert_eq!(json.get("distance"), Some(&Value::Number(1000.into())));
+        responder.await.expect("responder should finish");
     }
 
     #[tokio::test]

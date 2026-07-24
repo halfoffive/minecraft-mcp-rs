@@ -2416,6 +2416,14 @@ mod tests {
         let pos = BlockPos::new(10, 64, 20);
         let result = send_and_await(&sender, BotCommand::PlaceBlock(pos, "stone".into())).await;
         assert!(result.is_ok());
+        let br = result.unwrap();
+        assert!(br.success);
+        assert!(br.message.contains("Placed stone at"));
+        assert!(
+            !br.message.contains("slot:"),
+            "message must not contain 'slot:' prefix: {}",
+            br.message
+        );
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -2431,12 +2439,21 @@ mod tests {
     async fn test_place_block_selects_slot_from_prefix() {
         // The MCP layer encodes the hotbar slot as "slot:N" in the block_type
         // field; the executor must select that slot before interacting.
+        // The result message must strip the "slot:" prefix.
         let (executor, sender, _state, log) = make_executor();
         let handle = spawn_executor(executor);
 
         let pos = BlockPos::new(10, 64, 20);
         let result = send_and_await(&sender, BotCommand::PlaceBlock(pos, "slot:3".into())).await;
         assert!(result.is_ok());
+        let br = result.unwrap();
+        assert!(br.success);
+        assert!(br.message.contains("Placed 3 at"));
+        assert!(
+            !br.message.contains("slot:"),
+            "message must not contain 'slot:' prefix: {}",
+            br.message
+        );
 
         drop(sender);
         handle.await.expect("executor should finish");

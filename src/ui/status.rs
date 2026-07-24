@@ -23,7 +23,7 @@ use crate::ui::i18n::{self, TextKey};
 /// - Command counters (processed, succeeded, failed)
 /// - Last 10 chat messages
 pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
-    let is_online = state.is_online();
+    let (is_online, is_connecting) = (state.is_online(), state.is_connecting());
     let snapshot = state.read_snapshot();
     // Read connected_since under the lock, then drop the guard immediately.
     // The atomic counters (commands_processed etc.) don't need the lock.
@@ -64,7 +64,7 @@ pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
         ui.label(i18n::tr(TextKey::Connection));
         if is_online {
             ui.colored_label(egui::Color32::GREEN, i18n::tr(TextKey::Online));
-        } else if state.is_connecting() {
+        } else if is_connecting {
             // Connecting state: show a spinner next to the "Connecting…"
             // label so the user can see the app is actively trying to
             // connect (rather than just stuck on a static label).

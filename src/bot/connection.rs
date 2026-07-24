@@ -198,7 +198,7 @@ impl ConnectionManager {
                 const FIRST_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(2);
 
                 first_connect_attempts = first_connect_attempts.saturating_add(1);
-                if first_connect_attempts <= MAX_FIRST_CONNECT_RETRIES {
+                if first_connect_attempts < MAX_FIRST_CONNECT_RETRIES {
                     warn!(
                         attempt = first_connect_attempts,
                         max = MAX_FIRST_CONNECT_RETRIES,

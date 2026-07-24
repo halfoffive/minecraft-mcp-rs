@@ -292,6 +292,7 @@ async fn handle_spawn(bot: Client, state: &BotState) {
             // MCP clients that observe is_online()==true can immediately
             // send commands without hitting Offline errors.
             state.shared_state.set_online(true);
+            state.shared_state.set_connected_since(Some(Instant::now()));
             info!("command executor started");
         }
         None => {
@@ -322,6 +323,7 @@ async fn abort_and_clear_tick_tasks(tick_tasks: &Mutex<tokio::task::JoinSet<()>>
 
 async fn handle_disconnect(bot: Client, state: &BotState) {
     state.shared_state.set_online(false);
+    state.shared_state.set_connected_since(None);
 
     // Clear the ECS handle — the bot is already disconnecting, so
     // request_disconnect no longer needs to write AppExit::Success.

@@ -74,10 +74,10 @@ pub async fn handle_drop_item(
         )));
     }
     let count = input.count.unwrap_or(1);
-    if count == 0 {
-        return Err(BotError::InvalidParams(
-            "Count must be greater than 0".to_string(),
-        ));
+    if count < 1 || count > 64 {
+        return Err(BotError::InvalidParams(format!(
+            "Count must be between 1 and 64, got {count}"
+        )));
     }
     if !state.is_online() {
         return Err(BotError::Offline(
