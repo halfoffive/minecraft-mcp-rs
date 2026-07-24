@@ -75,7 +75,7 @@ pub fn preview_panel(
         ui.label(i18n::tr(TextKey::WorldView));
         let refresh_clicked = ui
             .button(i18n::tr(TextKey::Refresh))
-            .on_hover_text("Re-render the current snapshot at radius=8, scale=2")
+            .on_hover_text(i18n::tr(TextKey::RefreshTooltip))
             .clicked();
         if refresh_clicked {
             refresh_render(state);

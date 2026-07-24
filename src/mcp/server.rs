@@ -464,7 +464,10 @@ pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
             }
         }
         Err(e) => {
+            let msg = format!("MCP stdio server failed: {e}");
             error!(error = %e, "MCP server failed");
+            state_for_status.set_mcp_server_status(McpServerStatus::Failed(msg.clone()));
+            state_for_status.set_last_error(msg);
         }
     }
 

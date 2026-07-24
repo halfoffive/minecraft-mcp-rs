@@ -178,7 +178,7 @@ impl SnapshotBuilder {
             self_player,
             timestamp,
             chunk_summary,
-            commands_enabled: None,
+            commands_enabled: self.old.commands_enabled,
             block_index,
         }
     }
@@ -584,6 +584,14 @@ mod tests {
         assert!(types.contains(&"d".into()));
         assert!(!types.contains(&"a".into()));
         assert!(!types.contains(&"b".into()));
+    }
+
+    #[test]
+    fn test_builder_preserves_commands_enabled() {
+        let mut old = make_snapshot(vec![], vec![]);
+        old.commands_enabled = Some(true);
+        let new = SnapshotBuilder::new(old.clone()).build();
+        assert_eq!(new.commands_enabled, Some(true));
     }
 
     // ── Radius query tests ──────────────────────────────────
