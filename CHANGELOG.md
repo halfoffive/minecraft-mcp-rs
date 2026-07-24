@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [1.0.6] - 2026-07-24
+
 ### Added
 
 - **`SelfPlayer::position_precise` and `yaw` fields:** sub-block-precision
