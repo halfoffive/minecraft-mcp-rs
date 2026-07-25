@@ -373,7 +373,7 @@ mod tests {
         };
         let result = handle_drop_item(&state, &sender, input).await;
         assert!(
-            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("greater than 0"))
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("between 1 and 64"))
         );
     }
 
