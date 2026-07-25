@@ -584,13 +584,13 @@ mod tests {
 
     #[test]
     fn test_bot_command_variant_count() {
-        // 26 original variants + 7 v2 foundation variants = 33 total.
+        // 27 original variants + 7 v2/foundation variants (including EquipToolWithMaterial) = 34 total.
         let cmds = all_bot_commands();
         // Verify each variant returns 1 from the exhaustive match
         for cmd in &cmds {
             assert_eq!(require_all_variants(cmd), 1);
         }
-        assert_eq!(cmds.len(), 33);
+        assert_eq!(cmds.len(), 34);
     }
 
     #[test]
@@ -908,6 +908,7 @@ mod tests {
             BotCommand::UseItem,
             BotCommand::UseItemWithSlot(0),
             BotCommand::EquipTool(ToolType::Pickaxe),
+            BotCommand::EquipToolWithMaterial(ToolType::Pickaxe, MaterialTier::Diamond),
             BotCommand::OpenContainer(BlockPos::new(0, 0, 0)),
             BotCommand::TakeFromContainer(0, 1),
             BotCommand::PutIntoContainer(0, 1),

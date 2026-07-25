@@ -62,6 +62,7 @@ pub fn preview_panel(
                     );
                     *texture = None;
                     *last_annotation = None;
+                    state.clear_world_view_cache();
                 }
             }
         } else {
@@ -73,11 +74,11 @@ pub fn preview_panel(
     // Header row: label + refresh button.
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::WorldView));
-        let refresh_clicked = ui
-            .button(i18n::tr(TextKey::Refresh))
-            .on_hover_text(i18n::tr(TextKey::RefreshTooltip))
-            .clicked();
-        if refresh_clicked {
+        let is_online = state.is_online();
+        let refresh_btn = ui
+            .add_enabled(is_online, egui::Button::new(i18n::tr(TextKey::Refresh)))
+            .on_hover_text(i18n::tr(TextKey::RefreshTooltip));
+        if refresh_btn.clicked() {
             refresh_render(state);
         }
     });

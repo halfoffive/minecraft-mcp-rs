@@ -54,14 +54,14 @@ pub async fn handle_send_chat(
     sender: &BotCommandSender,
     message: String,
 ) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is offline".to_string()));
-    }
-
     if message.trim().is_empty() {
         return Err(BotError::InvalidParams(
             "Message cannot be empty".to_string(),
         ));
+    }
+
+    if !state.is_online() {
+        return Err(BotError::Offline("Bot is offline".to_string()));
     }
 
     let cmd = BotCommand::SendChat(message);
@@ -81,14 +81,14 @@ pub async fn handle_execute_command(
     sender: &BotCommandSender,
     command: String,
 ) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is offline".to_string()));
-    }
-
     if command.trim().is_empty() {
         return Err(BotError::InvalidParams(
             "Command cannot be empty".to_string(),
         ));
+    }
+
+    if !state.is_online() {
+        return Err(BotError::Offline("Bot is offline".to_string()));
     }
 
     // Auto-prepend `/` if the user omitted it.
@@ -115,10 +115,6 @@ pub async fn handle_set_game_mode(
     sender: &BotCommandSender,
     mode: String,
 ) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is offline".to_string()));
-    }
-
     let game_mode = match mode.to_lowercase().as_str() {
         "survival" => GameMode::Survival,
         "creative" => GameMode::Creative,
@@ -130,6 +126,10 @@ pub async fn handle_set_game_mode(
             )));
         }
     };
+
+    if !state.is_online() {
+        return Err(BotError::Offline("Bot is offline".to_string()));
+    }
 
     let cmd = BotCommand::SetGameMode(game_mode);
     match sender.send_command(cmd).await {

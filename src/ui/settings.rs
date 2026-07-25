@@ -147,10 +147,10 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
     // Rendered before Connect / Disconnect so it sits with the other
     // config sections.  Changing the dropdown updates the active i18n
     // language immediately (next frame) — no reconnect needed — by
-    // calling `i18n::set` directly here.  The per-frame sync in
-    // `MinecraftApp::ui` then keeps the persisted AppConfig in step
-    // once the user clicks Connect (which calls `edit.apply`).
+    // calling `i18n::set` directly here, and also persists the choice
+    // to AppConfig immediately via `update_config`.
     ui.label(i18n::tr(TextKey::Language));
+    let prev_language = edit.language;
     ui.horizontal(|ui| {
         egui::ComboBox::from_id_salt("language_combo")
             .selected_text(language_label(edit.language))
@@ -163,6 +163,9 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
                 );
             });
     });
+    if edit.language != prev_language {
+        state.update_config(|cfg| cfg.language = edit.language);
+    }
     ui.separator();
 
     // ── Connect / Disconnect ──────────────────────────────────

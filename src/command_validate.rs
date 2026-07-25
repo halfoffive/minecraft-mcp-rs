@@ -127,7 +127,7 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
             Ok(())
         }
 
-        // Slotted operations require a valid slot and a positive count.
+        // Slotted operations require a valid slot and a positive count (1-64).
         // DropItem targets the player inventory (hotbar 0-8, main 9-35).
         BotCommand::DropItem(slot, count) => {
             if *slot > 35 {
@@ -135,9 +135,9 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
                     "DropItem slot must be 0-35, got {slot}"
                 )));
             }
-            if *count == 0 {
+            if *count == 0 || *count > 64 {
                 return Err(BotError::InvalidParams(format!(
-                    "DropItem count must be > 0, got {count}"
+                    "DropItem count must be 1-64, got {count}"
                 )));
             }
             Ok(())
@@ -181,23 +181,21 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
             Ok(())
         }
 
-        // Block queries use a capped radius; entity queries only require > 0.
+        // Nearby block and entity queries use a capped radius consistent
+        // with the MCP layer (R-4: 1..=100) to prevent pathological O(n) scans.
         BotCommand::QueryNearbyBlocks(radius) => {
-            if *radius < 1 || *radius > 64 {
+            if *radius < 1 || *radius > 100 {
                 return Err(BotError::InvalidParams(format!(
-                    "Radius must be between 1 and 64, got {radius}"
+                    "Radius must be between 1 and 100, got {radius}"
                 )));
             }
             Ok(())
         }
 
         BotCommand::QueryNearbyEntities(radius) => {
-            // Upper bound prevents the `radius as i32` cast in the handler
-            // from wrapping (u32 values > i32::MAX would become negative and
-            // the Chebyshev filter would silently return nothing).
-            if *radius == 0 || *radius > 1024 {
+            if *radius < 1 || *radius > 100 {
                 return Err(BotError::InvalidParams(format!(
-                    "Radius must be between 1 and 1024, got {radius}"
+                    "Radius must be between 1 and 100, got {radius}"
                 )));
             }
             Ok(())
@@ -351,7 +349,7 @@ fn validate_position(pos: &BlockPos) -> Result<(), BotError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ActAction, Direction, GameMode, ToolType};
+    use crate::types::{ActAction, Direction, GameMode, MaterialTier, ToolType};
 
     // ── Position validation ─────────────────────────────────────────
 
@@ -627,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_query_nearby_blocks_valid_range() {
-        for radius in 1..=64u32 {
+        for radius in 1..=100u32 {
             let cmd = BotCommand::QueryNearbyBlocks(radius);
             assert!(
                 validate_command(&cmd).is_ok(),
@@ -644,14 +642,19 @@ mod tests {
 
     #[test]
     fn test_query_nearby_blocks_too_large() {
-        let cmd = BotCommand::QueryNearbyBlocks(65);
+        let cmd = BotCommand::QueryNearbyBlocks(101);
         assert!(validate_command(&cmd).is_err());
     }
 
     #[test]
     fn test_query_nearby_entities_valid() {
-        let cmd = BotCommand::QueryNearbyEntities(1);
-        assert!(validate_command(&cmd).is_ok());
+        for radius in 1..=100u32 {
+            let cmd = BotCommand::QueryNearbyEntities(radius);
+            assert!(
+                validate_command(&cmd).is_ok(),
+                "entity query radius {radius} should be valid"
+            );
+        }
     }
 
     #[test]
@@ -662,17 +665,17 @@ mod tests {
 
     #[test]
     fn test_query_nearby_entities_large() {
-        // Entity queries allow up to 1024 (prevents `as i32` overflow).
-        let cmd = BotCommand::QueryNearbyEntities(999);
+        // Entity queries allow up to 100 (R-4, consistent with MCP layer).
+        let cmd = BotCommand::QueryNearbyEntities(100);
         assert!(validate_command(&cmd).is_ok());
     }
 
     #[test]
     fn test_query_nearby_entities_too_large() {
-        // Values > 1024 are rejected to keep the `as i32` cast safe.
-        let cmd = BotCommand::QueryNearbyEntities(1025);
+        // Values > 100 are rejected to prevent pathological O(n) scans.
+        let cmd = BotCommand::QueryNearbyEntities(101);
         assert!(validate_command(&cmd).is_err());
-        // i32::MAX + 1 must not slip through (would wrap to a negative i32).
+        // u32::MAX must also be rejected.
         let cmd = BotCommand::QueryNearbyEntities(u32::MAX);
         assert!(validate_command(&cmd).is_err());
     }
@@ -698,6 +701,12 @@ mod tests {
     #[test]
     fn test_equip_tool_valid() {
         let cmd = BotCommand::EquipTool(ToolType::Pickaxe);
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_equip_tool_with_material_valid() {
+        let cmd = BotCommand::EquipToolWithMaterial(ToolType::Pickaxe, MaterialTier::Diamond);
         assert!(validate_command(&cmd).is_ok());
     }
 
@@ -750,6 +759,21 @@ mod tests {
     fn test_drop_item_zero_count() {
         let cmd = BotCommand::DropItem(1, 0);
         assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_drop_item_count_too_large() {
+        let cmd = BotCommand::DropItem(1, 65);
+        assert!(validate_command(&cmd).is_err());
+        let cmd = BotCommand::DropItem(1, u8::MAX);
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_drop_item_valid_count_boundary() {
+        // 64 is the Minecraft stack limit — must be accepted.
+        let cmd = BotCommand::DropItem(1, 64);
+        assert!(validate_command(&cmd).is_ok());
     }
 
     #[test]
@@ -1111,7 +1135,7 @@ mod tests {
         );
     }
 
-    // ── Exhaustive match on all 32 variants ────────────────────────
+    // ── Exhaustive match on all 34 variants ────────────────────────
     //
     // These tests provide compile-time coverage: if a new BotCommand variant
     // is added, the compiler will flag these matches as non-exhaustive.
@@ -1190,6 +1214,7 @@ mod tests {
             BotCommand::UseItem,
             BotCommand::UseItemWithSlot(0),
             BotCommand::EquipTool(ToolType::Pickaxe),
+            BotCommand::EquipToolWithMaterial(ToolType::Pickaxe, MaterialTier::Diamond),
             BotCommand::OpenContainer(BlockPos::new(0, 0, 0)),
             BotCommand::TakeFromContainer(0, 1),
             BotCommand::PutIntoContainer(0, 1),

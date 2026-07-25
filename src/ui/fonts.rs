@@ -17,11 +17,11 @@
 //! chosen file is loaded with [`std::fs::read`] and registered under the
 //! name `"cjk"` in the egui `FontDefinitions`:
 //!
-//! - Inserted at the **front** of `FontFamily::Proportional` so Chinese
-//!   glyphs render with the system font while Latin glyphs still prefer
-//!   egui's Ubuntu-Light (because the system CJK fonts also include Latin
-//!   glyphs, the visual difference is minimal — and crucially, characters
-//!   that only exist in the CJK font now resolve).
+//! - Appended to the **end** of `FontFamily::Proportional` so Latin
+//!   glyphs stay at the primary font (Ubuntu-Light) and only non-Latin
+//!   glyphs fall through to the system CJK font as a fallback (egui 0.34
+//!   searches all fonts in the list, so appending is sufficient for
+//!   correct CJK rendering).
 //! - Appended to the **back** of `FontFamily::Monospace` so monospace
 //!   Latin text keeps using Hack, with the CJK font as a fallback for
 //!   any non-Latin characters.
