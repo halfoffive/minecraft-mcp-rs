@@ -9,6 +9,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [1.0.7] - 2026-07-25
+
+### Added
+
+- **IPv6 support in MCP config URL:** `format_host_for_url` wraps IPv6
+  addresses in square brackets per RFC 3986 (e.g. `::1` → `[::1]`) when
+  generating the MCP client config JSON, so clients like Claude Desktop /
+  Cursor can connect to IPv6-bound MCP HTTP servers. IPv4 addresses and
+  hostnames are emitted unchanged.
+
+### Changed
+
+- **`execute_place_block` hotbar-first item lookup:** the compound op now
+  scans hotbar slots (0-8) first when locating the block item, only
+  consulting the main inventory to produce a clear "move it to a hotbar
+  slot (0-8)" error. Previously `position()` returned the first match
+  across all 36 slots and relied on scan order to land on a valid hotbar
+  slot.
+- **Bearer auth empty-token semantics:** when the configured `mcp_token`
+  is empty, authentication is now disabled entirely (all requests pass
+  through). Previously an empty configured token made the HTTP server
+  unreachable because no request could match an empty expected token.
+  An empty `Bearer` header is now also rejected when a token is
+  configured.
+
+### Fixed
+
+- **MCP parameter upper-bound validation:** `walk_direction` now rejects
+  `distance > 1000`; `drop_item`, `take_from_container`, and
+  `put_into_container` now reject `count > 64`; `take_from_container`
+  and `put_into_container` now reject `slot > 53` at the MCP layer.
+  Previously only the lower bound (0 / empty) was checked at the MCP
+  layer; the upper bound lived solely in `validate_command`.
+- **MCP parameter-vs-state validation order:** `handle_send_chat`,
+  `handle_execute_command`, `handle_set_game_mode`, `handle_attack_entity`,
+  and the four container handlers now validate parameters *before* the
+  `is_online` / `check_container_open` gates, so a malformed request
+  always yields `InvalidParams` rather than a misleading `Offline` /
+  "no container open" error (extends the R-6 convention to the remaining
+  handlers).
+- **First-connect retry off-by-one:** `ConnectionManager::connect` now
+  retries the first connection exactly `MAX_FIRST_CONNECT_RETRIES` times
+  (changed `<=` to `<`), instead of one extra attempt.
+- **`MinecraftApp::Drop` no longer clears the online flag:** the `online`
+  flag is owned by the bot ECS (`handle_disconnect`); `Drop` previously
+  called `set_online(false)` directly, racing the ECS teardown. Removed,
+  matching the v1.0.5 Disconnect-button fix.
+- **`connect_bot` thread-spawn panic:** `thread::Builder::spawn` failure
+  in `connect_bot` is now handled gracefully — sets `last_error` and
+  clears the `connecting` flag — instead of panicking via `.expect()`.
+- **Air blocks now included in snapshots:** `build_snapshot_inner` no
+  longer filters out `air` blocks. Previously `block_index` had no entry
+  for air positions, so `find_standable_neighbor` (which checks "air
+  block with solid block below") could not distinguish standable air
+  from unloaded chunks, breaking placement targeting.
+- **MCP HTTP server error surfacing:** `serve_http` now sets
+  `McpServerStatus::Failed` and `last_error` when axum returns an error,
+  so the failure is visible in the Status panel instead of only in the
+  logs.
+- **`connected_since` now updates on connect/disconnect:** `handle_spawn`
+  and `handle_disconnect` call the new `SharedState::set_connected_since`
+  to set/clear the connection timestamp. Previously the field was never
+  written, so the Status panel's "connected since" indicator was always
+  empty.
+- **UI language persistence:** changing the Language dropdown now
+  persists to `AppConfig` immediately via `update_config`, rather than
+  waiting for the next Connect to apply.
+- **UI preview Refresh gated on online state:** the world-view Refresh
+  button is now disabled when the bot is offline, and a failed refresh
+  clears the view cache.
+- **CJK font doc comment:** the `fonts.rs` module doc now correctly
+  states the CJK font is *appended* to `Proportional` (matching the
+  v1.0.5 R-3 code change), not inserted at the front.
+- **`EquipToolWithMaterial` test coverage:** the variant (added in v1.0.6)
+  is now enumerated in `all_bot_commands()` and the variant-count
+  assertion is bumped from 33 to 34, fixing the drift where the
+  exhaustive test guard didn't actually cover the new variant.
+
 ## [1.0.6] - 2026-07-24
 
 ### Added
