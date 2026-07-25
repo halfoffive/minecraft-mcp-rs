@@ -74,7 +74,7 @@ pub async fn handle_drop_item(
         )));
     }
     let count = input.count.unwrap_or(1);
-    if count < 1 || count > 64 {
+    if !(1..=64).contains(&count) {
         return Err(BotError::InvalidParams(format!(
             "Count must be between 1 and 64, got {count}"
         )));
