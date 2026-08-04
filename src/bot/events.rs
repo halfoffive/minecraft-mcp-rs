@@ -292,6 +292,16 @@ async fn handle_spawn(bot: Client, state: &BotState) {
             // MCP clients that observe is_online()==true can immediately
             // send commands without hitting Offline errors.
             state.shared_state.set_online(true);
+            // Latch "this session came online" for the connect loop
+            // (audit F6-1 fix). `handle_disconnect` clears `is_online()`
+            // BEFORE `ClientBuilder::start()` returns, so the loop cannot
+            // use `is_online()` to learn that this session ever connected
+            // — it would always see `false` and skip the exponential
+            // backoff branch. The latch survives the disconnect and is
+            // consumed by `SharedState::take_session_was_online()` in the
+            // loop, making reconnect-with-backoff reachable after real
+            // disconnects.
+            state.shared_state.mark_session_online();
             state.shared_state.set_connected_since(Some(Instant::now()));
             info!("command executor started");
         }

@@ -29,6 +29,15 @@ use crate::state::SharedState;
 /// so connection status can be read by the MCP server and UI layers.
 #[derive(Debug)]
 pub struct ConnectionManager {
+    /// Initial configuration snapshot captured at construction time.
+    ///
+    /// **Initial-only:** the connect loop and [`reconnect_backoff`](Self::reconnect_backoff)
+    /// re-read live values from [`SharedState::read_config`] on every
+    /// iteration (hot reload), so this field is NOT consulted inside the
+    /// loop. It is retained so callers (and tests) can inspect the
+    /// configuration the manager was constructed with without touching the
+    /// `ConnectionManager::new` call chain.
+    #[allow(dead_code)]
     config: AppConfig,
     state: Arc<SharedState>,
 }
@@ -76,16 +85,27 @@ impl ConnectionManager {
     /// do next based on whether the bot ever came online:
     ///
     /// - **User-initiated disconnect** (`is_disconnect_requested()`): stop
-    ///   immediately without writing an error.
-    /// - **Connection never succeeded** (`is_online()` was `false` for the
-    ///   entire `start()` call): capture a descriptive error into
-    ///   [`SharedState::set_last_error`] and stop — the user must click
-    ///   Connect again to retry.
+    ///   immediately without writing an error — unless a config restart was
+    ///   requested (see below).
+    /// - **Config restart** ([`should_restart_after_disconnect`]): an agent
+    ///   changed connection settings via `update_settings` while online;
+    ///   consume the restart flag, clear the disconnect request, reset the
+    ///   cancel token and stale error, reset attempt counters, and reconnect
+    ///   with the updated settings.
+    /// - **Connection never succeeded** (the session latch
+    ///   [`SharedState::take_session_was_online`] returns `false`): capture
+    ///   a descriptive error into [`SharedState::set_last_error`] and stop —
+    ///   the user must click Connect again to retry.
     /// - **Was online, then disconnected** (a proper "reconnect" scenario):
     ///   clear `last_error` and retry with exponential backoff. The backoff
     ///   sleep is cancelable via the
     ///   [`CancellationToken`](tokio_util::sync::CancellationToken) so a
     ///   Disconnect click interrupts it immediately.
+    ///
+    /// Every iteration hot-reloads the connection-relevant config values
+    /// (`ai_username`, `mc_address`, `mc_port`, `snapshot_interval_ms`, and
+    /// the backoff delays) from [`SharedState::read_config`] so
+    /// agent-driven settings changes take effect without a restart.
     ///
     /// Spawn this as a background task via [`tokio::spawn`].
     ///
@@ -120,11 +140,37 @@ impl ConnectionManager {
         let mut first_connect_attempts: u32 = 0;
 
         loop {
-            // If the user clicked Disconnect before we even started, stop.
+            // If the user clicked Disconnect before we even started, stop —
+            // unless an agent-driven config restart was requested, in which
+            // case consume it and reconnect with the updated settings.
             if self.state.is_disconnect_requested() {
+                if should_restart_after_disconnect(&self.state) {
+                    info!("config restart requested — reconnecting with updated settings");
+                    attempt = 0;
+                    first_connect_attempts = 0;
+                    continue;
+                }
                 info!("disconnect requested — stopping connection loop");
                 break;
             }
+
+            // Hot config reload: read the connection-relevant values fresh
+            // from `SharedState` on every iteration instead of using the
+            // frozen `self.config` snapshot. This lets agent-driven
+            // `update_settings` changes (username, server address/port,
+            // snapshot interval) take effect on the very next reconnect
+            // without restarting the process. The RwLock read guard is
+            // confined to this block and dropped before any `.await` —
+            // never held across an await point.
+            let (ai_username, mc_address, mc_port, snapshot_interval_ms) = {
+                let cfg = self.state.read_config();
+                (
+                    cfg.ai_username.clone(),
+                    cfg.mc_address.clone(),
+                    cfg.mc_port,
+                    cfg.snapshot_interval_ms,
+                )
+            };
 
             // Inject dependencies so BotState::default() picks them up when
             // azalea initializes the state internally via Default. Using
@@ -139,16 +185,16 @@ impl ConnectionManager {
                 &command_receiver,
                 egui_ctx.as_ref(),
                 &command_sender,
-                self.config.snapshot_interval_ms,
+                snapshot_interval_ms,
             );
 
-            let account = Account::offline(&self.config.ai_username);
-            let address = format!("{}:{}", self.config.mc_address, self.config.mc_port);
+            let account = Account::offline(&ai_username);
+            let address = format!("{mc_address}:{mc_port}");
 
             info!(
                 "Connecting to {} as {} (attempt {})...",
                 address,
-                self.config.ai_username,
+                ai_username,
                 attempt + 1
             );
 
@@ -174,18 +220,33 @@ impl ConnectionManager {
                 }
             };
 
-            // Was the bot online before this disconnect? The event handler
-            // sets `is_online()` to true on `Event::Spawn`, so this is true
-            // iff the bot successfully connected at some point during the
-            // `start()` call. Capture it before we clear the flag below.
-            let was_online = self.state.is_online();
+            // Was the bot online before this disconnect? `handle_spawn`
+            // latches `session_was_online` via `mark_session_online()` when
+            // the executor starts, so this is true iff the bot successfully
+            // connected at some point during the `start()` call.
+            //
+            // NOTE (audit F6-1): this used to read `self.state.is_online()`,
+            // which is ALWAYS false here — `handle_disconnect` clears the
+            // online flag before `ClientBuilder::start()` returns — so the
+            // exponential-backoff branch below was dead code and the bot
+            // fail-fasted after any real disconnect. The latch survives
+            // `handle_disconnect` and is consumed by the take below.
+            let was_online = self.state.take_session_was_online();
 
             // Disconnected — ensure the online flag is cleared.
             self.state.set_online(false);
             Self::request_repaint(&egui_ctx);
 
-            // If the user requested disconnect, don't treat it as a failure.
+            // If the user requested disconnect, don't treat it as a failure —
+            // unless an agent-driven config restart was requested, in which
+            // case consume it and reconnect with the updated settings.
             if self.state.is_disconnect_requested() {
+                if should_restart_after_disconnect(&self.state) {
+                    info!("config restart requested — reconnecting with updated settings");
+                    attempt = 0;
+                    first_connect_attempts = 0;
+                    continue;
+                }
                 info!("disconnect requested — stopping reconnect loop");
                 break;
             }
@@ -276,8 +337,15 @@ impl ConnectionManager {
     /// | 4       | 60s (capped)          |
     /// | 5+      | 60s (capped)          |
     pub fn reconnect_backoff(&self, attempt: u32) -> Duration {
-        let initial_ms = self.config.reconnect_initial_delay_ms;
-        let max_ms = self.config.reconnect_max_delay_ms;
+        // Read the delays LIVE from `SharedState` (not from the frozen
+        // `self.config` snapshot) so an agent-driven `update_settings`
+        // change to the backoff parameters takes effect on the very next
+        // reconnect. The read guard is confined to this block — no `.await`
+        // while held.
+        let (initial_ms, max_ms) = {
+            let cfg = self.state.read_config();
+            (cfg.reconnect_initial_delay_ms, cfg.reconnect_max_delay_ms)
+        };
         let delay_ms = initial_ms.saturating_mul(2u64.saturating_pow(attempt));
         Duration::from_millis(delay_ms.min(max_ms))
     }
@@ -314,6 +382,45 @@ impl ConnectionManager {
             .unwrap_or_else(|e| e.into_inner()) = Some(command_sender.clone());
         events::INJECTED_SNAPSHOT_INTERVAL_MS
             .store(snapshot_interval_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Decide whether the connect loop should restart instead of exiting after
+/// a disconnect request, and prepare the state for a clean reconnect.
+///
+/// # Agent-settings-change flow
+///
+/// When an AI agent changes connection-relevant settings (`mc_address`,
+/// `mc_port`, `ai_username`) through the `update_settings` MCP tool while
+/// the bot is online/connecting, the settings handler requests a disconnect
+/// ([`SharedState::request_disconnect`]) **and** flags a config restart
+/// ([`SharedState::request_config_restart`]). The running azalea session
+/// tears down, `ClientBuilder::start()` returns, and the connect loop
+/// observes the disconnect request at one of its checkpoints.
+///
+/// This helper is the consumption side of that handshake. If the restart
+/// flag is set, it:
+///
+/// 1. consumes the flag ([`SharedState::take_config_restart`]),
+/// 2. clears the disconnect request so the loop may reconnect
+///    ([`SharedState::clear_disconnect_request`]),
+/// 3. resets the cancellation token so the fresh iteration's backoff sleep
+///    and `select!` branches are not immediately cancelled by the token the
+///    settings handler tripped ([`SharedState::reset_cancel_token`]),
+/// 4. clears any stale error banner ([`SharedState::clear_last_error`]),
+///
+/// and returns `true` — the caller resets its attempt counters and
+/// `continue`s the loop, which hot-reloads the updated config on the next
+/// iteration. Without the restart flag, nothing is touched and `false` is
+/// returned — the caller honours the disconnect request and `break`s.
+pub(crate) fn should_restart_after_disconnect(state: &SharedState) -> bool {
+    if state.take_config_restart() {
+        state.clear_disconnect_request();
+        state.reset_cancel_token();
+        state.clear_last_error();
+        true
+    } else {
+        false
     }
 }
 
@@ -644,6 +751,120 @@ mod tests {
             config.snapshot_interval_ms,
             "snapshot interval must be restored on iteration 2"
         );
+    }
+
+    // -- F6-1 regression: session latch drives the backoff branch ------------
+
+    /// Regression for audit F6-1: `handle_disconnect` clears `is_online()`
+    /// BEFORE `ClientBuilder::start()` returns, so the connect loop reading
+    /// `is_online()` at the capture point always saw `false` — the
+    /// exponential-backoff branch was dead code and the bot fail-fasted
+    /// after any real disconnect.
+    ///
+    /// The fix latches "this session came online" via
+    /// [`SharedState::mark_session_online`] (called in `handle_spawn` next
+    /// to `set_online(true)`) and consumes it with
+    /// [`SharedState::take_session_was_online`] after `start()` returns.
+    /// This test pins the exact latch semantics the fix relies on:
+    /// `false` while the bot never connected, `true` after the session came
+    /// online (even though `is_online()` is already cleared again), and
+    /// consumed back to `false` by the take.
+    #[test]
+    fn test_session_latch_drives_backoff_branch() {
+        let state = SharedState::new(AppConfig::default());
+
+        // Never online → take reports false (first-connect retry path).
+        assert!(!state.take_session_was_online());
+
+        // handle_spawn path: bot came online.
+        state.mark_session_online();
+        state.set_online(true);
+
+        // handle_disconnect runs BEFORE start() returns and clears the
+        // online flag — the old capture point (`is_online()`) would see
+        // only this:
+        state.set_online(false);
+        assert!(!state.is_online());
+
+        // The latch survives the disconnect: the loop can still tell that
+        // this session WAS online, making the backoff branch reachable.
+        assert!(state.take_session_was_online());
+
+        // The take consumed the latch — the next iteration starts clean.
+        assert!(!state.take_session_was_online());
+    }
+
+    // -- Config-restart consumption ------------------------------------------
+
+    /// A config restart (agent changed connection settings while online)
+    /// must consume the restart flag, clear the disconnect request + stale
+    /// error, reset the cancel token, and report `true` so the loop
+    /// continues with updated settings. A second call without a fresh
+    /// restart request must report `false`.
+    #[test]
+    fn test_should_restart_after_disconnect_consumes_flag_and_clears_state() {
+        let state = SharedState::new(AppConfig::default());
+        state.request_disconnect();
+        state.request_config_restart();
+        state.set_last_error("stale error from previous session");
+
+        assert!(should_restart_after_disconnect(&state));
+
+        // Disconnect flag cleared so the loop may reconnect.
+        assert!(!state.is_disconnect_requested());
+        // Restart flag consumed exactly once.
+        assert!(!state.take_config_restart());
+        // Stale error cleared for the fresh session.
+        assert!(state.last_error().is_none());
+        // Cancel token reset: a fresh token is not cancelled.
+        assert!(!state.cancel_token().is_cancelled());
+
+        // Second call without a new restart request → false.
+        assert!(!should_restart_after_disconnect(&state));
+    }
+
+    /// Without a restart flag, a disconnect request must be honoured:
+    /// `should_restart_after_disconnect` returns `false` and leaves the
+    /// disconnect flag set so the loop breaks.
+    #[test]
+    fn test_should_restart_after_disconnect_false_keeps_disconnect() {
+        let state = SharedState::new(AppConfig::default());
+        state.request_disconnect();
+
+        assert!(!should_restart_after_disconnect(&state));
+        // Disconnect flag must remain set — the loop exits.
+        assert!(state.is_disconnect_requested());
+    }
+
+    // -- Hot config reload ----------------------------------------------------
+
+    /// `reconnect_backoff` must read the delays LIVE from `SharedState`
+    /// (not from the frozen `self.config` snapshot) so an agent-driven
+    /// `update_settings` takes effect on the very next reconnect without
+    /// restarting the process.
+    #[test]
+    fn test_reconnect_backoff_hot_reloads_config() {
+        let mut config = AppConfig::default();
+        config.reconnect_initial_delay_ms = 1000;
+        config.reconnect_max_delay_ms = 8000;
+
+        let state = Arc::new(SharedState::new(config.clone()));
+        let manager = ConnectionManager::new(config, Arc::clone(&state));
+
+        assert_eq!(manager.reconnect_backoff(0), Duration::from_secs(1));
+
+        // Agent updates the config while the connect loop is running.
+        state.update_config(|cfg| {
+            cfg.reconnect_initial_delay_ms = 2000;
+            cfg.reconnect_max_delay_ms = 16000;
+        });
+
+        // Live read: the new values are picked up immediately.
+        assert_eq!(manager.reconnect_backoff(0), Duration::from_secs(2));
+        // attempt 3: 2000 * 2^3 = 16000 → exactly the new cap.
+        assert_eq!(manager.reconnect_backoff(3), Duration::from_secs(16));
+        // attempt 4: 32000 → capped at 16000.
+        assert_eq!(manager.reconnect_backoff(4), Duration::from_secs(16));
     }
 
     /// Belt-and-braces: the connect loop itself calls
