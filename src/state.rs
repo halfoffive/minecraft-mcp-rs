@@ -148,6 +148,29 @@ pub struct SharedState {
     /// Set by the Disconnect button to tell the reconnect loop to stop
     /// retrying. Cleared on the next Connect click.
     disconnect_requested: AtomicBool,
+    /// Latched flag: "the bot reached `Event::Spawn` at least once during
+    /// this connection session".
+    ///
+    /// Set by [`mark_session_online`](Self::mark_session_online) when the
+    /// bot spawns, and consumed by
+    /// [`take_session_was_online`](Self::take_session_was_online), which
+    /// atomically reads and resets it. The latch exists because
+    /// `bot_online` is cleared by `handle_disconnect` *before*
+    /// `ClientBuilder::start()` returns — by the time the reconnect loop
+    /// inspects the state, `bot_online` is already `false` even though the
+    /// session did reach Spawn. Consumed by the reconnect logic to
+    /// distinguish "never connected" from "was online, then dropped".
+    session_was_online: AtomicBool,
+    /// Flag set when the agent (via MCP settings tools) changes server
+    /// connection settings, signalling that the bot must be (re)started to
+    /// pick up the new configuration.
+    ///
+    /// Set by [`request_config_restart`](Self::request_config_restart) and
+    /// consumed by [`take_config_restart`](Self::take_config_restart),
+    /// which atomically reads and resets it. The connect loop / headless
+    /// supervisor reads it to decide whether a disconnect should trigger a
+    /// respawn with the fresh config instead of stopping.
+    config_restart_requested: AtomicBool,
     /// Handle to the currently open container (if any).
     ///
     /// Stored behind `Mutex<Option<_>>` because [`ContainerHandle`] auto-closes
@@ -207,6 +230,15 @@ pub struct SharedState {
     /// thread) and readers (the UI preview panel on the egui thread) run on
     /// different threads.
     last_world_view: Mutex<Option<WorldViewCache>>,
+    /// Join handle of the bot connection OS thread, if one has been spawned
+    /// and not yet taken.
+    ///
+    /// Stored behind `Mutex<Option<_>>` because the handle is produced on
+    /// one thread (the UI or headless supervisor spawner) and consumed on
+    /// another (the supervisor waiting for the bot thread to exit).
+    /// [`take_bot_thread_handle`](Self::take_bot_thread_handle) moves the
+    /// handle out, guaranteeing exactly one owner ever joins it.
+    bot_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl SharedState {
@@ -243,6 +275,8 @@ impl SharedState {
             bot_online: AtomicBool::new(false),
             bot_connecting: AtomicBool::new(false),
             disconnect_requested: AtomicBool::new(false),
+            session_was_online: AtomicBool::new(false),
+            config_restart_requested: AtomicBool::new(false),
             container_handle: Mutex::new(None),
             chat_messages: Mutex::new(VecDeque::new()),
             last_error: Mutex::new(None),
@@ -252,6 +286,7 @@ impl SharedState {
             bot_ecs: Mutex::new(None),
             goto_notify: Arc::new(Notify::new()),
             last_world_view: Mutex::new(None),
+            bot_thread: Mutex::new(None),
         }
     }
 
@@ -364,6 +399,49 @@ impl SharedState {
     /// Whether a disconnect has been requested.
     pub fn is_disconnect_requested(&self) -> bool {
         self.disconnect_requested.load(Ordering::SeqCst)
+    }
+
+    /// Latch "the bot reached `Event::Spawn` this session".
+    ///
+    /// Called by the spawn event handler once the bot is fully in-game.
+    /// The latch survives until
+    /// [`take_session_was_online`](Self::take_session_was_online) consumes
+    /// it — necessary because `bot_online` is cleared by
+    /// `handle_disconnect` before `ClientBuilder::start()` returns, so the
+    /// reconnect loop cannot rely on `bot_online` to know whether the
+    /// session ever reached Spawn.
+    pub fn mark_session_online(&self) {
+        self.session_was_online.store(true, Ordering::SeqCst);
+    }
+
+    /// Consume the session-was-online latch.
+    ///
+    /// Returns `true` exactly once after
+    /// [`mark_session_online`](Self::mark_session_online) was called; the
+    /// flag is atomically swapped back to `false`, so subsequent calls
+    /// return `false` until the latch is re-armed by the next session.
+    pub fn take_session_was_online(&self) -> bool {
+        self.session_was_online.swap(false, Ordering::SeqCst)
+    }
+
+    /// Request that the bot be (re)started to pick up changed configuration.
+    ///
+    /// Set by the MCP settings tools when the agent changes server
+    /// connection settings; consumed by
+    /// [`take_config_restart`](Self::take_config_restart) in the connect
+    /// loop / headless supervisor.
+    pub fn request_config_restart(&self) {
+        self.config_restart_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// Consume the config-restart request.
+    ///
+    /// Returns `true` exactly once after
+    /// [`request_config_restart`](Self::request_config_restart) was called;
+    /// the flag is atomically swapped back to `false`, so subsequent calls
+    /// return `false` until a new request is made.
+    pub fn take_config_restart(&self) -> bool {
+        self.config_restart_requested.swap(false, Ordering::SeqCst)
     }
 
     /// Return a clone of the current [`CancellationToken`].
@@ -659,6 +737,28 @@ impl SharedState {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         *guard = None;
+    }
+
+    // ── Bot thread handle ────────────────────────────────────────────────
+
+    /// Store the join handle of the bot connection OS thread.
+    ///
+    /// Called by whichever layer spawns the bot thread (UI connect button
+    /// or headless supervisor). If a previous handle was stored and never
+    /// taken, it is dropped and replaced.
+    pub fn store_bot_thread_handle(&self, handle: std::thread::JoinHandle<()>) {
+        let mut guard = self.bot_thread.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(handle);
+    }
+
+    /// Take the stored bot thread handle out, leaving `None` behind.
+    ///
+    /// Returns `None` if no handle is stored (never spawned, or already
+    /// taken). After this call the caller owns the handle and is
+    /// responsible for joining it; a second take returns `None`.
+    pub fn take_bot_thread_handle(&self) -> Option<std::thread::JoinHandle<()>> {
+        let mut guard = self.bot_thread.lock().unwrap_or_else(|e| e.into_inner());
+        guard.take()
     }
 }
 
@@ -1260,5 +1360,77 @@ mod tests {
         // non-null and distinct clones.
         assert!(Arc::strong_count(&state.goto_notify) >= 2);
         drop(waiter);
+    }
+
+    // -- session_was_online ----------------------------------------------------
+
+    #[test]
+    fn test_session_was_online_initial_false() {
+        let state = SharedState::new(AppConfig::default());
+        // No mark yet — the latch must read false.
+        assert!(!state.take_session_was_online());
+    }
+
+    #[test]
+    fn test_session_was_online_true_once_then_false() {
+        let state = SharedState::new(AppConfig::default());
+        state.mark_session_online();
+        // First take returns true and consumes the latch.
+        assert!(state.take_session_was_online());
+        // Second take returns false (stale-state guard: double-take must
+        // not report a second session).
+        assert!(!state.take_session_was_online());
+        // Marking again re-arms the latch for the next session.
+        state.mark_session_online();
+        assert!(state.take_session_was_online());
+        assert!(!state.take_session_was_online());
+    }
+
+    // -- config_restart_requested -----------------------------------------------
+
+    #[test]
+    fn test_config_restart_initial_false() {
+        let state = SharedState::new(AppConfig::default());
+        // No request yet — the flag must read false.
+        assert!(!state.take_config_restart());
+    }
+
+    #[test]
+    fn test_config_restart_true_once_then_false() {
+        let state = SharedState::new(AppConfig::default());
+        state.request_config_restart();
+        // First take returns true and consumes the request.
+        assert!(state.take_config_restart());
+        // Second take returns false (stale-state guard).
+        assert!(!state.take_config_restart());
+        // Requesting again re-arms the flag.
+        state.request_config_restart();
+        assert!(state.take_config_restart());
+        assert!(!state.take_config_restart());
+    }
+
+    // -- bot_thread handle -------------------------------------------------------
+
+    #[test]
+    fn test_bot_thread_handle_initial_none() {
+        let state = SharedState::new(AppConfig::default());
+        assert!(state.take_bot_thread_handle().is_none());
+    }
+
+    #[test]
+    fn test_bot_thread_handle_store_take_roundtrip() {
+        let state = SharedState::new(AppConfig::default());
+        // Spawn a trivial thread and store its handle.
+        let handle = thread::spawn(|| {});
+        state.store_bot_thread_handle(handle);
+        // First take returns the stored handle; joining succeeds.
+        let taken = state.take_bot_thread_handle();
+        assert!(taken.is_some());
+        taken
+            .unwrap()
+            .join()
+            .expect("trivial thread should join cleanly");
+        // Second take returns None (the handle was moved out).
+        assert!(state.take_bot_thread_handle().is_none());
     }
 }
