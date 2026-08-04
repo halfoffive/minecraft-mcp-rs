@@ -159,8 +159,50 @@ impl Display for BotError {
 // Conversion to MCP error responses
 // ---------------------------------------------------------------------------
 
+// Custom JSON-RPC server error codes.
+//
+// JSON-RPC reserves `-32000..=-32099` for implementation-defined server
+// errors; every bot-specific failure gets a DISTINCT code so MCP clients can
+// branch on `error.code` alone. `-32002` is deliberately skipped — it is
+// rmcp's `ErrorCode::RESOURCE_NOT_FOUND` (used by `BlockNotFound`).
+//
+// Error-contract table (every variant carries structured `data` with a
+// machine-readable snake_case `reason`, a `retryable` bool, and the listed
+// variant-specific fields):
+//
+// | Code   | Constant / std code              | BotError variant       | reason               | retryable | extra data fields                    |
+// |--------|----------------------------------|------------------------|----------------------|-----------|--------------------------------------|
+// | -32000 | `CODE_OFFLINE`                   | `Offline`              | `bot_disconnected`   | true      | —                                    |
+// | -32001 | `CODE_COMMAND_TIMEOUT`           | `CommandTimeout`       | `command_timeout`    | true      | `command`, `timeout_secs`            |
+// | -32002 | `ErrorCode::RESOURCE_NOT_FOUND`  | `BlockNotFound`        | `block_not_found`    | false     | `x`, `y`, `z`                        |
+// | -32003 | `CODE_CHUNK_NOT_LOADED`          | `ChunkNotLoaded`       | `chunk_not_loaded`   | true      | `x`, `y`, `z`                        |
+// | -32004 | `CODE_INVENTORY_FULL`            | `InventoryFull`        | `inventory_full`     | false     | —                                    |
+// | -32005 | `CODE_MINING_INTERRUPTED`        | `MiningInterrupted`    | `mining_interrupted` | false     | `detail`                             |
+// | -32006 | `CODE_CONTAINER_ALREADY_OPEN`    | `ContainerAlreadyOpen` | `container_already_open` | false | —                                |
+// | -32007 | `CODE_CONTAINER_TIMEOUT`         | `ContainerTimeout`     | `container_timeout`  | true      | —                                    |
+// | -32008 | `CODE_PATHFINDING_FAILED`        | `PathfindingFailed`    | `pathfinding_failed` | false     | `x`, `y`, `z` (target), `detail`     |
+// | -32600 | `ErrorCode::INVALID_REQUEST`     | `PermissionDenied`     | `permission_denied`  | false     | —                                    |
+// | -32602 | `ErrorCode::INVALID_PARAMS`      | `ToolNotFound`         | `tool_not_found`     | false     | `tool_type`, `material`, `alternatives` |
+// | -32602 | `ErrorCode::INVALID_PARAMS`      | `TooFar`               | `too_far`            | false     | `target`, `current`, `max_distance`  |
+// | -32602 | `ErrorCode::INVALID_PARAMS`      | `InvalidParams`        | `invalid_params`     | false     | —                                    |
+// | -32603 | `ErrorCode::INTERNAL_ERROR`      | `Internal`             | `internal_error`     | false     | —                                    |
+//
+// Variants sharing a standard code (`INVALID_PARAMS`) remain distinguishable
+// via `data.reason`.
+const CODE_OFFLINE: i32 = -32000;
+const CODE_COMMAND_TIMEOUT: i32 = -32001;
+// -32002 is rmcp's RESOURCE_NOT_FOUND — intentionally not redefined here.
+const CODE_CHUNK_NOT_LOADED: i32 = -32003;
+const CODE_INVENTORY_FULL: i32 = -32004;
+const CODE_MINING_INTERRUPTED: i32 = -32005;
+const CODE_CONTAINER_ALREADY_OPEN: i32 = -32006;
+const CODE_CONTAINER_TIMEOUT: i32 = -32007;
+const CODE_PATHFINDING_FAILED: i32 = -32008;
+
 impl From<BotError> for ErrorData {
     fn from(err: BotError) -> Self {
+        // Every arm produces a structured `data` payload; see the contract
+        // table above the `CODE_*` constants.
         let (code, data) = match &err {
             // `Offline` is mapped to a custom JSON-RPC server error
             // (-32000) rather than `INTERNAL_ERROR` (-32603) so MCP
@@ -172,71 +214,155 @@ impl From<BotError> for ErrorData {
                 // JSON-RPC reserves -32000..=-32099 for
                 // implementation-defined server errors. `ErrorCode` is a
                 // public tuple struct (no `new` constructor), so we
-                // build the value directly. -32000 is the standard
-                // "server error" slot; we keep `reason` in `data` so
-                // clients can still discriminate the cause.
-                ErrorCode(-32000),
-                Some(serde_json::json!({ "reason": "bot_disconnected" })),
+                // build the value directly.
+                ErrorCode(CODE_OFFLINE),
+                serde_json::json!({
+                    "reason": "bot_disconnected",
+                    "retryable": true,
+                }),
             ),
 
-            BotError::CommandTimeout { .. }
-            | BotError::ChunkNotLoaded(_)
-            | BotError::InventoryFull
-            | BotError::MiningInterrupted { .. }
-            | BotError::ContainerAlreadyOpen
-            | BotError::ContainerTimeout
-            | BotError::Internal(_) => (ErrorCode::INTERNAL_ERROR, None),
+            BotError::CommandTimeout {
+                command,
+                timeout_secs,
+            } => (
+                ErrorCode(CODE_COMMAND_TIMEOUT),
+                serde_json::json!({
+                    "reason": "command_timeout",
+                    "retryable": true,
+                    "command": command,
+                    "timeout_secs": timeout_secs,
+                }),
+            ),
 
-            BotError::BlockNotFound(pos) => {
-                let detail = serde_json::json!({
+            BotError::BlockNotFound(pos) => (
+                ErrorCode::RESOURCE_NOT_FOUND,
+                serde_json::json!({
+                    "reason": "block_not_found",
+                    "retryable": false,
                     "x": pos.x,
                     "y": pos.y,
                     "z": pos.z,
-                });
-                (ErrorCode::RESOURCE_NOT_FOUND, Some(detail))
-            }
+                }),
+            ),
+
+            BotError::ChunkNotLoaded(pos) => (
+                ErrorCode(CODE_CHUNK_NOT_LOADED),
+                serde_json::json!({
+                    "reason": "chunk_not_loaded",
+                    "retryable": true,
+                    "x": pos.x,
+                    "y": pos.y,
+                    "z": pos.z,
+                }),
+            ),
 
             BotError::ToolNotFound {
                 tool_type,
                 material,
                 alternatives,
-            } => {
-                let detail = serde_json::json!({
+            } => (
+                ErrorCode::INVALID_PARAMS,
+                serde_json::json!({
+                    "reason": "tool_not_found",
+                    "retryable": false,
                     "tool_type": tool_type.to_string(),
                     "material": material.as_ref().map(|m| m.to_string()),
                     "alternatives": alternatives,
-                });
-                (ErrorCode::INVALID_PARAMS, Some(detail))
-            }
+                }),
+            ),
 
             BotError::TooFar {
                 target,
                 current,
                 max_distance,
-            } => {
-                let detail = serde_json::json!({
+            } => (
+                ErrorCode::INVALID_PARAMS,
+                serde_json::json!({
+                    "reason": "too_far",
+                    "retryable": false,
                     "target": { "x": target.x, "y": target.y, "z": target.z },
                     "current": { "x": current.x, "y": current.y, "z": current.z },
                     "max_distance": max_distance,
-                });
-                (ErrorCode::INVALID_PARAMS, Some(detail))
-            }
+                }),
+            ),
 
-            BotError::PathfindingFailed { target, .. } => {
-                let detail = serde_json::json!({
+            BotError::InventoryFull => (
+                ErrorCode(CODE_INVENTORY_FULL),
+                serde_json::json!({
+                    "reason": "inventory_full",
+                    "retryable": false,
+                }),
+            ),
+
+            BotError::PathfindingFailed { target, reason } => (
+                ErrorCode(CODE_PATHFINDING_FAILED),
+                serde_json::json!({
+                    "reason": "pathfinding_failed",
+                    "retryable": false,
+                    // Target coordinates stay flat (pre-existing wire
+                    // shape); the failure explanation travels as `detail`
+                    // because `reason` is the variant discriminator.
                     "x": target.x,
                     "y": target.y,
                     "z": target.z,
-                });
-                (ErrorCode::INTERNAL_ERROR, Some(detail))
-            }
+                    "detail": reason,
+                }),
+            ),
 
-            BotError::PermissionDenied(_) => (ErrorCode::INVALID_REQUEST, None),
+            BotError::MiningInterrupted { reason } => (
+                ErrorCode(CODE_MINING_INTERRUPTED),
+                serde_json::json!({
+                    "reason": "mining_interrupted",
+                    "retryable": false,
+                    // The interrupt reason travels as `detail` because
+                    // `reason` is the variant discriminator.
+                    "detail": reason,
+                }),
+            ),
 
-            BotError::InvalidParams(_) => (ErrorCode::INVALID_PARAMS, None),
+            BotError::ContainerAlreadyOpen => (
+                ErrorCode(CODE_CONTAINER_ALREADY_OPEN),
+                serde_json::json!({
+                    "reason": "container_already_open",
+                    "retryable": false,
+                }),
+            ),
+
+            BotError::ContainerTimeout => (
+                ErrorCode(CODE_CONTAINER_TIMEOUT),
+                serde_json::json!({
+                    "reason": "container_timeout",
+                    "retryable": true,
+                }),
+            ),
+
+            BotError::PermissionDenied(_) => (
+                ErrorCode::INVALID_REQUEST,
+                serde_json::json!({
+                    "reason": "permission_denied",
+                    "retryable": false,
+                }),
+            ),
+
+            BotError::InvalidParams(_) => (
+                ErrorCode::INVALID_PARAMS,
+                serde_json::json!({
+                    "reason": "invalid_params",
+                    "retryable": false,
+                }),
+            ),
+
+            BotError::Internal(_) => (
+                ErrorCode::INTERNAL_ERROR,
+                serde_json::json!({
+                    "reason": "internal_error",
+                    "retryable": false,
+                }),
+            ),
         };
 
-        ErrorData::new(code, err.to_string(), data)
+        ErrorData::new(code, err.to_string(), Some(data))
     }
 }
 
@@ -429,6 +555,37 @@ mod tests {
     }
 
     // -- Conversion to rmcp::model::ErrorData ---------------------------------
+    //
+    // Contract: EVERY `BotError` variant maps to a distinct error code and
+    // carries a structured `data` payload with the mandatory machine-readable
+    // fields `reason` (snake_case variant discriminator) and `retryable`
+    // (bool), plus variant-specific fields. These tests assert LITERAL codes
+    // (not the `CODE_*` constants) so a typo in a constant cannot make its
+    // own test pass.
+
+    /// Extract the structured `data` payload and assert the two mandatory
+    /// contract fields (`reason` + `retryable`); returns the payload so
+    /// callers can additionally assert variant-specific fields.
+    fn assert_contract(
+        mcp: &ErrorData,
+        expected_reason: &str,
+        expected_retryable: bool,
+    ) -> serde_json::Value {
+        let data = mcp
+            .data
+            .as_ref()
+            .expect("every BotError variant must carry a structured data payload")
+            .clone();
+        assert_eq!(
+            data["reason"], expected_reason,
+            "wrong `reason` for {expected_reason}"
+        );
+        assert_eq!(
+            data["retryable"], expected_retryable,
+            "wrong `retryable` for {expected_reason}"
+        );
+        data
+    }
 
     #[test]
     fn test_into_mcp_error_offline() {
@@ -444,11 +601,24 @@ mod tests {
         // The `data` payload carries a machine-readable `reason` for
         // clients that want to render a tailored UI hint (e.g. a
         // "Connect the bot" call-to-action).
-        let data = mcp
-            .data
-            .as_ref()
-            .expect("Offline must carry a structured data payload");
-        assert_eq!(data["reason"], "bot_disconnected");
+        assert_contract(&mcp, "bot_disconnected", true);
+    }
+
+    #[test]
+    fn test_into_mcp_error_command_timeout() {
+        let err = BotError::CommandTimeout {
+            command: "mine".into(),
+            timeout_secs: 30,
+        };
+        let mcp: ErrorData = err.into();
+        // Regression guard: CommandTimeout used to map to INTERNAL_ERROR
+        // with no data payload; it now has its own code and carries the
+        // timed-out command plus the configured timeout.
+        assert_ne!(mcp.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(mcp.code.0, -32001);
+        let data = assert_contract(&mcp, "command_timeout", true);
+        assert_eq!(data["command"], "mine");
+        assert_eq!(data["timeout_secs"], 30);
     }
 
     #[test]
@@ -457,11 +627,26 @@ mod tests {
         let err = BotError::BlockNotFound(pos);
         let mcp: ErrorData = err.into();
         assert_eq!(mcp.code, ErrorCode::RESOURCE_NOT_FOUND);
-        assert!(mcp.data.is_some());
-        let data = mcp.data.unwrap();
+        let data = assert_contract(&mcp, "block_not_found", false);
         assert_eq!(data["x"], 1);
         assert_eq!(data["y"], 2);
         assert_eq!(data["z"], 3);
+    }
+
+    #[test]
+    fn test_into_mcp_error_chunk_not_loaded() {
+        let pos = BlockPos {
+            x: 16,
+            y: 64,
+            z: -16,
+        };
+        let err = BotError::ChunkNotLoaded(pos);
+        let mcp: ErrorData = err.into();
+        assert_eq!(mcp.code.0, -32003);
+        let data = assert_contract(&mcp, "chunk_not_loaded", true);
+        assert_eq!(data["x"], 16);
+        assert_eq!(data["y"], 64);
+        assert_eq!(data["z"], -16);
     }
 
     #[test]
@@ -473,9 +658,10 @@ mod tests {
         };
         let mcp: ErrorData = err.into();
         assert_eq!(mcp.code, ErrorCode::INVALID_PARAMS);
-        let data = mcp.data.unwrap();
+        let data = assert_contract(&mcp, "tool_not_found", false);
         assert_eq!(data["tool_type"], "axe");
         assert_eq!(data["material"], "iron");
+        // `alternatives` (upstream PR #21) must stay in the payload.
         assert_eq!(data["alternatives"][0], "Iron Axe");
     }
 
@@ -492,8 +678,69 @@ mod tests {
         };
         let mcp: ErrorData = err.into();
         assert_eq!(mcp.code, ErrorCode::INVALID_PARAMS);
-        let data = mcp.data.unwrap();
+        let data = assert_contract(&mcp, "too_far", false);
         assert_eq!(data["max_distance"], 42.0);
+        assert_eq!(data["target"]["x"], 10);
+        assert_eq!(data["current"]["z"], 0);
+    }
+
+    #[test]
+    fn test_into_mcp_error_inventory_full() {
+        let err = BotError::InventoryFull;
+        let mcp: ErrorData = err.into();
+        // Regression guard: used to be INTERNAL_ERROR with no data payload.
+        assert_ne!(mcp.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(mcp.code.0, -32004);
+        assert_eq!(mcp.message.as_ref(), "Inventory is full");
+        assert_contract(&mcp, "inventory_full", false);
+    }
+
+    #[test]
+    fn test_into_mcp_error_pathfinding_failed() {
+        let err = BotError::PathfindingFailed {
+            target: BlockPos { x: 5, y: 10, z: 15 },
+            reason: "no path".into(),
+        };
+        let mcp: ErrorData = err.into();
+        // Regression guard: used to be INTERNAL_ERROR.
+        assert_ne!(mcp.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(mcp.code.0, -32008);
+        let data = assert_contract(&mcp, "pathfinding_failed", false);
+        // Target coordinates stay flat (existing wire shape); the failure
+        // explanation travels under `detail`.
+        assert_eq!(data["x"], 5);
+        assert_eq!(data["y"], 10);
+        assert_eq!(data["z"], 15);
+        assert_eq!(data["detail"], "no path");
+    }
+
+    #[test]
+    fn test_into_mcp_error_mining_interrupted() {
+        let err = BotError::MiningInterrupted {
+            reason: "block still present".into(),
+        };
+        let mcp: ErrorData = err.into();
+        assert_eq!(mcp.code.0, -32005);
+        let data = assert_contract(&mcp, "mining_interrupted", false);
+        // The interrupt reason travels under `detail` — the `reason` key is
+        // reserved for the machine-readable variant discriminator.
+        assert_eq!(data["detail"], "block still present");
+    }
+
+    #[test]
+    fn test_into_mcp_error_container_already_open() {
+        let err = BotError::ContainerAlreadyOpen;
+        let mcp: ErrorData = err.into();
+        assert_eq!(mcp.code.0, -32006);
+        assert_contract(&mcp, "container_already_open", false);
+    }
+
+    #[test]
+    fn test_into_mcp_error_container_timeout() {
+        let err = BotError::ContainerTimeout;
+        let mcp: ErrorData = err.into();
+        assert_eq!(mcp.code.0, -32007);
+        assert_contract(&mcp, "container_timeout", true);
     }
 
     #[test]
@@ -501,13 +748,7 @@ mod tests {
         let err = BotError::PermissionDenied("no access".into());
         let mcp: ErrorData = err.into();
         assert_eq!(mcp.code, ErrorCode::INVALID_REQUEST);
-    }
-
-    #[test]
-    fn test_into_mcp_error_internal() {
-        let err = BotError::Internal("unexpected".into());
-        let mcp: ErrorData = err.into();
-        assert_eq!(mcp.code, ErrorCode::INTERNAL_ERROR);
+        assert_contract(&mcp, "permission_denied", false);
     }
 
     #[test]
@@ -515,13 +756,45 @@ mod tests {
         let err = BotError::InvalidParams("slot out of range".into());
         let mcp: ErrorData = err.into();
         assert_eq!(mcp.code, ErrorCode::INVALID_PARAMS);
+        assert_contract(&mcp, "invalid_params", false);
     }
 
     #[test]
-    fn test_into_mcp_error_inventory_full() {
-        let err = BotError::InventoryFull;
+    fn test_into_mcp_error_internal() {
+        let err = BotError::Internal("unexpected".into());
         let mcp: ErrorData = err.into();
         assert_eq!(mcp.code, ErrorCode::INTERNAL_ERROR);
-        assert_eq!(mcp.message.as_ref(), "Inventory is full");
+        assert_contract(&mcp, "internal_error", false);
+    }
+
+    #[test]
+    fn test_custom_error_codes_are_distinct_and_in_reserved_range() {
+        // Guard the contract table: every custom code is unique, lies in
+        // the JSON-RPC implementation-defined range (-32000..=-32099), and
+        // never reuses -32002 (rmcp's `RESOURCE_NOT_FOUND`).
+        let codes = [
+            CODE_OFFLINE,
+            CODE_COMMAND_TIMEOUT,
+            CODE_CHUNK_NOT_LOADED,
+            CODE_INVENTORY_FULL,
+            CODE_MINING_INTERRUPTED,
+            CODE_CONTAINER_ALREADY_OPEN,
+            CODE_CONTAINER_TIMEOUT,
+            CODE_PATHFINDING_FAILED,
+        ];
+        for (i, code) in codes.iter().enumerate() {
+            assert!(
+                (-32099..=-32000).contains(code),
+                "code {code} outside the reserved implementation-defined range"
+            );
+            assert_ne!(
+                *code,
+                ErrorCode::RESOURCE_NOT_FOUND.0,
+                "code must not reuse rmcp's RESOURCE_NOT_FOUND"
+            );
+            for other in codes.iter().skip(i + 1) {
+                assert_ne!(code, other, "custom error codes must be distinct");
+            }
+        }
     }
 }
