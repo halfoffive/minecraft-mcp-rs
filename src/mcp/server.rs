@@ -486,6 +486,34 @@ fn extract_bearer_token(header: &str) -> Option<&str> {
     header.strip_prefix("Bearer ").map(str::trim)
 }
 
+/// Compare two strings for equality without an early exit on mismatch.
+///
+/// A plain `a == b` on `str` short-circuits at the first differing byte, so
+/// the elapsed time reveals how many leading bytes matched — a timing side
+/// channel. Because the UI permits binding the MCP HTTP server to
+/// non-loopback addresses (e.g. `0.0.0.0`), the Bearer token can cross an
+/// untrusted network, and an attacker able to measure response times could
+/// otherwise recover the token one byte at a time.
+///
+/// Semantics:
+/// - Differing lengths return `false` immediately. This leaks the token's
+///   *length* through timing, which is acceptable: length alone does not
+///   let an attacker brute-force the token contents byte by byte.
+/// - Equal lengths XOR every byte pair and OR the differences into an
+///   accumulator that touches all bytes regardless of where a mismatch
+///   occurs; the strings are equal iff the accumulator is zero.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
 /// Check whether the request's `Authorization` header carries the expected
 /// Bearer token.
 ///
@@ -493,7 +521,8 @@ fn extract_bearer_token(header: &str) -> Option<&str> {
 /// - No Authorization header is present
 /// - The header doesn't start with "Bearer "
 /// - The extracted token is empty (when expected_token is non-empty)
-/// - The token doesn't match expected_token
+/// - The token doesn't match expected_token (compared via
+///   [`constant_time_eq`] to avoid a timing side channel)
 ///
 /// Reads the expected token from `state.config().mcp_token` on every request so
 /// configuration changes take effect immediately.
@@ -505,7 +534,7 @@ fn is_bearer_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
         .get("Authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(extract_bearer_token)
-        .is_some_and(|token| !token.is_empty() && token == expected_token)
+        .is_some_and(|token| !token.is_empty() && constant_time_eq(token, expected_token))
 }
 
 /// Axum middleware that enforces the configured Bearer token.
@@ -1067,5 +1096,55 @@ mod tests {
         let mut headers2 = HeaderMap::new();
         headers2.insert("Authorization", "Bearer".parse().unwrap());
         assert!(!is_bearer_authorized(&headers2, expected_token));
+    }
+
+    // ── constant_time_eq tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_constant_time_eq_equal_strings() {
+        assert!(constant_time_eq("secret-token", "secret-token"));
+        assert!(constant_time_eq("a", "a"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_unequal_same_length() {
+        // Mismatch only in the last byte — a naive `==` would short-circuit
+        // late; the constant-time comparison must still return false.
+        assert!(!constant_time_eq("secret-token", "secret-tokeN"));
+        assert!(!constant_time_eq("aaaa", "aaab"));
+        // Mismatch in the first byte.
+        assert!(!constant_time_eq("xaaa", "ybbb"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq("short", "much-longer-token"));
+        assert!(!constant_time_eq("abc", "ab"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_both_empty() {
+        // Equal lengths (zero) and an empty XOR accumulation → true.
+        // This does NOT weaken auth: `is_bearer_authorized` rejects empty
+        // client tokens via its `!token.is_empty()` guard before comparing
+        // (see test_is_bearer_authorized_empty_header_token_rejected).
+        assert!(constant_time_eq("", ""));
+    }
+
+    #[test]
+    fn test_constant_time_eq_nonempty_vs_empty() {
+        assert!(!constant_time_eq("token", ""));
+        assert!(!constant_time_eq("", "token"));
+    }
+
+    #[test]
+    fn test_is_bearer_authorized_empty_header_token_rejected() {
+        // `constant_time_eq("", "")` is true, but an empty Bearer token must
+        // still fail authentication when a token is configured — the
+        // `!token.is_empty()` guard in `is_bearer_authorized` enforces this.
+        assert!(constant_time_eq("", ""));
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Bearer ".parse().unwrap());
+        assert!(!is_bearer_authorized(&headers, "expected-secret"));
     }
 }
