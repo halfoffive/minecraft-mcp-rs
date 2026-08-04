@@ -27,6 +27,7 @@ image = "0.25"
 base64 = "0.22"
 axum = "0.8"
 sys-locale = "0.3"
+dirs = "6"
 
 [profile.dev]
 opt-level = 1
