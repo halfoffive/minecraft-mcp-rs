@@ -20,63 +20,12 @@ use std::time::Duration;
 use eframe::App;
 use egui::Context;
 
-use crate::bot::connection::ConnectionManager;
+use crate::bot::spawn::{join_with_timeout, spawn_bot_connection};
 use crate::channel::{BotCommandReceiver, BotCommandSender};
 use crate::config::{AppConfig, McpTransport};
 use crate::state::SharedState;
 use crate::ui::i18n::Language;
 use crate::ui::{mcp_config, preview, settings, status};
-
-/// Join a [`JoinHandle`] on a background OS thread, bounded by `timeout`.
-///
-/// `Drop::join` would block indefinitely if the spawned task is wedged
-/// inside a third-party runtime, which would freeze the window close. To
-/// keep the UI responsive we move the `join()` into a helper thread and
-/// wait on an `mpsc` channel with a deadline:
-///
-/// - `Ok(())` — the handle finished (cleanly or by panic) within
-///   `timeout`; the helper thread has already consumed the
-///   `JoinHandle`.
-/// - `Err(timeout)` — the timeout fired first; the helper thread is left
-///   running with the `JoinHandle` in flight. When the process eventually
-///   exits, the OS reclaims the thread. This is acceptable here because
-///   the handle is purely a UI-side bookkeeping reference; the actual
-///   runtime inside the thread is supposed to exit via
-///   `state.request_disconnect()` + `cancel_token`.
-fn join_with_timeout(handle: JoinHandle<()>, timeout: Duration) -> Result<(), Duration> {
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    std::thread::spawn(move || {
-        let _ = handle.join();
-        let _ = tx.send(());
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(()) => Ok(()),
-        Err(_) => Err(timeout),
-    }
-}
-
-/// RAII guard that calls [`SharedState::clear_connecting`] on drop.
-///
-/// Wrapping the bot connection thread body with this guard ensures the
-/// `bot_connecting` flag is always cleared — even if a panic unwinds
-/// through the thread (e.g. `Runtime::new().expect()`). Without it, a
-/// panic in the connection thread would leave `bot_connecting` permanently
-/// `true`, and `try_begin_connecting` would reject every subsequent
-/// Connect attempt until the process restarts.
-///
-/// # Safety for panics
-///
-/// The guard *only* touches an `AtomicBool` in `drop`, which is safe
-/// during unwinding. If the thread panics, `clear_connecting` still
-/// executes (unwinding calls `Drop`), so the user can retry Connect
-/// without restarting the application.
-struct ClearGuard<'a>(&'a SharedState);
-
-impl Drop for ClearGuard<'_> {
-    fn drop(&mut self) {
-        self.0.clear_connecting();
-    }
-}
 
 /// Main egui application shell.
 pub struct MinecraftApp {
@@ -84,8 +33,8 @@ pub struct MinecraftApp {
     /// and with short-lived read locks for config and stats.
     state: Arc<SharedState>,
     /// Clone of the command channel sender, passed into
-    /// [`ConnectionManager::connect`] so compound ops (e.g. `Act::Mine`) can
-    /// issue sub-commands through the executor.
+    /// [`crate::bot::connection::ConnectionManager::connect`] so compound
+    /// ops (e.g. `Act::Mine`) can issue sub-commands through the executor.
     sender: BotCommandSender,
     /// Shared command receiver slot, passed to the bot connection task so it
     /// can process commands from the MCP server while connected. The receiver
@@ -97,9 +46,6 @@ pub struct MinecraftApp {
     /// of waiting for the 1-second fallback repaint. `None` until the first
     /// frame has run.
     egui_ctx: Option<egui::Context>,
-    /// Handle to the bot-connection OS thread (if running). Joined on Drop
-    /// so the process exits cleanly when the window closes.
-    bot_thread: Option<JoinHandle<()>>,
     /// Handle to the MCP server OS thread. Joined on Drop after triggering
     /// [`SharedState::trigger_shutdown`] so the stdio/HTTP transport exits
     /// gracefully instead of being killed mid-request.
@@ -221,7 +167,6 @@ impl MinecraftApp {
             sender,
             command_receiver,
             egui_ctx: None,
-            bot_thread: None,
             mcp_handle: Some(mcp_handle),
             edit_config: None,
             last_language: initial_lang,
@@ -234,7 +179,9 @@ impl MinecraftApp {
     ///
     /// We spawn a new thread (rather than using `tokio::spawn`) because
     /// azalea's `ClientBuilder::start` internally creates a `LocalSet`
-    /// which is `!Send`.
+    /// which is `!Send`. The thread body itself lives in
+    /// [`crate::bot::spawn::spawn_bot_connection`] so the headless
+    /// supervisor and the `connect_bot` MCP tool can reuse it without UI.
     ///
     /// Uses [`SharedState::try_begin_connecting`] to guard against
     /// double-spawn if the user clicks Connect while a previous attempt
@@ -246,11 +193,11 @@ impl MinecraftApp {
         }
 
         // P1-#14: defensively join any previously-spawned bot thread before
-        // overwriting `self.bot_thread`. The previous attempt may have
-        // finished (and called `clear_connecting` in its tail) but the
-        // `JoinHandle` is still parked in this field; without this step
-        // we'd leak the helper thread that azalea's runtime was using.
-        if let Some(prev) = self.bot_thread.take() {
+        // spawning a new one. The previous attempt may have finished (and
+        // called `clear_connecting` in its tail) but the `JoinHandle` is
+        // still parked in `SharedState`; without this step we'd leak the
+        // helper thread that azalea's runtime was using.
+        if let Some(prev) = self.state.take_bot_thread_handle() {
             match join_with_timeout(prev, Duration::from_secs(1)) {
                 Ok(()) => tracing::debug!("previous bot thread joined cleanly"),
                 Err(_) => {
@@ -259,54 +206,16 @@ impl MinecraftApp {
             }
         }
 
-        let config = self.state.read_config().clone();
         let state = Arc::clone(&self.state);
-        let state_for_spawn_error = Arc::clone(&self.state);
         let receiver = Arc::clone(&self.command_receiver);
         let sender = self.sender.clone();
         let egui_ctx = self.egui_ctx.clone();
 
-        match std::thread::Builder::new()
-            .name("bot-connection".into())
-            .spawn(move || {
-                // RAII guard: `ClearGuard` calls `state.clear_connecting()`
-                // on drop, so the flag is cleared even if this thread panics
-                // (e.g. during `Runtime::new()` below).  Without this, a
-                // panic would leave `bot_connecting` permanently `true`,
-                // and the user would be unable to Connect again without
-                // restarting the whole application.
-                let _clear_guard = ClearGuard(&state);
-
-                let rt = match tokio::runtime::Runtime::new() {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "Failed to create tokio runtime for bot connection"
-                        );
-                        // _clear_guard drops → clear_connecting() runs
-                        return;
-                    }
-                };
-                let manager = ConnectionManager::new(config, Arc::clone(&state));
-
-                rt.block_on(async move {
-                    if let Err(e) = manager.connect(receiver, egui_ctx, sender).await {
-                        tracing::error!(error = %e, "bot connection task failed");
-                    }
-                });
-
-                tracing::info!("Bot connection thread exited");
-            }) {
-            Ok(handle) => {
-                self.bot_thread = Some(handle);
-                tracing::info!("Bot connection thread spawned");
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to spawn bot connection thread");
-                state_for_spawn_error.set_last_error(format!("Failed to spawn bot thread: {e}"));
-                state_for_spawn_error.clear_connecting();
-            }
+        if let Err(e) = spawn_bot_connection(state, receiver, sender, egui_ctx) {
+            tracing::error!(error = %e, "Failed to spawn bot connection thread");
+            self.state
+                .set_last_error(format!("Failed to spawn bot connection thread: {e}"));
+            self.state.clear_connecting();
         }
     }
 }
@@ -323,7 +232,7 @@ impl Drop for MinecraftApp {
         // shutdown branch — both should return in milliseconds.
         self.state.trigger_shutdown();
 
-        if let Some(handle) = self.bot_thread.take() {
+        if let Some(handle) = self.state.take_bot_thread_handle() {
             // Try to join with a 3-second timeout to avoid hanging the UI
             // thread. The bot thread runs its own tokio runtime; with
             // `disconnect_requested` set and the cancel token tripped, the
@@ -448,61 +357,5 @@ impl App for MinecraftApp {
     }
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `join_with_timeout` returns `Ok(())` when the handle finishes before
-    /// the deadline.
-    #[test]
-    fn test_join_with_timeout_completes_before_deadline() {
-        let handle = std::thread::spawn(|| {
-            // Short, well-bounded work.
-            let mut acc: u64 = 0;
-            for i in 0..1000 {
-                acc = acc.wrapping_add(i);
-            }
-            std::hint::black_box(acc);
-        });
-        let result = join_with_timeout(handle, Duration::from_secs(2));
-        assert!(
-            result.is_ok(),
-            "fast thread should join within 2s: {result:?}"
-        );
-    }
-
-    /// `join_with_timeout` returns `Err(timeout)` when the handle is still
-    /// running past the deadline. We use a `std::thread::park` + a manual
-    /// unpark from the test thread to make the test deterministic and not
-    /// depend on `recv_timeout` being exactly equal to wall time.
-    #[test]
-    fn test_join_with_timeout_abandons_when_thread_hangs() {
-        let parked_thread = std::thread::Builder::new()
-            .name("parked-test-thread".into())
-            .spawn(|| {
-                // Park indefinitely — the helper thread that holds the
-                // JoinHandle is then blocked on `join()` until this
-                // unpark. We never unpark, so the helper remains stuck
-                // for the full test duration.
-                std::thread::park();
-            })
-            .expect("spawn parked thread");
-
-        // The actual `JoinHandle` we hand to `join_with_timeout` is the
-        // parked thread's own handle. To make the test even more robust
-        // we wrap it in a long-sleeping thread that owns the parked
-        // thread's JoinHandle and blocks on it; this mirrors the
-        // "stalled third-party runtime" scenario the helper exists for.
-        let parked_handle = parked_thread;
-        let handle = std::thread::spawn(move || {
-            let _ = parked_handle.join();
-        });
-
-        // 100ms is comfortably above scheduling jitter but short enough
-        // to keep the test snappy.
-        let result = join_with_timeout(handle, Duration::from_millis(100));
-        assert!(result.is_err(), "expected timeout, got {result:?}");
-    }
-}
+// Tests for the bot-connection spawn helper (incl. `join_with_timeout`,
+// which used to live in this file) are in `src/bot/spawn.rs::tests`.

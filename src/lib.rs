@@ -26,6 +26,7 @@ pub mod bot {
     pub mod events;
     pub mod ops;
     pub mod snapshot_updater;
+    pub mod spawn;
 }
 pub mod mcp {
     pub mod render;
