@@ -393,6 +393,23 @@ fn direction_to_vector(dir: Direction) -> Option<(i32, i32, i32)> {
     }
 }
 
+/// Fold a sub-operation [`BotResult`] into the `(action_result, reason)`
+/// pair consumed by [`ActResult`].
+///
+/// A sub-result with `success: false` carries its message as the `reason`
+/// so that `handle_act`'s wrapping success flag (derived from
+/// `reason.is_none()`) honestly reports the failure — e.g. a SmartMove
+/// blocked by an obstacle must not surface as a successful `act` (F2-6).
+/// Sub-operations that only ever return `success: true` on `Ok` are
+/// unaffected.
+fn act_outcome(result: BotResult) -> (String, Option<String>) {
+    if result.success {
+        (result.message, None)
+    } else {
+        (result.message.clone(), Some(result.message))
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // CommandExecutor
 // ═══════════════════════════════════════════════════════════════
@@ -657,12 +674,13 @@ impl<B: BotActions> CommandExecutor<B> {
             }
             None => {
                 // Up/Down: azalea's pathfinder has no vertical-only goal.
-                // `direction_to_vector` returns `None` for these, so surface a
-                // clear error explaining the limitation.
-                Err(BotError::Internal(format!(
-                    "direction {dir:?} is not supported for distance move \
-                     (vertical direction not supported for distance move); \
-                     use MoveTo instead"
+                // `direction_to_vector` returns `None` for these. This is a
+                // caller input error, not an internal failure — report
+                // `InvalidParams` so the MCP client sees a proper
+                // INVALID_PARAMS response with actionable guidance.
+                Err(BotError::InvalidParams(format!(
+                    "direction {dir:?} is not supported for distance-based movement; \
+                     use north/south/east/west"
                 )))
             }
         }
@@ -722,15 +740,21 @@ impl<B: BotActions> CommandExecutor<B> {
         // The MCP layer encodes the hotbar slot as "slot:N" in the block_type
         // field (see tools_block::handle_place_block). Select that slot before
         // right-clicking so the correct block is placed.
-        if let Some(slot_str) = block_type.strip_prefix("slot:")
-            && let Ok(slot) = slot_str.parse::<u8>()
-        {
-            if slot <= 8 {
-                self.bot.switch_hotbar_slot(slot);
-            } else {
-                // Out-of-range slot — log but still attempt the interact.
-                warn!(slot, "place_block slot out of hotbar range (0-8)");
-            }
+        //
+        // A "slot:" prefix whose payload is not a valid hotbar index (parse
+        // failure or > 8) is a malformed internal encoding. Fail honestly with
+        // `InvalidParams` instead of warn-and-continue-with-held-item, which
+        // would place the WRONG block and still report success (F2-5).
+        if let Some(slot_str) = block_type.strip_prefix("slot:") {
+            let slot = match slot_str.parse::<u8>() {
+                Ok(s) if s <= 8 => s,
+                _ => {
+                    return Err(BotError::InvalidParams(format!(
+                        "invalid internal slot encoding: {block_type}"
+                    )));
+                }
+            };
+            self.bot.switch_hotbar_slot(slot);
         }
         self.bot.block_interact(&pos);
         // Strip the internal "slot:N" prefix (if any) from the result
@@ -756,7 +780,10 @@ impl<B: BotActions> CommandExecutor<B> {
         if let Some(slot) = item_slot
             && slot > 8
         {
-            return Err(BotError::Internal(format!(
+            // Defense-in-depth only — dispatch's central `validate_command`
+            // gate rejects this first. Carry the honest variant anyway: an
+            // out-of-range slot is a caller input error, not internal.
+            return Err(BotError::InvalidParams(format!(
                 "item_slot {slot} out of hotbar range (0-8)"
             )));
         }
@@ -776,7 +803,9 @@ impl<B: BotActions> CommandExecutor<B> {
     fn handle_switch_hotbar_slot(&self, slot: u8) -> Result<BotResult, BotError> {
         trace!(slot, "SwitchHotbarSlot");
         if slot > 8 {
-            return Err(BotError::Internal(format!(
+            // Defense-in-depth only — dispatch's central `validate_command`
+            // gate rejects this first. Carry the honest variant anyway.
+            return Err(BotError::InvalidParams(format!(
                 "hotbar slot {} out of range (0-8)",
                 slot
             )));
@@ -1183,8 +1212,11 @@ impl<B: BotActions> CommandExecutor<B> {
                     find_obstacle_block(&self.state.read_snapshot(), current_pos, target)
                 };
 
+                // F2-6: `success` must reflect whether the target was actually
+                // reached. Previously this branch reported `success: true`
+                // even when an obstacle stopped the bot short — dishonest.
                 Ok(BotResult {
-                    success: true,
+                    success: reached,
                     message: format!("SmartMove to {target}: {reason}"),
                     data: Some(serde_json::json!({
                         "reached": reached,
@@ -1195,11 +1227,12 @@ impl<B: BotActions> CommandExecutor<B> {
                 })
             }
             Err(e) => {
-                // Pathfinder failed — treat as obstacle.
+                // Pathfinder failed — treat as obstacle. F2-6: report
+                // `success: false` (previously `true` despite the block).
                 let obstacle =
                     find_obstacle_block(&self.state.read_snapshot(), current_pos, target);
                 Ok(BotResult {
-                    success: true,
+                    success: false,
                     message: format!("SmartMove to {target} blocked: {e}"),
                     data: Some(serde_json::json!({
                         "reached": false,
@@ -1319,15 +1352,15 @@ impl<B: BotActions> CommandExecutor<B> {
         trace!(?action, "Act");
         let (action_result, reason): (String, Option<String>) = match action {
             ActAction::Move { target } => match self.handle_move_to(target).await {
-                Ok(r) => (r.message, None),
+                Ok(r) => act_outcome(r),
                 Err(e) => ("failed".into(), Some(e.to_string())),
             },
             ActAction::SmartMove { target } => match self.handle_smart_move(target).await {
-                Ok(r) => (r.message, None),
+                Ok(r) => act_outcome(r),
                 Err(e) => ("failed".into(), Some(e.to_string())),
             },
             ActAction::Fly { target } => match self.handle_fly_to(target).await {
-                Ok(r) => (r.message, None),
+                Ok(r) => act_outcome(r),
                 Err(e) => ("failed".into(), Some(e.to_string())),
             },
             ActAction::Mine { block_pos } => {
@@ -1354,16 +1387,16 @@ impl<B: BotActions> CommandExecutor<B> {
                 ))
                 .await
                 {
-                    Ok(r) => (r.message, None),
+                    Ok(r) => act_outcome(r),
                     Err(e) => ("failed".into(), Some(e.to_string())),
                 }
             }
             ActAction::Attack { entity_id } => match self.handle_attack_entity(entity_id) {
-                Ok(r) => (r.message, None),
+                Ok(r) => act_outcome(r),
                 Err(e) => ("failed".into(), Some(e.to_string())),
             },
             ActAction::CollectItems { radius } => match self.handle_collect_items(radius).await {
-                Ok(r) => (r.message, None),
+                Ok(r) => act_outcome(r),
                 Err(e) => ("failed".into(), Some(e.to_string())),
             },
         };
@@ -2024,13 +2057,37 @@ mod tests {
 
     #[tokio::test]
     async fn test_walk_unsupported_direction() {
-        // Up/Down cannot be translated to a horizontal goto target.
+        // Up/Down cannot be translated to a horizontal goto target. The
+        // executor must reject them with `InvalidParams` (a client-input
+        // error), NOT `Internal` — the direction was supplied by the caller
+        // and the rejection is deterministic, not an internal failure.
         let (executor, sender, _state, _log) = make_executor();
         let handle = spawn_executor(executor);
 
         let result = send_and_await(&sender, BotCommand::WalkDirection(Direction::Up, 1)).await;
-        assert!(result.is_err());
-        assert!(matches!(result, Err(BotError::Internal(_))));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("not supported for distance-based movement")),
+            "expected InvalidParams for Up, got: {result:?}"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_walk_down_rejected_with_invalid_params() {
+        // Down is rejected exactly like Up — vertical directions are not
+        // supported for distance-based movement.
+        let (executor, sender, _state, _log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::WalkDirection(Direction::Down, 1)).await;
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("north/south/east/west")),
+            "expected InvalidParams for Down, got: {result:?}"
+        );
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -2106,6 +2163,25 @@ mod tests {
 
         drop(sender);
         handle.await.expect("executor should finish");
+    }
+
+    #[test]
+    fn test_switch_hotbar_slot_out_of_range_direct_handler() {
+        // Defense-in-depth: the central `validate_command` gate in dispatch
+        // already rejects slot > 8, but the handler's own range check must
+        // carry the correct variant (`InvalidParams`, not `Internal`) in case
+        // the handler is ever reached directly (e.g. internal dispatch).
+        let (executor, _sender, _state, log) = make_executor();
+
+        let result = executor.handle_switch_hotbar_slot(9);
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("out of range")),
+            "expected InvalidParams from handler, got: {result:?}"
+        );
+
+        // No hotbar switch must have been performed.
+        assert!(log.hotbar_switch_calls.lock().unwrap().is_empty());
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2468,6 +2544,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_place_block_rejects_malformed_slot_encoding() {
+        // F2-5: a "slot:" prefix whose payload is not a u8 is a malformed
+        // internal encoding. Previously the executor warn-and-continued with
+        // the held item and still reported success — dishonest. It must fail
+        // with InvalidParams and NOT interact.
+        let (executor, sender, _state, log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let pos = BlockPos::new(10, 64, 20);
+        let result = send_and_await(&sender, BotCommand::PlaceBlock(pos, "slot:abc".into())).await;
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("invalid internal slot encoding")),
+            "expected InvalidParams for slot:abc, got: {result:?}"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        // No interaction and no hotbar switch may have happened.
+        assert!(log.interact_calls.lock().unwrap().is_empty());
+        assert!(log.hotbar_switch_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_place_block_rejects_out_of_range_slot_encoding() {
+        // F2-5: "slot:9" parses but is outside the hotbar (0-8). Same
+        // contract as the malformed case: honest InvalidParams, no interact.
+        let (executor, sender, _state, log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let pos = BlockPos::new(10, 64, 20);
+        let result = send_and_await(&sender, BotCommand::PlaceBlock(pos, "slot:9".into())).await;
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("invalid internal slot encoding")),
+            "expected InvalidParams for slot:9, got: {result:?}"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        assert!(log.interact_calls.lock().unwrap().is_empty());
+        assert!(log.hotbar_switch_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn test_use_item_on_block() {
         // Without an item_slot the bot interacts with the currently held item.
         let (executor, sender, _state, log) = make_executor();
@@ -2508,6 +2631,25 @@ mod tests {
         let interacts = log.interact_calls.lock().unwrap();
         assert_eq!(interacts.len(), 1);
         assert_eq!(interacts[0], pos);
+    }
+
+    #[test]
+    fn test_use_item_on_block_out_of_range_slot_direct_handler() {
+        // Defense-in-depth: dispatch's central gate already rejects
+        // item_slot > 8, but the handler's own branch must carry
+        // `InvalidParams` (not `Internal`) and must not interact.
+        let (executor, _sender, _state, log) = make_executor();
+
+        let pos = BlockPos::new(5, 65, 5);
+        let result = executor.handle_use_item_on_block(pos, Some(9));
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("out of hotbar range")),
+            "expected InvalidParams from handler, got: {result:?}"
+        );
+
+        assert!(log.interact_calls.lock().unwrap().is_empty());
+        assert!(log.hotbar_switch_calls.lock().unwrap().is_empty());
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2678,6 +2820,85 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(BotError::ToolNotFound { .. })));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // SmartMove honesty tests (F2-6)
+    // ═══════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_smart_move_blocked_returns_failure() {
+        // F2-6: when the pathfinder fails (goto Err), the result must carry
+        // `success: false` — previously both blocked branches reported
+        // `success: true` while admitting the move was blocked.
+        let (executor, sender, _state, _log) = make_executor();
+        _log.goto_succeeds.store(false, Ordering::SeqCst);
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(5, 64, 5);
+        let result = send_and_await(&sender, BotCommand::SmartMove(target)).await;
+        assert!(
+            result.is_ok(),
+            "blocked smart_move is Ok(BotResult): {result:?}"
+        );
+        let br = result.unwrap();
+        assert!(
+            !br.success,
+            "expected success == false when pathfinding is blocked"
+        );
+        assert!(br.message.contains("blocked"), "message: {}", br.message);
+
+        // The structured payload must stay honest: reached == false.
+        let data = br.data.expect("data present");
+        assert_eq!(data.get("reached"), Some(&serde_json::json!(false)));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_smart_move_unreached_returns_failure() {
+        // F2-6: goto returning Ok but the bot ending up far from the target
+        // (obstacle) must ALSO be `success: false` with reached == false.
+        // The mock's successful goto does not move the snapshot position
+        // (default (0,0,0)), so target (5,64,5) is never "reached".
+        let (executor, sender, _state, _log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(5, 64, 5);
+        let result = send_and_await(&sender, BotCommand::SmartMove(target)).await;
+        assert!(result.is_ok(), "expected Ok(BotResult): {result:?}");
+        let br = result.unwrap();
+        assert!(
+            !br.success,
+            "expected success == false when target not reached"
+        );
+        let data = br.data.expect("data present");
+        assert_eq!(data.get("reached"), Some(&serde_json::json!(false)));
+        assert_eq!(data.get("reason"), Some(&serde_json::json!("obstacle")));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_smart_move_reached_success() {
+        // Happy path stays honest: snapshot position at the target means
+        // reached == true and success == true.
+        let (executor, sender, state, _log) = make_executor();
+        make_populated_snapshot(&state); // self_player.position = (0, 64, 0)
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(0, 64, 0);
+        let result = send_and_await(&sender, BotCommand::SmartMove(target)).await;
+        assert!(result.is_ok(), "expected Ok(BotResult): {result:?}");
+        let br = result.unwrap();
+        assert!(br.success, "expected success == true when reached");
+        let data = br.data.expect("data present");
+        assert_eq!(data.get("reached"), Some(&serde_json::json!(true)));
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -2912,6 +3133,51 @@ mod tests {
         assert!(
             !br.success,
             "expected success == false on sub-op failure, got success=true"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_act_wrapping_blocked_smart_move_reports_reason() {
+        // F2-6 end-to-end: a blocked SmartMove sub-result (success == false)
+        // must surface through `handle_act` as `ActResult.reason = Some(..)`
+        // so the wrapping BotResult's success (derived from
+        // `reason.is_none()`) is false — the `act` tool must not report
+        // success for a move that never happened.
+        let (executor, sender, _state, log) = make_executor();
+        log.goto_succeeds.store(false, Ordering::SeqCst);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(
+            &sender,
+            BotCommand::Act(ActAction::SmartMove {
+                target: BlockPos::new(5, 64, 5),
+            }),
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        let br = result.unwrap();
+        assert!(
+            !br.success,
+            "expected success == false for blocked smart_move via act"
+        );
+
+        let act_result: ActResult = serde_json::from_value(br.data.expect("act data present"))
+            .expect("data is a serialized ActResult");
+        assert!(
+            act_result.reason.is_some(),
+            "expected reason to be Some for blocked smart_move"
+        );
+        assert!(
+            act_result
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("blocked"),
+            "reason should carry the blocked message: {:?}",
+            act_result.reason
         );
 
         drop(sender);

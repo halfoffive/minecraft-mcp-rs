@@ -78,8 +78,9 @@ pub async fn handle_move_to(
 /// Input for the `walk_direction` MCP tool.
 #[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct WalkDirectionInput {
-    /// Cardinal direction to walk. One of: north, south, east, west, up, down,
-    /// northeast, northwest, southeast, southwest.
+    /// Direction to walk. One of: north, south, east, west, northeast,
+    /// northwest, southeast, southwest. Vertical directions (up/down) are
+    /// not supported for distance-based movement and are rejected.
     pub direction: String,
     /// Number of blocks to walk in the given direction (1-1000).
     #[schemars(range(min = 1, max = 1000))]
@@ -99,7 +100,7 @@ pub async fn handle_walk_direction(
         Some(d) => d,
         None => {
             return Err(BotError::InvalidParams(format!(
-                "Invalid direction: '{}'. Must be one of: north, south, east, west, up, down, northeast, northwest, southeast, southwest",
+                "Invalid direction: '{}'. Must be one of: north, south, east, west, northeast, northwest, southeast, southwest",
                 input.direction
             )));
         }

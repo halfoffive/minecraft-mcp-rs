@@ -133,8 +133,8 @@ pub enum BotCommand {
     /// The second argument is the distance to travel (in blocks). Horizontal
     /// directions are translated into a target `BlockPos` and routed through
     /// the same pathfinder as `MoveTo`; vertical directions (`Up`/`Down`)
-    /// fall back to the legacy indefinite `walk` because azalea's pathfinder
-    /// does not accept a purely vertical goal.
+    /// are rejected with [`crate::error::BotError::InvalidParams`] because
+    /// azalea's pathfinder does not accept a purely vertical goal.
     WalkDirection(Direction, u32),
     /// Jump.
     Jump,
