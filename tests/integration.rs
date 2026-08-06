@@ -1124,3 +1124,139 @@ async fn test_compound_break_with_tool_selection_flow() {
 
     processor.await.expect("processor should complete");
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Test 10: collect_items sees item entities rebuilt from the live ECS
+// (F6-2)
+// ═══════════════════════════════════════════════════════════════
+
+/// F6-2 regression: entities are rebuilt from the live ECS on every
+/// snapshot tick by `SnapshotUpdater`, so dropped items actually appear
+/// in `WorldSnapshot::entities`. With an `item` entity within radius the
+/// MCP `collect_items` handler must relay `BotCommand::CollectItems` and
+/// propagate a `visited >= 1` result instead of the old
+/// "No items to collect".
+#[tokio::test]
+async fn test_collect_items_mcp_flow_with_item_entities() {
+    let state = SharedState::new(AppConfig::default());
+    state.set_online(true);
+
+    // Snapshot shaped like what SnapshotUpdater::collect_entities now
+    // produces: the player at the origin and a dropped item 2 blocks away.
+    let snap = WorldSnapshot {
+        entities: vec![EntityEntry {
+            id: 11,
+            uuid: "item-uuid".into(),
+            entity_type: "item".into(),
+            position: BlockPos::new(2, 64, 1),
+            display_name: None,
+            health: None,
+        }],
+        self_player: SelfPlayer {
+            uuid: "player-uuid".into(),
+            username: "TestBot".into(),
+            position: BlockPos::new(0, 64, 0),
+            health: 20.0,
+            hunger: 20,
+            gamemode: GameMode::Survival,
+            held_item_slot: 0,
+            inventory: Vec::new(),
+            position_precise: None,
+            yaw: None,
+        },
+        ..Default::default()
+    };
+    state.update_snapshot(snap);
+    let state = Arc::new(state);
+
+    let (sender, mut receiver) = channel::create_command_channel(4, state.clone());
+
+    // Mock executor: assert the command arrives with the requested radius
+    // and reply with the result the real executor produces when it found
+    // and visited one item entity.
+    let responder = tokio::spawn(async move {
+        let wrapped = receiver.recv().await.expect("should receive CollectItems");
+        match wrapped.command {
+            BotCommand::CollectItems(radius) => assert_eq!(radius, 5),
+            other => panic!("expected CollectItems, got: {:?}", other),
+        }
+        let _ = wrapped.respond_to.send(Ok(BotResult {
+            success: true,
+            message: "Visited 1 item drop location(s); auto-pickup expected on proximity".into(),
+            data: Some(serde_json::json!({"visited": 1})),
+        }));
+    });
+
+    let input = minecraft_mcp_rs::mcp::tools_item::CollectItemsInput { radius: 5 };
+    let result = minecraft_mcp_rs::mcp::tools_item::handle_collect_items(&state, &sender, input)
+        .await
+        .expect("collect_items should succeed");
+
+    assert!(
+        result.contains("Visited 1"),
+        "expected a visited-1 result, got: {result}"
+    );
+    assert!(
+        result.contains("\"visited\":1"),
+        "expected visited payload, got: {result}"
+    );
+
+    drop(sender);
+    responder.await.expect("responder should complete");
+}
+
+/// Same F6-2 fix at the query layer: `get_nearby_entities` must return
+/// non-player entries (item drops, mobs) once the snapshot entities are
+/// rebuilt from the live ECS.
+#[tokio::test]
+async fn test_get_nearby_entities_includes_item_drops() {
+    let state = SharedState::new(AppConfig::default());
+    state.set_online(true);
+
+    let snap = WorldSnapshot {
+        entities: vec![
+            EntityEntry {
+                id: 21,
+                uuid: "drop-uuid".into(),
+                entity_type: "item".into(),
+                position: BlockPos::new(1, 64, 0),
+                display_name: None,
+                health: None,
+            },
+            EntityEntry {
+                id: 22,
+                uuid: "player-uuid-2".into(),
+                entity_type: "player".into(),
+                position: BlockPos::new(2, 64, 0),
+                display_name: Some("Steve".into()),
+                health: Some(20.0),
+            },
+        ],
+        self_player: SelfPlayer {
+            uuid: "player-uuid".into(),
+            username: "TestBot".into(),
+            position: BlockPos::new(0, 64, 0),
+            health: 20.0,
+            hunger: 20,
+            gamemode: GameMode::Survival,
+            held_item_slot: 0,
+            inventory: Vec::new(),
+            position_precise: None,
+            yaw: None,
+        },
+        ..Default::default()
+    };
+    state.update_snapshot(snap);
+    let state = Arc::new(state);
+
+    let result = minecraft_mcp_rs::mcp::tools_query::get_nearby_entities(&state, 8)
+        .expect("get_nearby_entities should succeed");
+    assert!(
+        result.contains("\"entity_type\":\"item\""),
+        "item drop must be listed: {result}"
+    );
+    assert!(
+        result.contains("\"entity_type\":\"player\""),
+        "other players must still be listed: {result}"
+    );
+}

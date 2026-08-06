@@ -4,6 +4,7 @@
 //! logic: reading bot position/health/gamemode, scanning dirty blocks,
 //! and atomically updating [`SharedState`] via [`WorldSnapshot`].
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,7 +14,9 @@ use tracing::{debug, warn};
 use crate::bot::commands::item_kind_to_id;
 use crate::snapshot::{DirtyTracker, SnapshotBuilder};
 use crate::state::SharedState;
-use crate::types::{BlockEntry, BlockPos, GameMode, InventorySlot, SelfPlayer, WorldSnapshot};
+use crate::types::{
+    BlockEntry, BlockPos, EntityEntry, GameMode, InventorySlot, SelfPlayer, WorldSnapshot,
+};
 use crate::utils::to_snake_case;
 
 // ═══════════════════════════════════════════════════════════════
@@ -345,6 +348,15 @@ async fn build_snapshot_inner(
 
     builder = builder.with_chunk_summary(chunk_summary);
 
+    // ── Entities from the live ECS ──────────────────────────
+    // F6-2: entities are rebuilt from the live ECS on every snapshot so
+    // positions, types and health stay current. Previously the list was
+    // only seeded from AddPlayer events (players only, frozen at their
+    // join position), so `collect_items` never saw dropped items and
+    // `get_nearby_entities` never saw mobs.
+    let entities = collect_entities(bot);
+    builder = builder.with_entities(Some(entities));
+
     let mut snapshot = builder.build();
     // Populate `commands_enabled` from the player's permission level.
     // OP level > 0 means commands are enabled; == 0 means disabled;
@@ -386,6 +398,109 @@ fn read_inventory(bot: &Client) -> Vec<InventorySlot> {
         .collect()
 }
 
+/// Convert an azalea [`EntityKind`] into the snake_case entity type string
+/// exposed in snapshots and MCP tools (`"player"`, `"item"`, `"zombie"`,
+/// ...).
+///
+/// The `EntityKind` enum variant names are PascalCase (matching the Java
+/// registry names), so the shared [`to_snake_case`] helper produces the
+/// same naming convention used for block and item ids. `None` (the entity
+/// kind component is not present yet) maps to `"unknown"` so half-spawned
+/// entities are still listed instead of being silently dropped.
+///
+/// [`EntityKind`]: azalea::registry::builtin::EntityKind
+pub(crate) fn entity_type_string(kind: Option<azalea::registry::builtin::EntityKind>) -> String {
+    match kind {
+        Some(kind) => to_snake_case(&format!("{kind:?}")),
+        None => "unknown".to_string(),
+    }
+}
+
+/// Rebuild the entity list from the live ECS world.
+///
+/// azalea keeps two complementary indexes for the entities in the bot's
+/// dimension:
+///
+/// - [`Instance::entity_by_id`] maps Minecraft entity ids to ECS entities
+///   (maintained by azalea's indexing systems on spawn/despawn);
+/// - the ECS world itself holds the actual components
+///   ([`Position`], [`EntityUuid`], [`EntityKindComponent`],
+///   [`Health`], [`GameProfileComponent`] for players).
+///
+/// The id index is copied first (holding only the instance read lock),
+/// that lock is dropped, and only then is the ECS walked once. Holding
+/// both locks at the same time could deadlock with azalea's schedule
+/// loop, which holds the ECS lock while its systems acquire instance
+/// write locks.
+///
+/// The bot's own entity is skipped — it is fully represented by
+/// [`SelfPlayer`], and including it would double-draw the player marker
+/// in the top-down world view. Entities are limited to the bot's current
+/// dimension via [`InstanceName`].
+///
+/// [`Instance::entity_by_id`]: azalea::world::Instance
+/// [`Position`]: azalea::entity::Position
+/// [`EntityUuid`]: azalea::entity::EntityUuid
+/// [`EntityKindComponent`]: azalea::entity::EntityKindComponent
+/// [`Health`]: azalea::entity::metadata::Health
+/// [`GameProfileComponent`]: azalea::player::GameProfileComponent
+/// [`InstanceName`]: azalea::world::InstanceName
+fn collect_entities(bot: &Client) -> Vec<EntityEntry> {
+    let Some(holder) = bot.get_component::<azalea::local_player::InstanceHolder>() else {
+        return Vec::new();
+    };
+    let Some(instance_name) = bot.get_component::<azalea::world::InstanceName>() else {
+        return Vec::new();
+    };
+
+    // Minecraft entity id by ECS entity, copied under the instance read
+    // lock only (the lock is dropped before the ECS is touched — see the
+    // deadlock note above).
+    let id_by_entity: HashMap<azalea::ecs::entity::Entity, i32> = {
+        let instance = holder.instance.read();
+        instance
+            .entity_by_id
+            .iter()
+            .map(|(mc_id, entity)| (*entity, mc_id.0))
+            .collect()
+    };
+
+    let local_entity = bot.entity;
+    let mut entries = Vec::new();
+
+    let mut ecs = bot.ecs.lock();
+    let mut query = ecs.query::<(
+        azalea::ecs::entity::Entity,
+        &azalea::world::InstanceName,
+        &azalea::entity::Position,
+        &azalea::entity::EntityUuid,
+        Option<&azalea::entity::EntityKindComponent>,
+        Option<&azalea::entity::metadata::Health>,
+        Option<&azalea::player::GameProfileComponent>,
+    )>();
+    for (entity, entity_instance, position, uuid, kind, health, profile) in query.iter(&ecs) {
+        if *entity_instance != instance_name || entity == local_entity {
+            continue;
+        }
+        let minecraft_id = id_by_entity.get(&entity).copied().unwrap_or(0);
+        entries.push(EntityEntry {
+            id: u32::try_from(minecraft_id).unwrap_or(0),
+            uuid: (**uuid).to_string(),
+            entity_type: entity_type_string(kind.map(|k| k.0)),
+            position: BlockPos::new(
+                position.x.floor() as i32,
+                position.y.floor() as i32,
+                position.z.floor() as i32,
+            ),
+            display_name: profile.map(|p| p.0.name.clone()),
+            health: health.map(|h| h.0),
+        });
+    }
+    drop(ecs);
+
+    entries
+}
+
 /// Read whether server commands are enabled for the bot.
 ///
 /// Returns `Some(true)` if the player's permission level is > 0 (OP),
@@ -420,6 +535,7 @@ fn azalea_gamemode_to_ours(gm: azalea::core::game_type::GameMode) -> GameMode {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
+    use azalea::registry::builtin::EntityKind;
 
     // ── Helpers ─────────────────────────────────────────────
 
@@ -606,5 +722,171 @@ mod tests {
         assert_eq!(to_snake_case("Stone"), "stone");
         assert_eq!(to_snake_case("OakPlanks"), "oak_planks");
         assert_eq!(to_snake_case("DiamondOre"), "diamond_ore");
+    }
+
+    // ── Entity type mapping (F6-2) ────────────────────────
+
+    #[test]
+    fn test_entity_type_string_player() {
+        assert_eq!(entity_type_string(Some(EntityKind::Player)), "player");
+    }
+
+    #[test]
+    fn test_entity_type_string_item() {
+        assert_eq!(entity_type_string(Some(EntityKind::Item)), "item");
+    }
+
+    #[test]
+    fn test_entity_type_string_zombie() {
+        assert_eq!(entity_type_string(Some(EntityKind::Zombie)), "zombie");
+    }
+
+    #[test]
+    fn test_entity_type_string_item_frame() {
+        // Item frames are block-like entities and must NOT match the
+        // collect_items filter (which excludes anything containing
+        // "frame").
+        assert_eq!(
+            entity_type_string(Some(EntityKind::ItemFrame)),
+            "item_frame"
+        );
+    }
+
+    #[test]
+    fn test_entity_type_string_unknown_when_kind_missing() {
+        assert_eq!(entity_type_string(None), "unknown");
+    }
+
+    // ── collect_entities — live ECS rebuild (F6-2) ────────
+
+    /// A client whose entity has no `InstanceHolder` (not fully joined
+    /// yet) must yield an empty entity list without panicking. The bot
+    /// entity itself must exist in the world — azalea's `query_self`
+    /// panics for entities that are missing entirely.
+    #[test]
+    fn test_collect_entities_empty_world() {
+        let mut world = bevy_ecs::world::World::new();
+        let bot_entity = world.spawn(()).id();
+        let bot = azalea::Client::new(bot_entity, Arc::new(parking_lot::Mutex::new(world)));
+        assert!(collect_entities(&bot).is_empty());
+    }
+
+    /// Build a minimal live ECS world and verify `collect_entities`
+    /// returns every entity in the bot's dimension with correct types,
+    /// positions, ids and display names — while excluding the bot itself
+    /// and entities in other dimensions.
+    #[test]
+    fn test_collect_entities_reads_live_ecs() {
+        let overworld = azalea::world::InstanceName(azalea::Identifier::new("minecraft:overworld"));
+        let nether = azalea::world::InstanceName(azalea::Identifier::new("minecraft:the_nether"));
+
+        let mut world = bevy_ecs::world::World::new();
+
+        // Bot entity: given full entity components below, but
+        // collect_entities must still skip it (self_player covers it).
+        let bot_uuid = uuid::Uuid::new_v4();
+        let bot_entity = world.spawn(()).id();
+
+        let instance = Arc::new(parking_lot::RwLock::new(azalea::world::Instance::default()));
+        world.entity_mut(bot_entity).insert((
+            azalea::local_player::InstanceHolder {
+                instance: instance.clone(),
+                partial_instance: Arc::new(parking_lot::RwLock::new(
+                    azalea::world::PartialInstance::default(),
+                )),
+            },
+            overworld.clone(),
+            azalea::entity::Position::new(azalea::core::position::Vec3::new(0.5, 64.0, 0.5)),
+            azalea::entity::EntityUuid::new(bot_uuid),
+            azalea::entity::EntityKindComponent(EntityKind::Player),
+        ));
+
+        // Dropped item (no health, no profile).
+        let item_uuid = uuid::Uuid::new_v4();
+        let item_entity = world
+            .spawn((
+                overworld.clone(),
+                azalea::entity::Position::new(azalea::core::position::Vec3::new(3.9, 64.0, -2.1)),
+                azalea::entity::EntityUuid::new(item_uuid),
+                azalea::entity::EntityKindComponent(EntityKind::Item),
+            ))
+            .id();
+
+        // Zombie with health.
+        let zombie_uuid = uuid::Uuid::new_v4();
+        let zombie_entity = world
+            .spawn((
+                overworld.clone(),
+                azalea::entity::Position::new(azalea::core::position::Vec3::new(-1.0, 70.5, 8.0)),
+                azalea::entity::EntityUuid::new(zombie_uuid),
+                azalea::entity::EntityKindComponent(EntityKind::Zombie),
+                azalea::entity::metadata::Health(14.0),
+            ))
+            .id();
+
+        // Another player with a game profile (the username source).
+        let player_uuid = uuid::Uuid::new_v4();
+        let _player_entity = world
+            .spawn((
+                overworld.clone(),
+                azalea::entity::Position::new(azalea::core::position::Vec3::new(10.0, 64.0, 10.0)),
+                azalea::entity::EntityUuid::new(player_uuid),
+                azalea::entity::EntityKindComponent(EntityKind::Player),
+                azalea::player::GameProfileComponent(azalea::auth::game_profile::GameProfile::new(
+                    player_uuid,
+                    "Steve".to_string(),
+                )),
+                azalea::entity::metadata::Health(20.0),
+            ))
+            .id();
+
+        // Entity in another dimension — must be excluded.
+        let _nether_entity = world.spawn((
+            nether.clone(),
+            azalea::entity::Position::new(azalea::core::position::Vec3::new(1.0, 64.0, 1.0)),
+            azalea::entity::EntityUuid::new(uuid::Uuid::new_v4()),
+            azalea::entity::EntityKindComponent(EntityKind::Zombie),
+        ));
+
+        // Minecraft entity ids as maintained by azalea's index.
+        instance
+            .write()
+            .entity_by_id
+            .insert(azalea::world::MinecraftEntityId(7), item_entity);
+        instance
+            .write()
+            .entity_by_id
+            .insert(azalea::world::MinecraftEntityId(8), zombie_entity);
+
+        let bot = azalea::Client::new(bot_entity, Arc::new(parking_lot::Mutex::new(world)));
+        let entities = collect_entities(&bot);
+
+        assert_eq!(
+            entities.len(),
+            3,
+            "item + zombie + player, but not the bot itself or the nether entity"
+        );
+        assert!(
+            entities.iter().all(|e| e.uuid != bot_uuid.to_string()),
+            "the bot's own entity must not appear in the entity list"
+        );
+
+        let item = entities.iter().find(|e| e.entity_type == "item").unwrap();
+        assert_eq!(item.id, 7);
+        assert_eq!(item.uuid, item_uuid.to_string());
+        assert_eq!(item.position, BlockPos::new(3, 64, -3)); // floor()
+        assert_eq!(item.display_name, None);
+        assert_eq!(item.health, None);
+
+        let zombie = entities.iter().find(|e| e.entity_type == "zombie").unwrap();
+        assert_eq!(zombie.id, 8);
+        assert_eq!(zombie.uuid, zombie_uuid.to_string());
+        assert_eq!(zombie.position, BlockPos::new(-1, 70, 8));
+        assert_eq!(zombie.health, Some(14.0));
+
+        let player = entities.iter().find(|e| e.entity_type == "player").unwrap();
+        assert_eq!(player.display_name, Some("Steve".to_string()));
+        assert_eq!(player.health, Some(20.0));
+        assert_eq!(player.id, 0, "not in entity_by_id → id falls back to 0");
     }
 }

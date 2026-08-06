@@ -29,6 +29,11 @@ axum = "0.8"
 sys-locale = "0.3"
 dirs = "6"
 
+# Test-only: construct azalea ECS worlds in unit tests (InstanceHolder
+# fields use parking_lot locks). Already in the dependency graph via azalea.
+[dev-dependencies]
+parking_lot = "0.12"
+
 [profile.dev]
 opt-level = 1
 

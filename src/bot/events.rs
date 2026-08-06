@@ -16,7 +16,7 @@ use super::snapshot_updater::SnapshotUpdater;
 use crate::channel::{BotCommandSender, ReceiverLease, ReceiverSlot};
 use crate::snapshot::DirtyTracker;
 use crate::state::SharedState;
-use crate::types::{BlockPos, EntityEntry};
+use crate::types::BlockPos;
 
 // ---------------------------------------------------------------------------
 // Dependency injection — set before ClientBuilder::start()
@@ -180,21 +180,18 @@ pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::R
         Event::Death(_) => {
             handle_death(&state);
         }
-        Event::AddPlayer(info) => {
-            handle_add_player(&bot, &state, &info);
-        }
-        Event::RemovePlayer(info) => {
-            handle_remove_player(&state, &info);
-        }
-        Event::UpdatePlayer(info) => {
-            handle_update_player(&state, &info);
-        }
         Event::ReceiveChunk(chunk_pos) => {
             handle_receive_chunk(&state, chunk_pos);
         }
         Event::Packet(packet) => {
             handle_packet_block_updates(&state, &packet);
         }
+        // NOTE: `AddPlayer` / `RemovePlayer` / `UpdatePlayer` (and every
+        // other event) are intentionally ignored here. The snapshot's
+        // entity list is rebuilt from the live ECS on every snapshot tick
+        // by `SnapshotUpdater` (see `snapshot_updater::collect_entities`),
+        // so player join/leave/update events no longer need to maintain
+        // `WorldSnapshot::entities` incrementally.
         _ => {}
     }
     Ok(())
@@ -446,71 +443,13 @@ fn handle_death(state: &BotState) {
     trace!("bot died, set health=0");
 }
 
-fn handle_add_player(bot: &Client, state: &BotState, info: &azalea::player::PlayerInfo) {
-    // The tab-list event fires when a player joins the server, which may be
-    // before their entity has spawned in the client world. Try to read the
-    // live position and minecraft entity id; fall back to defaults if the
-    // entity isn't available yet (a later Tick snapshot will refresh them).
-    let (id, position) = bot
-        .entity_by_uuid(info.uuid)
-        .map(|entity| {
-            let position = bot
-                .get_entity_component::<azalea::entity::Position>(entity)
-                .map(|p| BlockPos::new(p.x.round() as i32, p.y.round() as i32, p.z.round() as i32))
-                .unwrap_or(BlockPos::new(0, 0, 0));
-            let id = bot
-                .get_entity_component::<azalea::world::MinecraftEntityId>(entity)
-                .map(|m| u32::try_from(m.0).unwrap_or(0))
-                .unwrap_or(0);
-            (id, position)
-        })
-        .unwrap_or((0, BlockPos::new(0, 0, 0)));
-
-    add_player_to_snapshot(state, info, id, position);
-}
-
-/// Pure snapshot update for an added player — split out so it can be tested
-/// without an azalea [`Client`].
-fn add_player_to_snapshot(
-    state: &BotState,
-    info: &azalea::player::PlayerInfo,
-    id: u32,
-    position: BlockPos,
-) {
-    let uuid = info.uuid.to_string();
-    let display_name = info.display_name.as_ref().map(|dt| dt.to_string());
-    state.shared_state.modify_snapshot(|s| {
-        s.entities.retain(|e| e.uuid != uuid);
-        s.entities.push(EntityEntry {
-            id,
-            uuid: uuid.clone(),
-            entity_type: "player".to_string(),
-            position,
-            display_name: display_name.clone(),
-            health: None,
-        });
-    });
-    trace!("player added: {}", info.profile.name);
-}
-
-fn handle_remove_player(state: &BotState, info: &azalea::player::PlayerInfo) {
-    let uuid = info.uuid.to_string();
-    state
-        .shared_state
-        .modify_snapshot(|s| s.entities.retain(|e| e.uuid != uuid));
-    trace!("player removed: {}", info.profile.name);
-}
-
-fn handle_update_player(state: &BotState, info: &azalea::player::PlayerInfo) {
-    let uuid = info.uuid.to_string();
-    let display_name = info.display_name.as_ref().map(|dt| dt.to_string());
-    state.shared_state.modify_snapshot(|s| {
-        if let Some(entity) = s.entities.iter_mut().find(|e| e.uuid == uuid) {
-            entity.display_name = display_name.clone();
-        }
-    });
-    trace!("player updated: {}", info.profile.name);
-}
+// NOTE: the former `handle_add_player` / `handle_remove_player` /
+// `handle_update_player` handlers were removed (audit F6-2). They seeded
+// `WorldSnapshot::entities` from tab-list events only — players only,
+// frozen at their join position — so `collect_items` and
+// `get_nearby_entities` never saw dropped items or mobs. Entities are now
+// rebuilt from the live ECS on every snapshot tick by `SnapshotUpdater`
+// (see `snapshot_updater::collect_entities`).
 
 fn handle_receive_chunk(state: &BotState, chunk_pos: azalea::core::position::ChunkPos) {
     let mut tracker = state
@@ -639,109 +578,11 @@ mod tests {
         assert_eq!(messages[0].1, "Hello world");
     }
 
-    // -- Player list ---------------------------------------------------------
-
-    #[test]
-    fn test_add_player_updates_snapshot() {
-        let state = BotState::default();
-        let info = azalea::player::PlayerInfo {
-            profile: azalea::auth::game_profile::GameProfile {
-                uuid: uuid::Uuid::new_v4(),
-                name: "Steve".to_string(),
-                properties: std::sync::Arc::new(
-                    azalea::auth::game_profile::GameProfileProperties::default(),
-                ),
-            },
-            uuid: uuid::Uuid::new_v4(),
-            gamemode: azalea::core::game_type::GameMode::Survival,
-            latency: 20,
-            display_name: Some(Box::new(azalea::FormattedText::from("SteveAdmin"))),
-        };
-        // Use the pure helper so the test doesn't need a live azalea Client.
-        add_player_to_snapshot(&state, &info, 7, BlockPos::new(10, 64, -5));
-        let snapshot = state.shared_state.read_snapshot();
-        assert_eq!(snapshot.entities.len(), 1);
-        assert_eq!(snapshot.entities[0].uuid, info.uuid.to_string());
-        assert_eq!(snapshot.entities[0].id, 7);
-        assert_eq!(snapshot.entities[0].position, BlockPos::new(10, 64, -5));
-    }
-
-    #[test]
-    fn test_remove_player_updates_snapshot() {
-        // Reset the injected dependency first so `BotState::default()`
-        // builds a fresh `SharedState` (not one left over from a
-        // previous parallel test that added entities).
-        *INJECTED_SHARED_STATE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
-        let state = BotState::default();
-        let info = azalea::player::PlayerInfo {
-            profile: azalea::auth::game_profile::GameProfile {
-                uuid: uuid::Uuid::new_v4(),
-                name: "Steve".to_string(),
-                properties: std::sync::Arc::new(
-                    azalea::auth::game_profile::GameProfileProperties::default(),
-                ),
-            },
-            uuid: uuid::Uuid::new_v4(),
-            gamemode: azalea::core::game_type::GameMode::Survival,
-            latency: 20,
-            display_name: None,
-        };
-        add_player_to_snapshot(&state, &info, 0, BlockPos::new(0, 0, 0));
-        handle_remove_player(&state, &info);
-        let snapshot = state.shared_state.read_snapshot();
-        assert!(snapshot.entities.is_empty());
-    }
-
-    #[test]
-    fn test_update_player_updates_snapshot() {
-        // Reset the injected dependency first so `BotState::default()`
-        // builds a fresh `SharedState` (not one left over from a
-        // previous parallel test that would also leave an entity
-        // indexed at `entities[0]`, breaking the `entities[0].display_name`
-        // assertion below).
-        *INJECTED_SHARED_STATE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
-        let state = BotState::default();
-        let uuid = uuid::Uuid::new_v4();
-        let info_add = azalea::player::PlayerInfo {
-            profile: azalea::auth::game_profile::GameProfile {
-                uuid: uuid::Uuid::new_v4(),
-                name: "Steve".to_string(),
-                properties: std::sync::Arc::new(
-                    azalea::auth::game_profile::GameProfileProperties::default(),
-                ),
-            },
-            uuid,
-            gamemode: azalea::core::game_type::GameMode::Survival,
-            latency: 20,
-            display_name: None,
-        };
-        add_player_to_snapshot(&state, &info_add, 0, BlockPos::new(0, 0, 0));
-
-        let info_update = azalea::player::PlayerInfo {
-            profile: azalea::auth::game_profile::GameProfile {
-                uuid: uuid::Uuid::new_v4(),
-                name: "Steve".to_string(),
-                properties: std::sync::Arc::new(
-                    azalea::auth::game_profile::GameProfileProperties::default(),
-                ),
-            },
-            uuid,
-            gamemode: azalea::core::game_type::GameMode::Survival,
-            latency: 20,
-            display_name: Some(Box::new(azalea::FormattedText::from("SteveAdmin"))),
-        };
-        handle_update_player(&state, &info_update);
-
-        let snapshot = state.shared_state.read_snapshot();
-        assert_eq!(
-            snapshot.entities[0].display_name,
-            Some("SteveAdmin".to_string())
-        );
-    }
+    // NOTE: the former player-list tests (`test_add_player_updates_snapshot`,
+    // `test_remove_player_updates_snapshot`, `test_update_player_updates_snapshot`)
+    // were removed together with their handlers — entities are now rebuilt
+    // from the live ECS by `SnapshotUpdater`, covered by the
+    // `snapshot_updater::tests::test_collect_entities_*` tests.
 
     // -- Throttle logic ------------------------------------------------------
 

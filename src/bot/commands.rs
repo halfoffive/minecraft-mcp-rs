@@ -2905,6 +2905,114 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // CollectItems tests (F6-2 — entities are now rebuilt from the live
+    // ECS by SnapshotUpdater, so dropped items actually appear in the
+    // snapshot and can be collected)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Snapshot with the player at (0, 64, 0) and the given entities.
+    fn snapshot_with_entities(state: &SharedState, entities: Vec<EntityEntry>) {
+        let snap = crate::types::WorldSnapshot {
+            entities,
+            self_player: SelfPlayer {
+                uuid: "player-uuid".into(),
+                username: "TestBot".into(),
+                position: BlockPos::new(0, 64, 0),
+                health: 20.0,
+                hunger: 20,
+                gamemode: GameMode::Survival,
+                held_item_slot: 0,
+                inventory: Vec::new(),
+                position_precise: None,
+                yaw: None,
+            },
+            ..Default::default()
+        };
+        state.update_snapshot(snap);
+    }
+
+    fn item_entity(pos: BlockPos) -> EntityEntry {
+        EntityEntry {
+            id: 11,
+            uuid: "item-uuid".into(),
+            entity_type: "item".into(),
+            position: pos,
+            display_name: None,
+            health: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_items_finds_item_entities() {
+        // A dropped item within radius must be visited (goto called with
+        // the item's position) and counted in the result payload.
+        let (executor, sender, state, log) = make_executor();
+        snapshot_with_entities(&state, vec![item_entity(BlockPos::new(2, 64, 1))]);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::CollectItems(5)).await;
+        let br = result.expect("collect_items should succeed");
+        assert!(br.success);
+        assert!(br.message.contains("Visited 1"), "message: {}", br.message);
+        let data = br.data.expect("data present");
+        assert_eq!(data.get("visited"), Some(&serde_json::json!(1)));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        let goto_calls = log.goto_calls.lock().unwrap();
+        assert_eq!(goto_calls.len(), 1);
+        assert_eq!(goto_calls[0], BlockPos::new(2, 64, 1));
+    }
+
+    #[tokio::test]
+    async fn test_collect_items_ignores_item_frames() {
+        // Item frames contain "item" in their type but are not pickup-able
+        // — the filter must exclude them, leaving nothing to collect.
+        let (executor, sender, state, log) = make_executor();
+        snapshot_with_entities(
+            &state,
+            vec![EntityEntry {
+                id: 12,
+                uuid: "frame-uuid".into(),
+                entity_type: "item_frame".into(),
+                position: BlockPos::new(1, 64, 0),
+                display_name: None,
+                health: None,
+            }],
+        );
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::CollectItems(5)).await;
+        let br = result.expect("collect_items should succeed");
+        assert!(br.success);
+        assert_eq!(br.message, "No items to collect");
+        let data = br.data.expect("data present");
+        assert_eq!(data.get("visited"), Some(&serde_json::json!(0)));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        assert!(log.goto_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_collect_items_ignores_items_outside_radius() {
+        let (executor, sender, state, log) = make_executor();
+        snapshot_with_entities(&state, vec![item_entity(BlockPos::new(50, 64, 50))]);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::CollectItems(5)).await;
+        let br = result.expect("collect_items should succeed");
+        assert_eq!(br.message, "No items to collect");
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        assert!(log.goto_calls.lock().unwrap().is_empty());
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // dispatch validation gate (defense-in-depth) tests
     // ═══════════════════════════════════════════════════════════════
 
