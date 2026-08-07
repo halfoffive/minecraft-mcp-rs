@@ -39,6 +39,7 @@ pub mod mcp {
     pub mod tools_item;
     pub mod tools_movement;
     pub mod tools_query;
+    pub mod tools_settings;
 }
 pub mod ui {
     pub mod app;
