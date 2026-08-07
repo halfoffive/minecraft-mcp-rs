@@ -766,7 +766,7 @@ mod tests {
     use crate::types::{BlockEntry, GameMode, SelfPlayer, WorldSnapshot};
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     // ═══════════════════════════════════════════════════════════════
     // Mock bot — implements BotActions by mutating SharedState
@@ -798,6 +798,9 @@ mod tests {
         /// existing tests that drive the full `execute_mine_block` path
         /// see the same behavior as the synchronous mock goto.
         goto_target_unreached: AtomicBool,
+        /// Value returned by `player_inventory_occupied_slots` (F6-3).
+        /// Default 0 (inventory has free slots).
+        player_inventory_occupied: AtomicUsize,
     }
 
     impl MockBotState {
@@ -808,6 +811,7 @@ mod tests {
                 mine_removes_block: AtomicBool::new(true),
                 next_place_type: Mutex::new(None),
                 goto_target_unreached: AtomicBool::new(false),
+                player_inventory_occupied: AtomicUsize::new(0),
             }
         }
     }
@@ -937,6 +941,10 @@ mod tests {
 
         fn inventory_entries(&self) -> Vec<Option<ItemStack>> {
             self.mock.inventory.lock().unwrap().clone()
+        }
+
+        fn player_inventory_occupied_slots(&self) -> usize {
+            self.mock.player_inventory_occupied.load(Ordering::SeqCst)
         }
     }
 

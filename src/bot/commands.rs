@@ -88,6 +88,17 @@ pub(crate) trait BotActions {
     /// slots are `None`. Used by [`CommandExecutor`] to answer
     /// [`BotCommand::QueryInventory`].
     fn inventory_entries(&self) -> Vec<Option<ItemStack>>;
+
+    /// Number of occupied slots in the player's 36-slot inventory, read
+    /// live from the currently open menu.
+    ///
+    /// Unlike [`Self::inventory_entries`] (which only sees the player
+    /// menu), this works while a container menu is open: every non-player
+    /// menu carries the player inventory in its trailing slots
+    /// (`Menu::player_slots_range`), kept in sync by the server's
+    /// container-content packets. Used by the `take_from_container`
+    /// inventory-full guard (audit F6-3).
+    fn player_inventory_occupied_slots(&self) -> usize;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -356,6 +367,21 @@ impl BotActions for RealBotClient {
                 }
             })
             .collect()
+    }
+
+    fn player_inventory_occupied_slots(&self) -> usize {
+        // Readable even while a container menu is open: every non-player
+        // menu carries the player's 36 slots in its trailing positions
+        // (`Menu::player_slots_range`), and the server keeps them in sync
+        // via container-content packets. For the player menu itself the
+        // range covers the same 36 inventory slots.
+        let menu = self.client.menu();
+        let slots = menu.slots();
+        let range = menu.player_slots_range();
+        slots[range]
+            .iter()
+            .filter(|stack| !stack.is_empty())
+            .count()
     }
 }
 
@@ -929,13 +955,16 @@ impl<B: BotActions> CommandExecutor<B> {
 
     fn handle_take_from_container(&self, slot: u8, count: u8) -> Result<BotResult, BotError> {
         trace!(slot, count, "TakeFromContainer");
-        // Fail fast if the player inventory has no free slots. This prevents
-        // shift-clicking a container item that would be dropped or lost.
-        let snapshot = self.state.read_snapshot();
-        if snapshot.self_player.inventory.len() >= 36 {
+        // F6-3: fail fast if the player inventory has no free slots. This
+        // prevents shift-clicking a container stack that would be dropped
+        // or lost. The check reads the inventory LIVE from the currently
+        // open menu (container menus carry the player inventory in their
+        // trailing slots): the previous snapshot-based check could never
+        // fire, because the snapshot inventory is always empty while a
+        // container menu is open.
+        if self.bot.player_inventory_occupied_slots() >= 36 {
             return Err(BotError::InventoryFull);
         }
-        drop(snapshot);
         // Best-effort: shift-click the given menu slot. For a container slot
         // this moves the whole stack into the player's inventory. `count` is
         // treated as a hint; partial moves require a pickup+place flow which
@@ -1577,6 +1606,9 @@ mod tests {
         container_open_calls: Mutex<Vec<BlockPos>>,
         inventory_calls: AtomicUsize,
         inventory: Mutex<Vec<Option<ItemStack>>>,
+        /// Value returned by `player_inventory_occupied_slots` (F6-3).
+        /// Default 0 (inventory has free slots).
+        player_inventory_occupied: AtomicUsize,
         position: Mutex<BlockPos>,
     }
 
@@ -1600,6 +1632,7 @@ mod tests {
                 container_open_calls: Mutex::new(Vec::new()),
                 inventory_calls: AtomicUsize::new(0),
                 inventory: Mutex::new(Vec::new()),
+                player_inventory_occupied: AtomicUsize::new(0),
                 position: Mutex::new(BlockPos::new(0, 64, 0)),
             }
         }
@@ -1708,6 +1741,10 @@ mod tests {
         fn inventory_entries(&self) -> Vec<Option<ItemStack>> {
             self.log.inventory_calls.fetch_add(1, Ordering::SeqCst);
             self.log.inventory.lock().unwrap().clone()
+        }
+
+        fn player_inventory_occupied_slots(&self) -> usize {
+            self.log.player_inventory_occupied.load(Ordering::SeqCst)
         }
     }
 
@@ -2708,6 +2745,44 @@ mod tests {
         let result = send_and_await(&sender, BotCommand::PutIntoContainer(5, 8)).await;
         assert!(result.is_err());
         assert!(matches!(result, Err(BotError::Internal(_))));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_take_from_container_inventory_full_rejected() {
+        // F6-3: with all 36 player-inventory slots occupied (read live
+        // from the open menu), the take must fail fast with InventoryFull
+        // instead of shift-clicking a stack that would be dropped.
+        let (executor, sender, _state, log) = make_executor();
+        log.player_inventory_occupied.store(36, Ordering::SeqCst);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::TakeFromContainer(3, 10)).await;
+        assert!(matches!(result, Err(BotError::InventoryFull)));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_take_from_container_guard_passes_with_free_slots() {
+        // F6-3 regression: the old snapshot-based guard could never fire
+        // (the snapshot inventory is always empty while a container menu
+        // is open), and a live read with free slots must not reject. With
+        // 35 occupied slots the handler must pass the guard and proceed to
+        // the container-open gate (which errors here only because no real
+        // ContainerHandle can be constructed in unit tests).
+        let (executor, sender, _state, log) = make_executor();
+        log.player_inventory_occupied.store(35, Ordering::SeqCst);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::TakeFromContainer(3, 10)).await;
+        assert!(
+            matches!(&result, Err(BotError::Internal(msg)) if msg.contains("no container")),
+            "guard must not fire with a free slot; got: {result:?}"
+        );
 
         drop(sender);
         handle.await.expect("executor should finish");
