@@ -13,6 +13,7 @@
 //! Dispatching directly via `&CommandExecutor` bypasses the channel entirely:
 //! sub-command handlers run inline on the same call stack.
 
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, trace, warn};
@@ -26,6 +27,7 @@ use crate::compound_ops::{
 };
 use crate::error::BotError;
 use crate::mining_calc::calculate_mine_time;
+use crate::state::SharedState;
 use crate::tool_select::{build_tool_alternatives, find_tool_in_inventory, select_tool_for_block};
 use crate::types::{BlockPos, BotCommand, BotResult, MaterialTier, ToolType};
 
@@ -37,6 +39,88 @@ use crate::types::{BlockPos, BotCommand, BotResult, MaterialTier, ToolType};
 // definitions in `error.rs` and `types.rs`. Phase 4 unified them: `error.rs`
 // now re-exports from `types.rs`, so no conversion is needed anymore. The
 // `BotError` variants accept `types::BlockPos` / `types::ToolType` directly.
+
+// ---------------------------------------------------------------------------
+// Race-safe block verification helpers (F6-4)
+// ---------------------------------------------------------------------------
+
+/// Poll the snapshot until the block at `pos` is GONE (absent from the
+/// block index or turned into air) or the `budget` expires.
+///
+/// Returns `true` when the block is gone, `false` when the budget ran out
+/// with the block still present.
+///
+/// F6-4: mine results land in the snapshot only on the next periodic
+/// snapshot rebuild (default every 500 ms), so a single read right after
+/// the mining wait can still see the pre-mine state and wrongly report
+/// "block still present". Polling with a bounded budget removes that race.
+///
+/// AIR-BLOCK semantics (1.0.7): snapshots INCLUDE `air` entries — a broken
+/// block becomes `"air"` in [`block_index`], it does not leave the index —
+/// so `"air"` counts as gone. Per AGENTS.md M-12, lookups always go through
+/// `block_index`, never a linear `blocks` scan.
+pub(crate) async fn wait_for_block_gone(
+    state: &Arc<SharedState>,
+    pos: BlockPos,
+    budget: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let gone = {
+            let snapshot = state.read_snapshot();
+            match snapshot.block_index.get(&pos) {
+                None => true,
+                Some(&idx) => snapshot.blocks[idx].block_type.eq_ignore_ascii_case("air"),
+            }
+        };
+        if gone {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let wait = std::cmp::min(deadline - now, Duration::from_millis(100));
+        sleep(wait).await;
+    }
+}
+
+/// Poll the snapshot until the block at `pos` is PRESENT (the block index
+/// has an entry for it whose type is not air) or the `budget` expires.
+///
+/// Returns `true` when the block is present, `false` when the budget ran
+/// out without the block appearing.
+///
+/// F6-4: same race as [`wait_for_block_gone`] — place results land in the
+/// snapshot on the next periodic rebuild, so verification must poll instead
+/// of deciding from a single possibly-stale read. AIR-BLOCK semantics: an
+/// `air` entry does NOT count as present.
+pub(crate) async fn wait_for_block_present(
+    state: &Arc<SharedState>,
+    pos: BlockPos,
+    budget: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let present = {
+            let snapshot = state.read_snapshot();
+            snapshot
+                .block_index
+                .get(&pos)
+                .map(|&idx| !snapshot.blocks[idx].block_type.eq_ignore_ascii_case("air"))
+                .unwrap_or(false)
+        };
+        if present {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let wait = std::cmp::min(deadline - now, Duration::from_millis(100));
+        sleep(wait).await;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CompoundOpExecutor
@@ -347,20 +431,19 @@ impl CompoundOpExecutor {
                         }
                     }
 
-                    // Step 10: Verify block broken — Task 2.5 (M-12): use
-                    // `block_index` for O(1) lookup. Treat "air" as "block
-                    // gone" (real servers replace mined blocks with air).
-                    let new_snapshot = executor.state.read_snapshot();
-                    let still_there = new_snapshot
-                        .block_index
-                        .get(&pos)
-                        .map(|&idx| {
-                            !new_snapshot.blocks[idx]
-                                .block_type
-                                .eq_ignore_ascii_case("air")
-                        })
-                        .unwrap_or(false);
-                    if still_there {
+                    // Step 10: Verify block broken — F6-4: poll the
+                    // snapshot with a bounded budget instead of deciding
+                    // from a single possibly-stale read (the broken state
+                    // lands on the next periodic snapshot rebuild).
+                    // `wait_for_block_gone` treats "air" as gone
+                    // (1.0.7 air-in-snapshot semantics) and goes through
+                    // `block_index` (M-12).
+                    let budget =
+                        Duration::from_millis(executor.state.read_config().snapshot_interval_ms)
+                            + Duration::from_millis(250);
+                    if wait_for_block_gone(&executor.state, pos, budget).await {
+                        state = op.advance(state, OperationEvent::BlockBroken);
+                    } else {
                         warn!(?pos, "block still present after mining time");
                         state = op.advance(
                             state,
@@ -368,8 +451,6 @@ impl CompoundOpExecutor {
                                 reason: "block still present after mining time".into(),
                             }),
                         );
-                    } else {
-                        state = op.advance(state, OperationEvent::BlockBroken);
                     }
                 }
                 _ => {
@@ -528,15 +609,16 @@ impl CompoundOpExecutor {
                         continue;
                     }
 
-                    // Verify block placed
-                    sleep(Duration::from_millis(200)).await;
-                    let new_snapshot = executor.state.read_snapshot();
-                    let placed = new_snapshot
-                        .block_index
-                        .get(&pos)
-                        .map(|&idx| new_snapshot.blocks[idx].block_type == block_type)
-                        .unwrap_or(false);
-                    if placed {
+                    // Verify block placed — F6-4: poll the snapshot with a
+                    // bounded budget instead of a fixed 200 ms sleep plus a
+                    // single possibly-stale read (the placed state lands on
+                    // the next periodic snapshot rebuild). An "air" entry
+                    // does not count as placed (1.0.7 air-in-snapshot
+                    // semantics); lookups go through `block_index` (M-12).
+                    let budget =
+                        Duration::from_millis(executor.state.read_config().snapshot_interval_ms)
+                            + Duration::from_millis(250);
+                    if wait_for_block_present(&executor.state, pos, budget).await {
                         state = op.advance(state, OperationEvent::BlockPlaced);
                     } else {
                         state = op.advance(
@@ -1913,5 +1995,160 @@ mod tests {
             "bot should have moved to the standable neighbour {expected_neighbour:?}, \
              not the target position {pos:?}"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // wait_for_block_gone / wait_for_block_present tests (F6-4)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// SharedState whose snapshot holds a single block of the given type
+    /// at `pos` (with a correctly populated `block_index`).
+    fn single_block_state(pos: BlockPos, block_type: &str) -> Arc<SharedState> {
+        let state = SharedState::new(AppConfig::default());
+        let blocks = vec![BlockEntry {
+            position: pos,
+            block_type: block_type.into(),
+            block_state: None,
+        }];
+        let block_index = blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.position, i))
+            .collect();
+        state.update_snapshot(WorldSnapshot {
+            blocks,
+            block_index,
+            ..Default::default()
+        });
+        Arc::new(state)
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_block_gone_true_when_block_flips_to_air_mid_wait() {
+        // The snapshot rebuild that reports the block as broken arrives only
+        // ~150 ms later (simulating the periodic snapshot interval) — the
+        // helper must keep polling and succeed within the budget.
+        let pos = BlockPos::new(5, 64, 5);
+        let state = single_block_state(pos, "stone");
+
+        let updater = Arc::clone(&state);
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(150)).await;
+            // A broken block becomes "air" in the index (1.0.7), it does
+            // not leave the index.
+            let blocks = vec![BlockEntry {
+                position: pos,
+                block_type: "air".into(),
+                block_state: None,
+            }];
+            let block_index = [(pos, 0usize)].into_iter().collect();
+            updater.update_snapshot(WorldSnapshot {
+                blocks,
+                block_index,
+                ..Default::default()
+            });
+        });
+
+        let gone = wait_for_block_gone(&state, pos, Duration::from_secs(2)).await;
+        assert!(gone, "block flipped to air mid-wait must count as gone");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_block_gone_false_after_budget_when_block_stays() {
+        let pos = BlockPos::new(5, 64, 5);
+        let state = single_block_state(pos, "stone");
+
+        let start = tokio::time::Instant::now();
+        let gone = wait_for_block_gone(&state, pos, Duration::from_millis(120)).await;
+        let elapsed = start.elapsed();
+
+        assert!(!gone, "block never changed → budget must expire");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "budget must stay bounded, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_block_gone_air_entry_counts_as_gone() {
+        // Regression for the 1.0.7 air-in-snapshot behavior: the index
+        // still HAS an entry for the position, but its type is "air" —
+        // that counts as gone.
+        let pos = BlockPos::new(5, 64, 5);
+        let state = single_block_state(pos, "air");
+
+        let gone = wait_for_block_gone(&state, pos, Duration::from_secs(2)).await;
+        assert!(gone, "an indexed air entry must count as gone");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_block_gone_true_when_pos_absent_from_index() {
+        let state = single_block_state(BlockPos::new(0, 64, 0), "stone");
+        let gone =
+            wait_for_block_gone(&state, BlockPos::new(99, 64, 99), Duration::from_secs(2)).await;
+        assert!(gone, "no index entry → already gone");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_block_present_true_when_block_appears_mid_wait() {
+        // Start from an air entry (pre-place state) and let the snapshot
+        // rebuild report the placed block ~150 ms later.
+        let pos = BlockPos::new(5, 64, 5);
+        let state = single_block_state(pos, "air");
+
+        let updater = Arc::clone(&state);
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(150)).await;
+            let blocks = vec![BlockEntry {
+                position: pos,
+                block_type: "stone".into(),
+                block_state: None,
+            }];
+            let block_index = [(pos, 0usize)].into_iter().collect();
+            updater.update_snapshot(WorldSnapshot {
+                blocks,
+                block_index,
+                ..Default::default()
+            });
+        });
+
+        let present = wait_for_block_present(&state, pos, Duration::from_secs(2)).await;
+        assert!(present, "block appeared mid-wait must count as present");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_block_present_false_after_budget_when_never_appears() {
+        let pos = BlockPos::new(5, 64, 5);
+        let state = single_block_state(pos, "air");
+
+        let start = tokio::time::Instant::now();
+        let present = wait_for_block_present(&state, pos, Duration::from_millis(120)).await;
+        let elapsed = start.elapsed();
+
+        assert!(!present, "block never appeared → budget must expire");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "budget must stay bounded, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_block_present_air_entry_counts_as_absent() {
+        // Regression: an indexed air entry must NOT count as placed —
+        // only a non-air entry does.
+        let pos = BlockPos::new(5, 64, 5);
+        let state = single_block_state(pos, "air");
+
+        let present = wait_for_block_present(&state, pos, Duration::from_millis(120)).await;
+        assert!(!present, "an air entry must not count as present");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_block_present_true_immediately_when_already_there() {
+        let pos = BlockPos::new(5, 64, 5);
+        let state = single_block_state(pos, "stone");
+
+        let present = wait_for_block_present(&state, pos, Duration::from_secs(2)).await;
+        assert!(present);
     }
 }
