@@ -110,6 +110,7 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         // ── MCP config panel ───────────────────────────────────────────
         TextKey::Copy => "复制",
         TextKey::CopyHint => "将此 JSON 复制到你的 MCP 客户端配置中（Claude Desktop / Cursor）：",
+        TextKey::NpxConfig => "npm / npx（无需 Rust 工具链）：",
 
         // ── Language picker ────────────────────────────────────────────
         TextKey::Language => "语言：",
@@ -215,6 +216,7 @@ mod tests {
             TextKey::NoChatMessages,
             TextKey::Copy,
             TextKey::CopyHint,
+            TextKey::NpxConfig,
             TextKey::Language,
             TextKey::LangEn,
             TextKey::LangZhCn,

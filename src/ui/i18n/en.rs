@@ -112,6 +112,7 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::CopyHint => {
             "Copy this JSON into your MCP client config (Claude Desktop / Cursor):"
         }
+        TextKey::NpxConfig => "npm / npx (no Rust toolchain needed):",
 
         // ── Language picker ────────────────────────────────────────────
         TextKey::Language => "Language:",
@@ -224,6 +225,7 @@ mod tests {
             TextKey::NoChatMessages,
             TextKey::Copy,
             TextKey::CopyHint,
+            TextKey::NpxConfig,
             TextKey::Language,
             TextKey::LangEn,
             TextKey::LangZhCn,

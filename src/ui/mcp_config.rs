@@ -93,6 +93,28 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig) {
             .interactive(false)
             .desired_width(f32::INFINITY),
     );
+
+    // ── npx variant (Stdio only) ───────────────────────────────
+    // The npx launcher only makes sense for the stdio transport — `npx`
+    // spawns the binary as a subprocess, which is exactly what the Stdio
+    // JSON block describes. HTTP transport is unaffected.
+    if edit.mcp_transport == McpTransport::Stdio {
+        let npx_text = build_npx_config_json();
+        ui.add_space(6.0);
+        ui.label(i18n::tr(TextKey::NpxConfig));
+        ui.horizontal(|ui| {
+            if ui.button(i18n::tr(TextKey::Copy)).clicked() {
+                ui.ctx().copy_text(npx_text.clone());
+            }
+        });
+        let mut npx_text = npx_text;
+        ui.add(
+            TextEdit::multiline(&mut npx_text)
+                .font(FontId::monospace(12.0))
+                .interactive(false)
+                .desired_width(f32::INFINITY),
+        );
+    }
 }
 
 /// Format a host string for use in a URL, wrapping IPv6 addresses in
@@ -148,6 +170,24 @@ fn build_mcp_config_json(edit: &EditConfig) -> String {
             })
         }
     };
+    serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".to_owned())
+}
+
+/// Build the npm / npx variant of the MCP client config JSON.
+///
+/// Launches the published npm package through `npx` — no Rust toolchain
+/// needed on the client machine. Requires the package to be published (see
+/// `npm/` and the `npm-publish` CI job); the args mirror the flags the
+/// binary parses: `--headless --stdio`.
+fn build_npx_config_json() -> String {
+    let json = serde_json::json!({
+        "mcpServers": {
+            "minecraft": {
+                "command": "npx",
+                "args": ["-y", "minecraft-mcp-rs", "--headless", "--stdio"]
+            }
+        }
+    });
     serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".to_owned())
 }
 
@@ -290,6 +330,22 @@ mod tests {
         assert!(
             !json.contains("Bearer"),
             "should not contain Bearer in Stdio mode: {json}"
+        );
+    }
+
+    // -- npx variant ---------------------------------------------------------
+
+    #[test]
+    fn test_build_npx_config_json_contents() {
+        let json = build_npx_config_json();
+        assert!(json.contains("npx"), "missing npx command: {json}");
+        assert!(json.contains("-y"), "missing -y flag: {json}");
+        assert!(json.contains("minecraft-mcp-rs"), "missing package: {json}");
+        assert!(json.contains("--headless"), "missing --headless: {json}");
+        assert!(json.contains("--stdio"), "missing --stdio: {json}");
+        assert!(
+            !json.contains("current_exe"),
+            "npx config must not reference the local exe path: {json}"
         );
     }
 }

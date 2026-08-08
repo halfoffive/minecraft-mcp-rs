@@ -91,6 +91,8 @@ pub enum TextKey {
     Status,
     /// Collapsible "MCP Config" panel heading.
     McpConfig,
+    /// Label above the npm / npx (no Rust toolchain) MCP config snippet.
+    NpxConfig,
 
     // ── Minecraft server section ───────────────────────────────────
     /// "Minecraft Server" section header.
@@ -324,6 +326,7 @@ pub fn key_name(key: TextKey) -> &'static str {
         TextKey::Settings => "Settings",
         TextKey::Status => "Status",
         TextKey::McpConfig => "McpConfig",
+        TextKey::NpxConfig => "NpxConfig",
         TextKey::MinecraftServer => "MinecraftServer",
         TextKey::Address => "Address",
         TextKey::Port => "Port",
