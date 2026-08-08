@@ -9,6 +9,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [1.1.0] - 2026-08-08
+
+### Added
+
+- **Settings MCP tools:** `get_settings` (full config, MCP token redacted to
+  `"***"`, plus runtime status), `update_settings` (partial update, validated
+  and persisted to the config file before applying; changing
+  `mc_address`/`mc_port`/`ai_username` triggers an automatic reconnect when
+  connected, `mcp_transport`/`mcp_address`/`mcp_port` take effect on process
+  restart), `connect_bot`, and `disconnect_bot`. All four work while the bot
+  is offline. The `McpBotServer` now carries the command-receiver slot so
+  `connect_bot` can spawn connections directly.
+- **Config file persistence:** `AppConfig` is loaded from and saved to
+  `config.json` in the OS config directory (`%APPDATA%\minecraft-mcp-rs\` on
+  Windows, `~/.config/minecraft-mcp-rs/` on Linux, `~/Library/Application
+  Support/minecraft-mcp-rs/` on macOS). Atomic write (temp file + rename,
+  `0600` on Unix). `mcp_token` is persisted; it is redacted in every tool
+  response.
+- **Headless mode + CLI flags:** `--headless` (no desktop window; auto-connect
+  on startup via a supervisor thread; process exits when the MCP transport
+  closes), `--stdio` (force stdio transport), `--config <path>`, `-h`/`--help`.
+  Manual argument parsing in `src/cli.rs` — no new dependency.
+- **npm distribution:** `npm/minecraft-mcp-rs` (JS bin shim,
+  `optionalDependencies` on five platform packages) +
+  `minecraft-mcp-rs-{windows-x64,windows-arm64,darwin-arm64,linux-x64,linux-arm64}`
+  carrying the stripped release binaries. Usage:
+  `npx minecraft-mcp-rs --headless --stdio`. Root `LICENSE` (MIT) added.
+- **CI npm-publish job:** appended to `release.yml` (triggered by the same
+  `v*` tags plus `workflow_dispatch` with an optional `tag` input); reuses the
+  build artifacts, publishes platform packages first then the main package,
+  skips already-published versions, `--provenance --access public`, auth via
+  the `NPM_TOKEN` secret (fail-fast if missing).
+- **Error-contract table:** every `BotError` variant now maps to a distinct
+  JSON-RPC code with structured `data` (`reason`, `retryable`, variant
+  fields) — see `src/error.rs` and the README. `Offline` stays `-32000`
+  (`bot_disconnected`).
+- **MCP Config panel npx snippet:** the UI shows a second, copyable npx JSON
+  block (stdio transport only) alongside the local-executable snippet.
+
+### Changed
+
+- **Connect loop hot-reloads config:** `ConnectionManager::connect` reads
+  `ai_username`/`mc_address`/`mc_port`/`snapshot_interval_ms` and the
+  reconnect backoff delays live from `SharedState` on every iteration instead
+  of a frozen `self.config` clone, so agent-driven `update_settings` changes
+  take effect on the next reconnect without restarting the process.
+- **Entities rebuilt from the live ECS:** `SnapshotUpdater` now repopulates
+  `entities` from azalea's entity storage on every snapshot rebuild instead
+  of carrying over join-time player entries — `collect_items` and
+  `get_nearby_entities` now actually see item drops and mobs. Event handlers
+  no longer push entities into the snapshot.
+- **`join_with_timeout` is `pub`:** the bounded-join helper moved from the UI
+  crate to `src/bot/spawn.rs` and is shared by the headless supervisor and
+  `MinecraftApp::drop`.
+- **UI MCP Config panel** additionally renders the npx install variant.
+
+### Fixed
+
+- **Dead exponential-backoff reconnect:** `handle_spawn` latches
+  `session_was_online` and `connect()` consumes it via
+  `take_session_was_online()`, restoring the backoff branch that was
+  unreachable because `handle_disconnect` clears the online flag before
+  `ClientBuilder::start()` returns.
+- **`Instant` underflow panic:** uptime under 1 hour no longer underflows.
+- **`collect_items` never finding items:** entity list is now rebuilt from the
+  live ECS (see Changed).
+- **Dead `InventoryFull` guard:** the snapshot-based `inventory.len() >= 36`
+  check in `take_from_container` (which could never fire with a container
+  open) is replaced by a live inventory read.
+- **Mine/place verification races:** verification now polls the snapshot with
+  a bounded budget (`snapshot_interval_ms + 250 ms`) and treats air entries as
+  "block gone/present" per the 1.0.7 air-in-snapshot semantics.
+- **Walk up/down wrong error variant:** `Internal` → `InvalidParams`.
+- **`slot:N` silent success:** malformed internal slot encodings now return
+  `InvalidParams` instead of warn-and-continue.
+- **`smart_move` success when blocked:** the blocked path reports
+  `success: false` with a reason.
+- **Non-constant-time bearer-token compare:** replaced with a
+  constant-time XOR-accumulate comparison (length leakage accepted).
+
+### Removed
+
+- **`GameEvent` enum** (never constructed or consumed outside tests).
+- **Unused `BotCommand::Query*` variants** (`QueryNearbyBlocks`,
+  `QueryNearbyEntities`, `QuerySelfInfo`, `QueryChunkSummary`,
+  `QueryServerInfo`, `QueryChatHistory`, `QueryWorldView`) and their handlers;
+  `QueryInventory` remains. Variant count 34 → 27.
+
 ## [1.0.7] - 2026-07-25
 
 ### Added
