@@ -386,7 +386,7 @@ async fn test_concurrent_commands_serialized_second_waits() {
     });
 
     let h2 = tokio::spawn(async move {
-        s2.send_command(BotCommand::QuerySelfInfo)
+        s2.send_command(BotCommand::WalkDirection(Direction::South, 3))
             .await
             .expect("cmd2 should succeed")
     });
@@ -406,8 +406,8 @@ async fn test_concurrent_commands_serialized_second_waits() {
     assert!(order[0].contains("Jump"), "first processed should be Jump");
     assert_eq!(order[1], "end-first");
     assert!(
-        order[2].contains("QuerySelfInfo"),
-        "second processed is QuerySelfInfo"
+        order[2].contains("WalkDirection"),
+        "second processed is WalkDirection"
     );
     assert_eq!(order[3], "end-second");
 }
@@ -461,7 +461,7 @@ async fn test_bot_offline_channel_returns_offline_error() {
     let (sender, receiver) = channel::create_command_channel(4, make_test_state());
     drop(receiver);
 
-    let result = sender.send_command(BotCommand::QuerySelfInfo).await;
+    let result = sender.send_command(BotCommand::Jump).await;
 
     match result {
         Err(BotError::Offline(msg)) => {
@@ -484,7 +484,7 @@ async fn test_bot_offline_all_command_types_fail() {
         BotCommand::MoveTo(BlockPos::new(0, 0, 0)),
         BotCommand::BreakBlock(BlockPos::new(0, 0, 0)),
         BotCommand::SendChat("hello".into()),
-        BotCommand::QuerySelfInfo,
+        BotCommand::QueryInventory,
     ];
 
     for cmd in commands {
@@ -857,18 +857,11 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
         BotCommand::SendChat("test".into()),
         BotCommand::ExecuteCommand("/help".into()),
         BotCommand::SetGameMode(GameMode::Survival),
-        BotCommand::QueryNearbyBlocks(10),
-        BotCommand::QueryNearbyEntities(10),
-        BotCommand::QuerySelfInfo,
         BotCommand::QueryInventory,
-        BotCommand::QueryChunkSummary,
         // ── v2 foundation: extended capabilities ──────────────────
         BotCommand::SmartMove(BlockPos::new(0, 64, 0)),
         BotCommand::FlyTo(BlockPos::new(0, 64, 0)),
         BotCommand::CollectItems(5),
-        BotCommand::QueryServerInfo,
-        BotCommand::QueryChatHistory,
-        BotCommand::QueryWorldView(4),
         BotCommand::Act(ActAction::Move {
             target: BlockPos::new(0, 64, 0),
         }),
@@ -876,8 +869,8 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
 
     assert_eq!(
         commands.len(),
-        34,
-        "should have exactly 34 BotCommand variants (including EquipToolWithMaterial + v2 + UseItemWithSlot)"
+        27,
+        "should have exactly 27 BotCommand variants (7 dead Query* variants removed in 1.1.0)"
     );
 
     for cmd in commands {

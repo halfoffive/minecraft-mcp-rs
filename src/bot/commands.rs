@@ -627,20 +627,13 @@ impl<B: BotActions> CommandExecutor<B> {
             BotCommand::SetGameMode(mode) => self.handle_set_game_mode(mode),
 
             // ── Queries ───────────────────────────────────────────
-            BotCommand::QueryNearbyBlocks(radius) => self.handle_query_nearby_blocks(radius),
-            BotCommand::QueryNearbyEntities(radius) => self.handle_query_nearby_entities(radius),
-            BotCommand::QuerySelfInfo => self.handle_query_self_info(),
             BotCommand::QueryInventory => self.handle_query_inventory(),
-            BotCommand::QueryChunkSummary => self.handle_query_chunk_summary(),
 
             // ── v2 foundation: extended capabilities ──────────────
             BotCommand::SmartMove(target) => self.handle_smart_move(target).await,
             BotCommand::FlyTo(target) => self.handle_fly_to(target).await,
             BotCommand::CollectItems(radius) => self.handle_collect_items(radius).await,
             BotCommand::Act(action) => self.handle_act(action).await,
-            BotCommand::QueryServerInfo => self.handle_query_server_info(),
-            BotCommand::QueryChatHistory => self.handle_query_chat_history(),
-            BotCommand::QueryWorldView(radius) => self.handle_query_world_view(radius),
         }
     }
 
@@ -1124,62 +1117,6 @@ impl<B: BotActions> CommandExecutor<B> {
 
     // ── Query handlers ───────────────────────────────────────────
 
-    fn handle_query_nearby_blocks(&self, radius: u32) -> Result<BotResult, BotError> {
-        trace!(radius, "QueryNearbyBlocks");
-        let snapshot = self.state.read_snapshot();
-        let pos = snapshot.self_player.position;
-        let r = clamp_to_i32(radius);
-        let blocks: Vec<_> = snapshot
-            .blocks
-            .iter()
-            .filter(|b| {
-                (b.position.x - pos.x).abs() <= r
-                    && (b.position.y - pos.y).abs() <= r
-                    && (b.position.z - pos.z).abs() <= r
-            })
-            .cloned()
-            .collect();
-
-        Ok(BotResult {
-            success: true,
-            message: format!("Found {} nearby blocks", blocks.len()),
-            data: Some(serde_json::to_value(&blocks).unwrap_or_default()),
-        })
-    }
-
-    fn handle_query_nearby_entities(&self, radius: u32) -> Result<BotResult, BotError> {
-        trace!(radius, "QueryNearbyEntities");
-        let snapshot = self.state.read_snapshot();
-        let pos = snapshot.self_player.position;
-        let r = clamp_to_i32(radius);
-        let entities: Vec<_> = snapshot
-            .entities
-            .iter()
-            .filter(|e| {
-                (e.position.x - pos.x).abs() <= r
-                    && (e.position.y - pos.y).abs() <= r
-                    && (e.position.z - pos.z).abs() <= r
-            })
-            .cloned()
-            .collect();
-
-        Ok(BotResult {
-            success: true,
-            message: format!("Found {} nearby entities", entities.len()),
-            data: Some(serde_json::to_value(&entities).unwrap_or_default()),
-        })
-    }
-
-    fn handle_query_self_info(&self) -> Result<BotResult, BotError> {
-        trace!("QuerySelfInfo");
-        let snapshot = self.state.read_snapshot();
-        Ok(BotResult {
-            success: true,
-            message: "Self info retrieved".into(),
-            data: Some(serde_json::to_value(&snapshot.self_player).unwrap_or_default()),
-        })
-    }
-
     fn handle_query_inventory(&self) -> Result<BotResult, BotError> {
         trace!("QueryInventory");
         // Read the live inventory from the azalea client. The result is a
@@ -1201,16 +1138,6 @@ impl<B: BotActions> CommandExecutor<B> {
             success: true,
             message: format!("Inventory has {occupied} occupied slot(s)"),
             data: Some(serde_json::Value::Array(arr)),
-        })
-    }
-
-    fn handle_query_chunk_summary(&self) -> Result<BotResult, BotError> {
-        trace!("QueryChunkSummary");
-        let snapshot = self.state.read_snapshot();
-        Ok(BotResult {
-            success: true,
-            message: format!("{} chunks loaded", snapshot.chunk_summary.len()),
-            data: Some(serde_json::to_value(&snapshot.chunk_summary).unwrap_or_default()),
         })
     }
 
@@ -1469,59 +1396,6 @@ impl<B: BotActions> CommandExecutor<B> {
             success: act_result.reason.is_none(),
             message: "Act completed".into(),
             data: Some(serde_json::to_value(&act_result).unwrap_or_default()),
-        })
-    }
-
-    /// Query server info — returns whether commands are enabled and the
-    /// current gamemode, both read from the shared snapshot.
-    fn handle_query_server_info(&self) -> Result<BotResult, BotError> {
-        trace!("QueryServerInfo");
-        let snapshot = self.state.read_snapshot();
-        let gamemode = match snapshot.self_player.gamemode {
-            GameMode::Survival => "survival",
-            GameMode::Creative => "creative",
-            GameMode::Adventure => "adventure",
-            GameMode::Spectator => "spectator",
-        };
-        Ok(BotResult {
-            success: true,
-            message: format!(
-                "commands_enabled={:?}, gamemode={gamemode}",
-                snapshot.commands_enabled
-            ),
-            data: Some(serde_json::json!({
-                "commands_enabled": snapshot.commands_enabled,
-                "gamemode": gamemode,
-            })),
-        })
-    }
-
-    /// Query recent chat history from the shared state.
-    fn handle_query_chat_history(&self) -> Result<BotResult, BotError> {
-        trace!("QueryChatHistory");
-        let messages = self.state.get_chat_messages();
-        let arr: Vec<serde_json::Value> = messages
-            .iter()
-            .map(|(sender, message)| serde_json::json!({"sender": sender, "message": message}))
-            .collect();
-        Ok(BotResult {
-            success: true,
-            message: format!("{} recent chat message(s)", arr.len()),
-            data: Some(serde_json::Value::Array(arr)),
-        })
-    }
-
-    /// Query world view — returns a placeholder. The actual PNG rendering
-    /// happens at the MCP tool layer which reads the snapshot directly.
-    fn handle_query_world_view(&self, radius: u8) -> Result<BotResult, BotError> {
-        trace!(radius, "QueryWorldView");
-        Ok(BotResult {
-            success: true,
-            message: format!("World view radius {radius} (rendered at tool layer)"),
-            data: Some(serde_json::json!({
-                "radius": radius,
-                "note": "rendered at tool layer",
-            })),
         })
     }
 }
@@ -3161,89 +3035,12 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════
 
     #[tokio::test]
-    async fn test_query_nearby_blocks() {
-        let (executor, sender, state, _log) = make_executor();
-        make_populated_snapshot(&state);
-        let handle = spawn_executor(executor);
-
-        let result = send_and_await(&sender, BotCommand::QueryNearbyBlocks(10)).await;
-        assert!(result.is_ok());
-        let br = result.unwrap();
-        assert!(br.success);
-        assert!(br.message.contains("Found 1"));
-
-        drop(sender);
-        handle.await.expect("executor should finish");
-    }
-
-    #[tokio::test]
-    async fn test_query_nearby_blocks_empty() {
-        let (executor, sender, _state, _log) = make_executor();
-        // Don't populate — snapshot is empty.
-        let handle = spawn_executor(executor);
-
-        let result = send_and_await(&sender, BotCommand::QueryNearbyBlocks(10)).await;
-        assert!(result.is_ok());
-        let br = result.unwrap();
-        assert!(br.message.contains("Found 0"));
-
-        drop(sender);
-        handle.await.expect("executor should finish");
-    }
-
-    #[tokio::test]
-    async fn test_query_nearby_entities() {
-        let (executor, sender, state, _log) = make_executor();
-        make_populated_snapshot(&state);
-        let handle = spawn_executor(executor);
-
-        let result = send_and_await(&sender, BotCommand::QueryNearbyEntities(10)).await;
-        assert!(result.is_ok());
-        let br = result.unwrap();
-        assert!(br.success);
-        assert!(br.message.contains("Found 1"));
-
-        drop(sender);
-        handle.await.expect("executor should finish");
-    }
-
-    #[tokio::test]
-    async fn test_query_self_info() {
-        let (executor, sender, state, _log) = make_executor();
-        make_populated_snapshot(&state);
-        let handle = spawn_executor(executor);
-
-        let result = send_and_await(&sender, BotCommand::QuerySelfInfo).await;
-        assert!(result.is_ok());
-        let br = result.unwrap();
-        assert!(br.data.is_some());
-
-        drop(sender);
-        handle.await.expect("executor should finish");
-    }
-
-    #[tokio::test]
     async fn test_query_inventory() {
         let (executor, sender, _state, _log) = make_executor();
         let handle = spawn_executor(executor);
 
         let result = send_and_await(&sender, BotCommand::QueryInventory).await;
         assert!(result.is_ok());
-
-        drop(sender);
-        handle.await.expect("executor should finish");
-    }
-
-    #[tokio::test]
-    async fn test_query_chunk_summary() {
-        let (executor, sender, state, _log) = make_executor();
-        make_populated_snapshot(&state);
-        let handle = spawn_executor(executor);
-
-        let result = send_and_await(&sender, BotCommand::QueryChunkSummary).await;
-        assert!(result.is_ok());
-        let br = result.unwrap();
-        assert!(br.message.contains("2 chunks"));
 
         drop(sender);
         handle.await.expect("executor should finish");

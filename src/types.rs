@@ -190,16 +190,8 @@ pub enum BotCommand {
     ExecuteCommand(String),
     /// Set the player's game mode (requires operator permissions).
     SetGameMode(GameMode),
-    /// Query nearby blocks within a radius.
-    QueryNearbyBlocks(u32),
-    /// Query nearby entities within a radius.
-    QueryNearbyEntities(u32),
-    /// Query information about the local player.
-    QuerySelfInfo,
     /// Query the player's inventory.
     QueryInventory,
-    /// Query a summary of loaded chunks.
-    QueryChunkSummary,
     // ── v2 foundation: extended capabilities ──────────────────
     /// Smart movement to a position with auto-jump enabled.
     SmartMove(BlockPos),
@@ -207,12 +199,6 @@ pub enum BotCommand {
     FlyTo(BlockPos),
     /// Collect nearby items within the given pickup radius (in blocks).
     CollectItems(u32),
-    /// Query server info (e.g. whether commands are enabled).
-    QueryServerInfo,
-    /// Query recent chat history.
-    QueryChatHistory,
-    /// Render a top-down world view with the given radius (in chunks).
-    QueryWorldView(u8),
     /// Unified action tool — dispatches one of the [`ActAction`] variants.
     Act(ActAction),
 }
@@ -273,39 +259,6 @@ pub struct BotResult {
     pub data: Option<serde_json::Value>,
 }
 
-/// Events that can occur during gameplay, streamed to the MCP client.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub enum GameEvent {
-    /// A chat message was received.
-    ChatMessage { sender: String, message: String },
-    /// A player joined the game.
-    PlayerJoin { username: String },
-    /// A player left the game.
-    PlayerLeave { username: String },
-    /// A block was broken.
-    BlockBreak {
-        position: BlockPos,
-        block_type: String,
-    },
-    /// A block was placed.
-    BlockPlace {
-        position: BlockPos,
-        block_type: String,
-    },
-    /// An entity spawned.
-    EntitySpawn { entity: Box<EntityEntry> },
-    /// An entity despawned.
-    EntityDespawn { entity_id: u32 },
-    /// An entity took damage.
-    Damage { entity_id: u32, amount: f32 },
-    /// An entity died.
-    Death { entity_id: u32 },
-    /// The player's inventory was updated.
-    InventoryUpdate,
-    /// The player's game mode changed.
-    GameModeChange { new_mode: GameMode },
-}
-
 // ═══════════════════════════════════════════════════════════════
 // World & Entity Data
 // ═══════════════════════════════════════════════════════════════
@@ -319,8 +272,6 @@ pub struct WorldSnapshot {
     pub timestamp: u64,
     pub chunk_summary: Vec<(i32, i32)>,
     /// Whether server commands are enabled for the bot (`None` if unknown).
-    ///
-    /// Populated by `QueryServerInfo`; `None` until the server reports it.
     #[serde(default)]
     pub commands_enabled: Option<bool>,
     /// Index from BlockPos to position in `blocks` Vec, for O(1) lookup.
@@ -567,30 +518,23 @@ mod tests {
             BotCommand::SendChat(_) => 1,
             BotCommand::ExecuteCommand(_) => 1,
             BotCommand::SetGameMode(_) => 1,
-            BotCommand::QueryNearbyBlocks(_) => 1,
-            BotCommand::QueryNearbyEntities(_) => 1,
-            BotCommand::QuerySelfInfo => 1,
             BotCommand::QueryInventory => 1,
-            BotCommand::QueryChunkSummary => 1,
             BotCommand::SmartMove(_) => 1,
             BotCommand::FlyTo(_) => 1,
             BotCommand::CollectItems(_) => 1,
-            BotCommand::QueryServerInfo => 1,
-            BotCommand::QueryChatHistory => 1,
-            BotCommand::QueryWorldView(_) => 1,
             BotCommand::Act(_) => 1,
         }
     }
 
     #[test]
     fn test_bot_command_variant_count() {
-        // 27 original variants + 7 v2/foundation variants (including EquipToolWithMaterial) = 34 total.
+        // 27 variants (removed the 7 never-dispatched Query* variants in 1.1.0).
         let cmds = all_bot_commands();
         // Verify each variant returns 1 from the exhaustive match
         for cmd in &cmds {
             assert_eq!(require_all_variants(cmd), 1);
         }
-        assert_eq!(cmds.len(), 34);
+        assert_eq!(cmds.len(), 27);
     }
 
     #[test]
@@ -660,9 +604,9 @@ mod tests {
     }
 
     #[test]
-    fn test_bot_command_query_self_info() {
-        let cmd = BotCommand::QuerySelfInfo;
-        assert!(matches!(cmd, BotCommand::QuerySelfInfo));
+    fn test_bot_command_query_inventory() {
+        let cmd = BotCommand::QueryInventory;
+        assert!(matches!(cmd, BotCommand::QueryInventory));
     }
 
     // ── Serde roundtrip tests ───────────────────────────────
@@ -701,50 +645,6 @@ mod tests {
         assert!(!result.success);
         assert!(result.message.is_empty());
         assert!(result.data.is_none());
-    }
-
-    #[test]
-    fn test_game_event_serde_roundtrip() {
-        let events = vec![
-            GameEvent::ChatMessage {
-                sender: "Alice".into(),
-                message: "Hi".into(),
-            },
-            GameEvent::PlayerJoin {
-                username: "Bob".into(),
-            },
-            GameEvent::PlayerLeave {
-                username: "Bob".into(),
-            },
-            GameEvent::BlockBreak {
-                position: BlockPos::new(0, 64, 0),
-                block_type: "stone".into(),
-            },
-            GameEvent::GameModeChange {
-                new_mode: GameMode::Creative,
-            },
-        ];
-        for event in &events {
-            let json = serde_json::to_string(event).unwrap();
-            let deserialized: GameEvent = serde_json::from_str(&json).unwrap();
-            let re_json = serde_json::to_string(&deserialized).unwrap();
-            assert_eq!(json, re_json, "Serde roundtrip failed for: {json}");
-        }
-    }
-
-    #[test]
-    fn test_game_event_chat_message() {
-        let event = GameEvent::ChatMessage {
-            sender: "Alice".into(),
-            message: "Hello!".into(),
-        };
-        match event {
-            GameEvent::ChatMessage { sender, message } => {
-                assert_eq!(sender, "Alice");
-                assert_eq!(message, "Hello!");
-            }
-            _ => panic!("Expected ChatMessage variant"),
-        }
     }
 
     // ── WorldSnapshot / SelfPlayer tests ────────────────────
@@ -918,18 +818,11 @@ mod tests {
             BotCommand::SendChat(String::new()),
             BotCommand::ExecuteCommand(String::new()),
             BotCommand::SetGameMode(GameMode::Survival),
-            BotCommand::QueryNearbyBlocks(10),
-            BotCommand::QueryNearbyEntities(10),
-            BotCommand::QuerySelfInfo,
             BotCommand::QueryInventory,
-            BotCommand::QueryChunkSummary,
             // ── v2 foundation variants ─────────────────────────
             BotCommand::SmartMove(BlockPos::new(0, 0, 0)),
             BotCommand::FlyTo(BlockPos::new(0, 0, 0)),
             BotCommand::CollectItems(8),
-            BotCommand::QueryServerInfo,
-            BotCommand::QueryChatHistory,
-            BotCommand::QueryWorldView(4),
             BotCommand::Act(ActAction::Move {
                 target: BlockPos::new(0, 0, 0),
             }),

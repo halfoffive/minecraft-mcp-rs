@@ -186,7 +186,7 @@ fn gamemode_to_str(mode: GameMode) -> &'static str {
 ///
 /// `commands_enabled` is `true` if the player has OP level > 0, `false` if OP
 /// level is 0, and `null` if unknown (the snapshot has not yet been populated
-/// by a `QueryServerInfo` round-trip). `gamemode` is one of
+/// by the server-info round-trip). `gamemode` is one of
 /// `survival|creative|adventure|spectator`.
 pub fn get_server_info(state: &Arc<SharedState>) -> Result<String, BotError> {
     if !state.is_online() {

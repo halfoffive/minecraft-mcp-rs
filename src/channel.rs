@@ -415,7 +415,7 @@ mod tests {
         // Drop the receiver before any command is sent.
         drop(receiver);
 
-        let cmd = BotCommand::QuerySelfInfo;
+        let cmd = BotCommand::Jump;
         let result = sender.send_command(cmd).await;
 
         assert!(result.is_err());

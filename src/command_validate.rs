@@ -103,9 +103,7 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         | BotCommand::CloseContainer
         | BotCommand::ShieldBlock(_)
         | BotCommand::SetGameMode(_)
-        | BotCommand::QuerySelfInfo
-        | BotCommand::QueryInventory
-        | BotCommand::QueryChunkSummary => Ok(()),
+        | BotCommand::QueryInventory => Ok(()),
 
         // Hotbar slot must be in range 0-8.
         BotCommand::SwitchHotbarSlot(slot) => {
@@ -181,26 +179,6 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
             Ok(())
         }
 
-        // Nearby block and entity queries use a capped radius consistent
-        // with the MCP layer (R-4: 1..=100) to prevent pathological O(n) scans.
-        BotCommand::QueryNearbyBlocks(radius) => {
-            if *radius < 1 || *radius > 100 {
-                return Err(BotError::InvalidParams(format!(
-                    "Radius must be between 1 and 100, got {radius}"
-                )));
-            }
-            Ok(())
-        }
-
-        BotCommand::QueryNearbyEntities(radius) => {
-            if *radius < 1 || *radius > 100 {
-                return Err(BotError::InvalidParams(format!(
-                    "Radius must be between 1 and 100, got {radius}"
-                )));
-            }
-            Ok(())
-        }
-
         // ── v2 foundation variants ──────────────────────────────────────
 
         // Smart movement and flight use the same position bounds as MoveTo.
@@ -211,19 +189,6 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
             if *radius == 0 || *radius > 64 {
                 return Err(BotError::InvalidParams(format!(
                     "CollectItems radius must be between 1 and 64, got {radius}"
-                )));
-            }
-            Ok(())
-        }
-
-        // Parameterless queries — always valid.
-        BotCommand::QueryServerInfo | BotCommand::QueryChatHistory => Ok(()),
-
-        // World view radius is capped at 32 chunks.
-        BotCommand::QueryWorldView(radius) => {
-            if *radius == 0 || *radius > 32 {
-                return Err(BotError::InvalidParams(format!(
-                    "QueryWorldView radius must be between 1 and 32, got {radius}"
                 )));
             }
             Ok(())
@@ -621,65 +586,6 @@ mod tests {
         assert!(validate_command(&cmd).is_err());
     }
 
-    // ── Radius validation ─────────────────────────────────────────
-
-    #[test]
-    fn test_query_nearby_blocks_valid_range() {
-        for radius in 1..=100u32 {
-            let cmd = BotCommand::QueryNearbyBlocks(radius);
-            assert!(
-                validate_command(&cmd).is_ok(),
-                "block query radius {radius} should be valid"
-            );
-        }
-    }
-
-    #[test]
-    fn test_query_nearby_blocks_zero() {
-        let cmd = BotCommand::QueryNearbyBlocks(0);
-        assert!(validate_command(&cmd).is_err());
-    }
-
-    #[test]
-    fn test_query_nearby_blocks_too_large() {
-        let cmd = BotCommand::QueryNearbyBlocks(101);
-        assert!(validate_command(&cmd).is_err());
-    }
-
-    #[test]
-    fn test_query_nearby_entities_valid() {
-        for radius in 1..=100u32 {
-            let cmd = BotCommand::QueryNearbyEntities(radius);
-            assert!(
-                validate_command(&cmd).is_ok(),
-                "entity query radius {radius} should be valid"
-            );
-        }
-    }
-
-    #[test]
-    fn test_query_nearby_entities_zero() {
-        let cmd = BotCommand::QueryNearbyEntities(0);
-        assert!(validate_command(&cmd).is_err());
-    }
-
-    #[test]
-    fn test_query_nearby_entities_large() {
-        // Entity queries allow up to 100 (R-4, consistent with MCP layer).
-        let cmd = BotCommand::QueryNearbyEntities(100);
-        assert!(validate_command(&cmd).is_ok());
-    }
-
-    #[test]
-    fn test_query_nearby_entities_too_large() {
-        // Values > 100 are rejected to prevent pathological O(n) scans.
-        let cmd = BotCommand::QueryNearbyEntities(101);
-        assert!(validate_command(&cmd).is_err());
-        // u32::MAX must also be rejected.
-        let cmd = BotCommand::QueryNearbyEntities(u32::MAX);
-        assert!(validate_command(&cmd).is_err());
-    }
-
     // ── Pass-through commands (always valid) ───────────────────────
 
     #[test]
@@ -733,18 +639,8 @@ mod tests {
     }
 
     #[test]
-    fn test_query_self_info_valid() {
-        assert!(validate_command(&BotCommand::QuerySelfInfo).is_ok());
-    }
-
-    #[test]
     fn test_query_inventory_valid() {
         assert!(validate_command(&BotCommand::QueryInventory).is_ok());
-    }
-
-    #[test]
-    fn test_query_chunk_summary_valid() {
-        assert!(validate_command(&BotCommand::QueryChunkSummary).is_ok());
     }
 
     // ── DropItem / Container slot operations ───────────────────────
@@ -899,17 +795,6 @@ mod tests {
         assert!(msg.contains("empty"), "error should mention empty: {msg}");
     }
 
-    #[test]
-    fn test_radius_error_contains_value() {
-        let cmd = BotCommand::QueryNearbyBlocks(0);
-        let err = validate_command(&cmd).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("0"),
-            "error should contain the invalid radius: {msg}"
-        );
-    }
-
     // ── v2 foundation variant validation ──────────────────────────
 
     #[test]
@@ -956,42 +841,6 @@ mod tests {
     #[test]
     fn test_collect_items_too_large() {
         let cmd = BotCommand::CollectItems(65);
-        assert!(validate_command(&cmd).is_err());
-    }
-
-    #[test]
-    fn test_query_server_info_valid() {
-        assert!(validate_command(&BotCommand::QueryServerInfo).is_ok());
-    }
-
-    #[test]
-    fn test_query_chat_history_valid() {
-        assert!(validate_command(&BotCommand::QueryChatHistory).is_ok());
-    }
-
-    #[test]
-    fn test_query_world_view_valid() {
-        for radius in 1..=32u8 {
-            let cmd = BotCommand::QueryWorldView(radius);
-            assert!(
-                validate_command(&cmd).is_ok(),
-                "QueryWorldView radius {radius} should be valid"
-            );
-        }
-    }
-
-    #[test]
-    fn test_query_world_view_zero() {
-        let cmd = BotCommand::QueryWorldView(0);
-        assert!(validate_command(&cmd).is_err());
-    }
-
-    #[test]
-    fn test_query_world_view_too_large() {
-        // Values > 32 are rejected to keep the world view bounded.
-        let cmd = BotCommand::QueryWorldView(33);
-        assert!(validate_command(&cmd).is_err());
-        let cmd = BotCommand::QueryWorldView(u8::MAX);
         assert!(validate_command(&cmd).is_err());
     }
 
@@ -1167,18 +1016,11 @@ mod tests {
             BotCommand::SendChat(_) => 1,
             BotCommand::ExecuteCommand(_) => 1,
             BotCommand::SetGameMode(_) => 1,
-            BotCommand::QueryNearbyBlocks(_) => 1,
-            BotCommand::QueryNearbyEntities(_) => 1,
-            BotCommand::QuerySelfInfo => 1,
             BotCommand::QueryInventory => 1,
-            BotCommand::QueryChunkSummary => 1,
             // ── v2 foundation variants ─────────────────────────────
             BotCommand::SmartMove(_) => 1,
             BotCommand::FlyTo(_) => 1,
             BotCommand::CollectItems(_) => 1,
-            BotCommand::QueryServerInfo => 1,
-            BotCommand::QueryChatHistory => 1,
-            BotCommand::QueryWorldView(_) => 1,
             BotCommand::Act(_) => 1,
         }
     }
@@ -1224,18 +1066,11 @@ mod tests {
             BotCommand::SendChat("msg".into()),
             BotCommand::ExecuteCommand("/help".into()),
             BotCommand::SetGameMode(GameMode::Survival),
-            BotCommand::QueryNearbyBlocks(10),
-            BotCommand::QueryNearbyEntities(10),
-            BotCommand::QuerySelfInfo,
             BotCommand::QueryInventory,
-            BotCommand::QueryChunkSummary,
             // ── v2 foundation variants ─────────────────────────────
             BotCommand::SmartMove(BlockPos::new(0, 0, 0)),
             BotCommand::FlyTo(BlockPos::new(0, 0, 0)),
             BotCommand::CollectItems(8),
-            BotCommand::QueryServerInfo,
-            BotCommand::QueryChatHistory,
-            BotCommand::QueryWorldView(4),
             BotCommand::Act(ActAction::Move {
                 target: BlockPos::new(0, 0, 0),
             }),
