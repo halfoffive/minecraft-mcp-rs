@@ -17,6 +17,11 @@ on:
         required: false
         default: false
         type: boolean
+      tag:
+        description: 'Tag to publish (e.g. v1.1.0); empty = current ref'
+        required: false
+        default: ''
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -202,3 +207,122 @@ jobs:
           prerelease: ${{ github.event.inputs.prerelease || false }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+  # ── npm publish ─────────────────────────────────────────────────────────
+  # Publishes the six npm packages (5 platform packages + the main launcher)
+  # built from the same artifacts as the GitHub Release.
+  #
+  # Notes:
+  # - The auth token is a GRANULAR access token (legacy classic tokens were
+  #   removed by npm in Nov 2025). Add it as the `NPM_TOKEN` secret in repo
+  #   Settings > Secrets with Read+Write packages scope (2FA bypass enabled).
+  #   The token is NEVER written to any file — only referenced via
+  #   `secrets.NPM_TOKEN`.
+  # - `--provenance` requires `id-token: write` and a GitHub-hosted runner.
+  # - Publish order is platform-first, main last (the main package's
+  #   optionalDependencies must already exist on the registry).
+  # - Re-runs (workflow_dispatch with a `tag` input) skip versions that are
+  #   already published.
+  # - A dispatch without a `tag` input on a non-tag ref publishes whatever
+  #   version the checked-out tree holds — acceptable for re-runs.
+  npm-publish:
+    name: Publish to npm
+    needs: [build, lint]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+
+      - name: Stage platform binaries into npm packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Each artifact holds the staged binary plus .zip/.7z (Windows) or
+          # .tar.xz/.tar.gz (Unix) archives. Extract the binary from the
+          # archive so the step fails if an expected archive is missing.
+          mkdir -p /tmp/npm-stage
+
+          unzip -j artifacts/minecraft-mcp-rs-windows-x86_64/minecraft-mcp-rs-windows-x86_64.zip \
+            -d /tmp/npm-stage/windows-x64 >/dev/null
+          cp /tmp/npm-stage/windows-x64/minecraft-mcp-rs-windows-x86_64.exe \
+            npm/minecraft-mcp-rs-windows-x64/minecraft-mcp-rs.exe
+
+          unzip -j artifacts/minecraft-mcp-rs-windows-aarch64/minecraft-mcp-rs-windows-aarch64.zip \
+            -d /tmp/npm-stage/windows-arm64 >/dev/null
+          cp /tmp/npm-stage/windows-arm64/minecraft-mcp-rs-windows-aarch64.exe \
+            npm/minecraft-mcp-rs-windows-arm64/minecraft-mcp-rs.exe
+
+          mkdir -p /tmp/npm-stage/darwin-arm64
+          tar -xzf artifacts/minecraft-mcp-rs-macos-aarch64/minecraft-mcp-rs-macos-aarch64.tar.gz \
+            -C /tmp/npm-stage/darwin-arm64
+          cp /tmp/npm-stage/darwin-arm64/minecraft-mcp-rs-macos-aarch64 \
+            npm/minecraft-mcp-rs-darwin-arm64/minecraft-mcp-rs
+          chmod +x npm/minecraft-mcp-rs-darwin-arm64/minecraft-mcp-rs
+
+          mkdir -p /tmp/npm-stage/linux-x64
+          tar -xzf artifacts/minecraft-mcp-rs-linux-x86_64/minecraft-mcp-rs-linux-x86_64.tar.gz \
+            -C /tmp/npm-stage/linux-x64
+          cp /tmp/npm-stage/linux-x64/minecraft-mcp-rs-linux-x86_64 \
+            npm/minecraft-mcp-rs-linux-x64/minecraft-mcp-rs
+          chmod +x npm/minecraft-mcp-rs-linux-x64/minecraft-mcp-rs
+
+          mkdir -p /tmp/npm-stage/linux-arm64
+          tar -xzf artifacts/minecraft-mcp-rs-linux-aarch64/minecraft-mcp-rs-linux-aarch64.tar.gz \
+            -C /tmp/npm-stage/linux-arm64
+          cp /tmp/npm-stage/linux-arm64/minecraft-mcp-rs-linux-aarch64 \
+            npm/minecraft-mcp-rs-linux-arm64/minecraft-mcp-rs
+          chmod +x npm/minecraft-mcp-rs-linux-arm64/minecraft-mcp-rs
+
+          ls -la npm/minecraft-mcp-rs-windows-x64 npm/minecraft-mcp-rs-windows-arm64 \
+            npm/minecraft-mcp-rs-darwin-arm64 npm/minecraft-mcp-rs-linux-x64 \
+            npm/minecraft-mcp-rs-linux-arm64
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify NPM_TOKEN secret is present
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret is missing or empty — add it in repo Settings > Secrets (granular access token with Read+Write packages, 2FA bypass)"
+            exit 1
+          fi
+
+      - name: Sync npm versions from Cargo.toml
+        run: node npm/scripts/sync-versions.mjs
+
+      - name: Publish packages (platform first, then main)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in \
+            npm/minecraft-mcp-rs-windows-x64 \
+            npm/minecraft-mcp-rs-windows-arm64 \
+            npm/minecraft-mcp-rs-darwin-arm64 \
+            npm/minecraft-mcp-rs-linux-x64 \
+            npm/minecraft-mcp-rs-linux-arm64 \
+            npm/minecraft-mcp-rs; do
+            name=$(node -p "require('./' + process.argv[1] + '/package.json').name" "$dir")
+            ver=$(node -p "require('./' + process.argv[1] + '/package.json').version" "$dir")
+            if npm view "$name@$ver" version >/dev/null 2>&1; then
+              echo "::notice::$name@$ver already published — skipping"
+            else
+              (cd "$dir" && npm publish --provenance --access public)
+            fi
+          done
