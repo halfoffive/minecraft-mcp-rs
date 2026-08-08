@@ -9,6 +9,7 @@
 
 pub mod block_data;
 pub mod channel;
+pub mod cli;
 pub mod command_validate;
 pub mod compound_ops;
 pub mod config;
