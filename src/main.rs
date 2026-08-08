@@ -61,6 +61,7 @@ fn main() {
     // ══════════════════════════════════════════════════════════════════
     let state_for_mcp = Arc::clone(&state);
     let sender_for_mcp = sender.clone();
+    let receiver_for_mcp = Arc::clone(&receiver);
 
     // ══════════════════════════════════════════════════════════════════
     // Spawn the MCP server on a dedicated OS thread with its own tokio
@@ -84,7 +85,7 @@ fn main() {
                 let transport = state_for_mcp.read_config().mcp_transport;
                 match transport {
                     McpTransport::Stdio => {
-                        serve_stdio(state_for_mcp, sender_for_mcp).await;
+                        serve_stdio(state_for_mcp, sender_for_mcp, receiver_for_mcp).await;
                     }
                     McpTransport::Http => {
                         let (port, mcp_address) = {
@@ -99,7 +100,7 @@ fn main() {
                             IpAddr::V4(Ipv4Addr::LOCALHOST)
                         });
                         let addr = SocketAddr::new(ip, port);
-                        serve_http(state_for_mcp, sender_for_mcp, addr).await;
+                        serve_http(state_for_mcp, sender_for_mcp, receiver_for_mcp, addr).await;
                     }
                 }
             });

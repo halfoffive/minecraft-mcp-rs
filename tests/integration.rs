@@ -110,7 +110,11 @@ async fn test_full_mcp_cycle_initialize_and_query() {
     // ── Initialize (get_info) ────────────────────────────────────
     let state = make_online_state();
     let (sender, mut receiver) = channel::create_command_channel(4, state.clone());
-    let server = McpBotServer::new(state.clone(), sender.clone());
+    // Empty slot: the receiver is leased by the responder below, not by
+    // connect_bot — the server only needs the slot to exist.
+    let empty_slot: Arc<std::sync::Mutex<Option<channel::BotCommandReceiver>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let server = McpBotServer::new(state.clone(), sender.clone(), empty_slot);
 
     let info = server.get_info();
     assert_eq!(info.server_info.name, "minecraft-mcp-rs");
@@ -166,7 +170,9 @@ async fn test_full_mcp_cycle_initialize_and_query() {
 async fn test_full_mcp_cycle_tool_list_and_offline_handling() {
     let state = make_offline_state();
     let (sender, _receiver) = channel::create_command_channel(4, state.clone());
-    let server = McpBotServer::new(state.clone(), sender);
+    let empty_slot: Arc<std::sync::Mutex<Option<channel::BotCommandReceiver>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let server = McpBotServer::new(state.clone(), sender, empty_slot);
 
     // get_info works even offline
     let info = server.get_info();
@@ -676,7 +682,9 @@ async fn test_auto_reconnect_sequence_simulation() {
         }
     });
 
-    let _server = McpBotServer::new(state.clone(), sender.clone());
+    let empty_slot: Arc<std::sync::Mutex<Option<channel::BotCommandReceiver>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let _server = McpBotServer::new(state.clone(), sender.clone(), empty_slot);
 
     // Phase 1: Online
     assert_eq!(
@@ -752,7 +760,9 @@ async fn test_reconnect_multiple_cycles() {
         }
     });
 
-    let _server = McpBotServer::new(state.clone(), sender.clone());
+    let empty_slot: Arc<std::sync::Mutex<Option<channel::BotCommandReceiver>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let _server = McpBotServer::new(state.clone(), sender.clone(), empty_slot);
 
     for cycle in 0..3 {
         state.set_online(true);
@@ -1259,4 +1269,144 @@ async fn test_get_nearby_entities_includes_item_drops() {
         result.contains("\"entity_type\":\"player\""),
         "other players must still be listed: {result}"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Settings & lifecycle tools (T13)
+// ═══════════════════════════════════════════════════════════════
+
+/// `get_settings` works while the bot is offline and always redacts the MCP
+/// token to `"***"` — the real token must never appear in the output.
+#[test]
+fn test_get_settings_works_offline_and_redacts_token() {
+    let state = make_offline_state();
+    let result = minecraft_mcp_rs::mcp::tools_settings::get_settings(&state)
+        .expect("get_settings must work offline");
+    assert!(
+        result.contains("\"mcp_token\": \"***\""),
+        "token must be redacted: {result}"
+    );
+    let real_token = state.read_config().mcp_token.clone();
+    assert!(
+        !result.contains(&real_token),
+        "real token must never leak: {result}"
+    );
+    assert!(result.contains("\"online\": false"), "got: {result}");
+    assert!(
+        result.contains("\"config_path\":"),
+        "runtime block should include config_path: {result}"
+    );
+}
+
+/// `update_settings` with an invalid port fails with `InvalidParams` before
+/// anything is persisted (validation happens before the disk write).
+#[test]
+fn test_update_settings_invalid_port_rejected() {
+    let state = make_offline_state();
+    let input = minecraft_mcp_rs::mcp::tools_settings::UpdateSettingsInput {
+        mc_port: Some(0),
+        ..Default::default()
+    };
+    let result = minecraft_mcp_rs::mcp::tools_settings::update_settings(&state, input);
+    match result {
+        Err(BotError::InvalidParams(msg)) => {
+            assert!(msg.contains("mc_port"), "unexpected message: {msg}")
+        }
+        other => panic!("expected InvalidParams, got: {other:?}"),
+    }
+}
+
+/// `update_settings` applies a valid partial update in memory and persists it
+/// to the real config path (the tool always uses it). The pre-existing config
+/// file — if any — is restored afterwards so the test never leaves the host's
+/// real settings clobbered.
+#[test]
+fn test_update_settings_applies_valid_input() {
+    // Snapshot any pre-existing config so we can restore it after the test.
+    let cfg_path = minecraft_mcp_rs::config::config_path()
+        .expect("OS config dir should be discoverable on the test host");
+    let had_original = cfg_path.exists();
+    let original = if had_original {
+        Some(std::fs::read_to_string(&cfg_path).expect("read pre-existing config"))
+    } else {
+        None
+    };
+
+    let state = make_offline_state();
+    let input = minecraft_mcp_rs::mcp::tools_settings::UpdateSettingsInput {
+        task_name: Some("itest-task".into()),
+        ..Default::default()
+    };
+    let result = minecraft_mcp_rs::mcp::tools_settings::update_settings(&state, input)
+        .expect("valid update should succeed");
+    let v: serde_json::Value =
+        serde_json::from_str(&result).expect("update response must be valid JSON");
+    assert_eq!(
+        v["applied"]["task_name"], "itest-task",
+        "response must report the applied field: {result}"
+    );
+    assert_eq!(v["persisted"], true, "response must report persistence");
+    assert_eq!(
+        state.read_config().task_name,
+        "itest-task",
+        "in-memory config must reflect the applied update"
+    );
+
+    // Restore the host's real config file (or remove the one we created).
+    match original {
+        Some(content) => std::fs::write(&cfg_path, content).expect("restore config"),
+        None => {
+            let _ = std::fs::remove_file(&cfg_path);
+        }
+    }
+}
+
+/// `connect_bot` spawns a connection thread even while the bot is offline,
+/// setting the connecting flag; requesting a disconnect makes the loop stop
+/// and the flag clears when the thread exits.
+#[tokio::test]
+async fn test_connect_bot_offline_spawns_connection() {
+    let state = make_offline_state();
+    // Point at a port nothing listens on so the connection attempt fails
+    // fast (no real network dependency in tests).
+    state.update_config(|cfg| cfg.mc_port = 1);
+    let (sender, _receiver) = channel::create_command_channel(4, state.clone());
+    let slot: Arc<std::sync::Mutex<Option<channel::BotCommandReceiver>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
+    let result = minecraft_mcp_rs::mcp::tools_settings::connect_bot(&state, &slot, &sender)
+        .expect("connect_bot should return Ok");
+    assert!(result.contains("connection started"), "got: {result}");
+    assert!(state.is_connecting(), "connecting flag must be set");
+
+    // Tear down: keep requesting a disconnect while polling the thread.
+    // A single `request_disconnect()` before the thread starts would be
+    // consumed by `connect()`'s startup `clear_disconnect_request()`; the
+    // repeated requests land during the loop's backoff sleep and the
+    // cancellation token makes the loop exit promptly.
+    let handle = state
+        .take_bot_thread_handle()
+        .expect("handle must be stored");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !handle.is_finished() && std::time::Instant::now() < deadline {
+        state.request_disconnect();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    if !handle.is_finished() {
+        panic!("bot thread did not exit after disconnect request");
+    }
+    assert!(
+        !state.is_connecting(),
+        "connecting flag must be cleared after thread exit"
+    );
+}
+
+/// `disconnect_bot` requests a disconnect (idempotent offline no-op).
+#[test]
+fn test_disconnect_bot_requests_disconnect() {
+    let state = make_offline_state();
+    let result = minecraft_mcp_rs::mcp::tools_settings::disconnect_bot(&state)
+        .expect("disconnect_bot should succeed");
+    assert!(result.contains("disconnect requested"), "got: {result}");
+    assert!(state.is_disconnect_requested());
 }

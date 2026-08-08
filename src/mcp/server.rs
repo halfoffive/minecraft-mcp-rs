@@ -26,7 +26,7 @@ use rmcp::{
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
-use crate::channel::BotCommandSender;
+use crate::channel::{BotCommandSender, ReceiverSlot};
 use crate::error::BotError;
 use crate::mcp::tools_act::ActInput;
 use crate::mcp::tools_block::{BreakBlockInput, PlaceBlockInput, UseItemOnBlockInput};
@@ -42,25 +42,36 @@ use crate::mcp::tools_movement::{
     FlyToInput, JumpInput, MoveToInput, SmartMoveInput, TeleportInput, WalkDirectionInput,
 };
 use crate::mcp::tools_query::{GetWorldViewInput, NearbyBlocksInput, NearbyEntitiesInput};
+use crate::mcp::tools_settings::UpdateSettingsInput;
 use crate::state::{McpServerStatus, SharedState};
 
 // ---------------------------------------------------------------------------
 // McpBotServer
 // ---------------------------------------------------------------------------
 
-/// MCP server struct holding shared state and the bot command channel.
+/// MCP server struct holding shared state, the bot command channel, and the
+/// command-receiver slot.
 ///
 /// The `Arc<SharedState>` is read directly by query tools; action tools
 /// send [`BotCommand`](crate::types::BotCommand) through the sender.
+///
+/// The `receiver` slot is needed by the `connect_bot` tool: spawning a bot
+/// connection hands the slot to the spawn helper so the fresh executor can
+/// lease the receiver (the same slot the UI path uses).
 pub struct McpBotServer {
     state: Arc<SharedState>,
     sender: BotCommandSender,
+    receiver: ReceiverSlot,
 }
 
 impl McpBotServer {
     /// Create a new MCP server instance.
-    pub fn new(state: Arc<SharedState>, sender: BotCommandSender) -> Self {
-        Self { state, sender }
+    pub fn new(state: Arc<SharedState>, sender: BotCommandSender, receiver: ReceiverSlot) -> Self {
+        Self {
+            state,
+            sender,
+            receiver,
+        }
     }
 }
 
@@ -151,6 +162,39 @@ impl McpBotServer {
         Parameters(input): Parameters<GetWorldViewInput>,
     ) -> Result<Vec<rmcp::model::Content>, BotError> {
         crate::mcp::tools_query::get_world_view(&self.state, input.radius, input.scale)
+    }
+
+    // ── Settings & lifecycle tools ──────────────────────────
+
+    #[tool(
+        description = "Get the current configuration (server address, bot parameters, MCP transport) plus runtime status. The MCP token is redacted.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_settings(&self) -> Result<String, BotError> {
+        crate::mcp::tools_settings::get_settings(&self.state)
+    }
+
+    #[tool(
+        description = "Update configuration fields (partial update — only provided fields change). Persisted to the config file. Changing mc_address/mc_port/ai_username triggers a bot reconnect when connected. Changes to mcp_transport/mcp_address/mcp_port take effect on process restart.",
+        annotations(destructive_hint = true)
+    )]
+    async fn update_settings(
+        &self,
+        Parameters(input): Parameters<UpdateSettingsInput>,
+    ) -> Result<String, BotError> {
+        crate::mcp::tools_settings::update_settings(&self.state, input)
+    }
+
+    #[tool(
+        description = "Start the bot connection to the configured Minecraft server. No-op if already connected or connecting."
+    )]
+    async fn connect_bot(&self) -> Result<String, BotError> {
+        crate::mcp::tools_settings::connect_bot(&self.state, &self.receiver, &self.sender)
+    }
+
+    #[tool(description = "Request the bot to disconnect and stop reconnecting.")]
+    async fn disconnect_bot(&self) -> Result<String, BotError> {
+        crate::mcp::tools_settings::disconnect_bot(&self.state)
     }
 
     // ── Movement tools ───────────────────────────────────────
@@ -438,13 +482,20 @@ impl ServerHandler for McpBotServer {
 ///
 /// This function blocks until the transport is closed. All logging goes to
 /// stderr; stdout is reserved for MCP JSON-RPC messages.
-pub async fn serve_stdio(state: Arc<SharedState>, sender: BotCommandSender) {
+///
+/// The `receiver` slot is handed to the server so the `connect_bot` tool can
+/// spawn a bot connection using the same receiver the UI path uses.
+pub async fn serve_stdio(
+    state: Arc<SharedState>,
+    sender: BotCommandSender,
+    receiver: ReceiverSlot,
+) {
     // Capture the shutdown token before `state` is moved into the server.
     let shutdown_token = state.shutdown_token();
     // Keep a clone for status updates after `state` is moved into the server.
     let state_for_status = Arc::clone(&state);
     state_for_status.set_mcp_server_status(McpServerStatus::Stdio);
-    let server = McpBotServer::new(state, sender);
+    let server = McpBotServer::new(state, sender, receiver);
     let (stdin, stdout) = stdio();
 
     info!("MCP server starting on stdio");
@@ -566,20 +617,31 @@ async fn bearer_auth_middleware(
 /// streamable HTTP service at `/mcp`, and wraps it with Bearer token
 /// authentication read live from [`SharedState::read_config`]. Runs until the
 /// process exits or the axum server encounters an unrecoverable error.
-pub async fn serve_http(state: Arc<SharedState>, sender: BotCommandSender, addr: SocketAddr) {
+///
+/// The `receiver` slot is handed to the server so the `connect_bot` tool can
+/// spawn a bot connection using the same receiver the UI path uses.
+pub async fn serve_http(
+    state: Arc<SharedState>,
+    sender: BotCommandSender,
+    receiver: ReceiverSlot,
+    addr: SocketAddr,
+) {
     // Keep a clone for status updates after `state` is moved into the router.
     let state_for_status = Arc::clone(&state);
 
     // The streamable HTTP service creates a fresh McpBotServer per session,
-    // so capture cheap clones of state and sender in the factory closure.
+    // so capture cheap clones of state, sender, and receiver in the factory
+    // closure.
     let state_for_factory = Arc::clone(&state);
     let sender_for_factory = sender.clone();
+    let receiver_for_factory = Arc::clone(&receiver);
     let mcp_service: StreamableHttpService<McpBotServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
                 Ok::<_, std::io::Error>(McpBotServer::new(
                     Arc::clone(&state_for_factory),
                     sender_for_factory.clone(),
+                    Arc::clone(&receiver_for_factory),
                 ))
             },
             Arc::new(LocalSessionManager::default()),
@@ -640,8 +702,9 @@ mod tests {
     #[test]
     fn test_get_info_server_name() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let info = server.get_info();
         assert_eq!(info.server_info.name, "minecraft-mcp-rs");
@@ -651,8 +714,9 @@ mod tests {
     #[test]
     fn test_get_info_version() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let info = server.get_info();
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
@@ -662,8 +726,9 @@ mod tests {
     #[test]
     fn test_get_info_tools_enabled() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let info = server.get_info();
         assert!(
@@ -676,8 +741,9 @@ mod tests {
     #[test]
     fn test_get_info_has_instructions() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let info = server.get_info();
         assert!(info.instructions.is_some());
@@ -688,8 +754,9 @@ mod tests {
     #[tokio::test]
     async fn test_movement_tools_offline() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .move_to(Parameters(MoveToInput { x: 0, y: 64, z: 0 }))
@@ -717,8 +784,9 @@ mod tests {
     #[tokio::test]
     async fn test_container_tools_offline() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .open_container(Parameters(OpenContainerInput { x: 0, y: 64, z: 0 }))
@@ -753,8 +821,9 @@ mod tests {
     #[tokio::test]
     async fn test_combat_tools_offline() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         // Offline check comes before entity existence check, so even with
         // a valid entity_id we should get Offline error when bot is not connected.
@@ -773,8 +842,9 @@ mod tests {
     #[tokio::test]
     async fn test_query_tools_offline() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         assert!(matches!(
             server.get_self_info().await,
@@ -809,8 +879,9 @@ mod tests {
     #[tokio::test]
     async fn test_is_connected_offline() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         assert_eq!(
             server.is_connected().await.unwrap(),
@@ -823,8 +894,9 @@ mod tests {
     async fn test_is_connected_online() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         assert_eq!(
             server.is_connected().await.unwrap(),
@@ -837,8 +909,9 @@ mod tests {
     #[tokio::test]
     async fn test_break_block_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .break_block(Parameters(BreakBlockInput {
@@ -854,8 +927,9 @@ mod tests {
     #[tokio::test]
     async fn test_place_block_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .place_block(Parameters(PlaceBlockInput {
@@ -871,8 +945,9 @@ mod tests {
     #[tokio::test]
     async fn test_use_item_on_block_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .use_item_on_block(Parameters(UseItemOnBlockInput {
@@ -889,8 +964,9 @@ mod tests {
     async fn test_break_block_invalid_coords_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .break_block(Parameters(BreakBlockInput {
@@ -908,8 +984,9 @@ mod tests {
     async fn test_place_block_invalid_slot_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .place_block(Parameters(PlaceBlockInput {
@@ -927,8 +1004,9 @@ mod tests {
     async fn test_use_item_on_block_invalid_slot_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .use_item_on_block(Parameters(UseItemOnBlockInput {
@@ -947,8 +1025,9 @@ mod tests {
     #[tokio::test]
     async fn test_switch_hotbar_slot_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .switch_hotbar_slot(Parameters(SwitchHotbarSlotInput { slot: 0 }))
@@ -959,8 +1038,9 @@ mod tests {
     #[tokio::test]
     async fn test_drop_item_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .drop_item(Parameters(DropItemInput {
@@ -974,8 +1054,9 @@ mod tests {
     #[tokio::test]
     async fn test_use_item_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .use_item(Parameters(UseItemInput { item_slot: None }))
@@ -986,8 +1067,9 @@ mod tests {
     #[tokio::test]
     async fn test_equip_tool_offline_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .equip_tool(Parameters(EquipToolInput {
@@ -1002,8 +1084,9 @@ mod tests {
     async fn test_switch_hotbar_slot_invalid_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .switch_hotbar_slot(Parameters(SwitchHotbarSlotInput { slot: 9 }))
@@ -1016,8 +1099,9 @@ mod tests {
     async fn test_equip_tool_unknown_type_via_server() {
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
-        let server = McpBotServer::new(state, sender);
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
 
         let result = server
             .equip_tool(Parameters(EquipToolInput {
