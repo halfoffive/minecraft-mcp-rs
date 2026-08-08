@@ -1,0 +1,29 @@
+{
+  "name": "minecraft-mcp-rs",
+  "version": "1.0.7",
+  "description": "MCP server that controls a Minecraft bot (azalea) — prebuilt binaries",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/halfoffive/minecraft-mcp-rs.git"
+  },
+  "homepage": "https://github.com/halfoffive/minecraft-mcp-rs#readme",
+  "bin": {
+    "minecraft-mcp-rs": "bin/minecraft-mcp-rs.js"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "minecraft-mcp-rs-windows-x64": "1.0.7",
+    "minecraft-mcp-rs-windows-arm64": "1.0.7",
+    "minecraft-mcp-rs-darwin-arm64": "1.0.7",
+    "minecraft-mcp-rs-linux-x64": "1.0.7",
+    "minecraft-mcp-rs-linux-arm64": "1.0.7"
+  }
+}

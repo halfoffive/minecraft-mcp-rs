@@ -1,0 +1,19 @@
+{
+  "name": "minecraft-mcp-rs-linux-x64",
+  "version": "1.0.7",
+  "description": "Linux x64 binary for minecraft-mcp-rs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/halfoffive/minecraft-mcp-rs.git"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "minecraft-mcp-rs"
+  ]
+}

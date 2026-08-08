@@ -1,0 +1,19 @@
+{
+  "name": "minecraft-mcp-rs-windows-arm64",
+  "version": "1.0.7",
+  "description": "Windows arm64 binary for minecraft-mcp-rs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/halfoffive/minecraft-mcp-rs.git"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "minecraft-mcp-rs.exe"
+  ]
+}

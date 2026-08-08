@@ -1,0 +1,3 @@
+# CI stages the built binary into this directory (see .github/workflows/release.yml)
+minecraft-mcp-rs
+minecraft-mcp-rs.exe
