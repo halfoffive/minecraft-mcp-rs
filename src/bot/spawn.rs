@@ -53,7 +53,10 @@ use crate::state::SharedState;
 ///   the handle is purely a UI-side bookkeeping reference; the actual
 ///   runtime inside the thread is supposed to exit via
 ///   `state.request_disconnect()` + `cancel_token`.
-pub(crate) fn join_with_timeout(handle: JoinHandle<()>, timeout: Duration) -> Result<(), Duration> {
+///
+/// `pub` (not `pub(crate)`) because the binary entry point (`src/main.rs`)
+/// is a separate crate and needs it to bound its joins in headless mode.
+pub fn join_with_timeout(handle: JoinHandle<()>, timeout: Duration) -> Result<(), Duration> {
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         let _ = handle.join();
@@ -172,6 +175,161 @@ pub fn spawn_bot_connection(
     }
 }
 
+// ── Headless supervisor ─────────────────────────────────────────────────────
+
+/// Next action the headless supervisor should take, decided from the current
+/// [`SharedState`] flags.
+///
+/// Ordering matters:
+/// 1. A cancelled shutdown token wins — the process is exiting.
+/// 2. A pending config restart is consumed next (the flag is taken so a
+///    second call in the same decision round cannot double-consume it).
+/// 3. Otherwise spawn a connection when the bot is idle (offline, not
+///    connecting, and no explicit disconnect was requested — `disconnect_bot`
+///    must not be undone by an automatic respawn).
+/// 4. Everything else is `WaitMore`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadlessAction {
+    /// Spawn the bot connection (bot idle, no pending restart or shutdown).
+    SpawnConnect,
+    /// No action this round — poll again.
+    WaitMore,
+    /// A config restart was requested; disconnect flags were cleared, loop to
+    /// respawn with the fresh config.
+    RestartWithNewConfig,
+    /// The shutdown token is cancelled — exit the supervisor loop.
+    Shutdown,
+}
+
+/// Decide the headless supervisor's next action from `state`.
+pub fn headless_next_action(state: &SharedState) -> HeadlessAction {
+    if state.shutdown_token().is_cancelled() {
+        return HeadlessAction::Shutdown;
+    }
+    if state.take_config_restart() {
+        state.clear_disconnect_request();
+        return HeadlessAction::RestartWithNewConfig;
+    }
+    if !state.is_online() && !state.is_connecting() && !state.is_disconnect_requested() {
+        return HeadlessAction::SpawnConnect;
+    }
+    HeadlessAction::WaitMore
+}
+
+/// Headless-mode supervisor loop (runs on the `"headless-supervisor"` OS
+/// thread).
+///
+/// Responsibilities:
+/// - Auto-connect the bot on startup.
+/// - Re-spawn the connection after agent-driven config changes
+///   ([`SharedState::request_config_restart`]) — e.g. the `update_settings`
+///   MCP tool changing `mc_address` while the bot is offline.
+/// - Exit when the shutdown token is cancelled (the MCP thread triggers it
+///   once the stdio transport closes).
+///
+/// The supervisor does NOT hot-respawn in a loop: while a bot thread is
+/// running it polls the thread plus the shutdown/restart flags (rather than
+/// blocking on a bare `join()`), so the moment the shutdown token fires it
+/// can abort an in-flight azalea connect attempt via
+/// [`SharedState::request_disconnect`] — otherwise a dead Minecraft server
+/// would keep the process alive for the duration of azalea's internal TCP
+/// retries. If the bot thread exits without a config restart (fail-fast
+/// after the bounded first-connect retries, or an explicit
+/// `disconnect_bot`), the supervisor waits quietly for a restart or a
+/// shutdown instead of re-spawning.
+pub fn headless_supervisor(
+    state: Arc<SharedState>,
+    command_receiver: ReceiverSlot,
+    command_sender: BotCommandSender,
+) {
+    loop {
+        // ── 1. Decide the next action from the current flags ──────────────
+        match headless_next_action(&state) {
+            HeadlessAction::Shutdown => break,
+            HeadlessAction::RestartWithNewConfig => continue,
+            HeadlessAction::SpawnConnect => {
+                if state.try_begin_connecting()
+                    && let Err(e) = spawn_bot_connection(
+                        Arc::clone(&state),
+                        command_receiver.clone(),
+                        command_sender.clone(),
+                        None,
+                    )
+                {
+                    tracing::error!(error = %e, "headless: failed to spawn bot connection");
+                    state.set_last_error(format!("failed to spawn bot connection: {e}"));
+                    state.clear_connecting();
+                }
+            }
+            HeadlessAction::WaitMore => {}
+        }
+
+        // ── 2. Wait for the bot thread while staying responsive to
+        //       shutdown / config restarts ─────────────────────────────────
+        let mut handle = state.take_bot_thread_handle();
+        let mut break_outer = false;
+        let mut respawn = false;
+        loop {
+            if state.shutdown_token().is_cancelled() {
+                // Abort the bot's in-flight connect attempt (request_disconnect
+                // cancels the token the connect loop's select! is waiting on)
+                // and join with a bound.
+                state.request_disconnect();
+                if let Some(handle) = handle.take() {
+                    let _ = join_with_timeout(handle, Duration::from_secs(3));
+                }
+                break_outer = true;
+                break;
+            }
+            if state.take_config_restart() {
+                // Agent changed connection settings while the bot was busy —
+                // consume the flag and respawn with the fresh config.
+                state.clear_disconnect_request();
+                respawn = true;
+                if let Some(handle) = handle.take() {
+                    let _ = join_with_timeout(handle, Duration::from_secs(3));
+                }
+                break;
+            }
+            match &handle {
+                Some(h) if h.is_finished() => break,
+                Some(_) => std::thread::sleep(Duration::from_millis(100)),
+                None => std::thread::sleep(Duration::from_millis(250)),
+            }
+        }
+        if break_outer {
+            break;
+        }
+
+        // ── 3. Thread gone. A config restart respawns immediately (step 1
+        //       on the next iteration); otherwise wait quietly for a restart
+        //       or shutdown — an explicit `disconnect_bot` must stay
+        //       effective and a fail-fast must not spin the connection loop.
+        if !respawn {
+            loop {
+                if state.shutdown_token().is_cancelled() {
+                    break_outer = true;
+                    break;
+                }
+                if state.take_config_restart() {
+                    state.clear_disconnect_request();
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            if break_outer {
+                break;
+            }
+        }
+    }
+
+    // Supervisor exited: tell the bot to stop and bound the final join.
+    state.request_disconnect();
+    if let Some(handle) = state.take_bot_thread_handle() {
+        let _ = join_with_timeout(handle, Duration::from_secs(3));
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -283,5 +441,79 @@ mod tests {
         // to keep the test snappy.
         let result = join_with_timeout(handle, Duration::from_millis(100));
         assert!(result.is_err(), "expected timeout, got {result:?}");
+    }
+
+    // ── headless_next_action state machine ────────────────────────────
+
+    /// Idle bot (offline, not connecting, no pending disconnect/restart,
+    /// shutdown not triggered) → spawn a connection.
+    #[test]
+    fn test_next_action_idle_bot_spawns() {
+        let state = SharedState::new(AppConfig::default());
+        assert_eq!(headless_next_action(&state), HeadlessAction::SpawnConnect);
+    }
+
+    /// A cancelled shutdown token wins over everything else.
+    #[test]
+    fn test_next_action_shutdown_wins() {
+        let state = SharedState::new(AppConfig::default());
+        state.trigger_shutdown();
+        assert_eq!(headless_next_action(&state), HeadlessAction::Shutdown);
+    }
+
+    /// A pending config restart is consumed and reported, and a second call
+    /// in the same round no longer sees it (the flag was taken).
+    #[test]
+    fn test_next_action_config_restart_consumed_once() {
+        let state = SharedState::new(AppConfig::default());
+        state.request_config_restart();
+        assert_eq!(
+            headless_next_action(&state),
+            HeadlessAction::RestartWithNewConfig
+        );
+        // Flag consumed → the idle bot falls through to spawn.
+        assert_eq!(headless_next_action(&state), HeadlessAction::SpawnConnect);
+    }
+
+    /// Restart also clears any pending disconnect request so the respawn
+    /// isn't immediately aborted.
+    #[test]
+    fn test_next_action_restart_clears_disconnect() {
+        let state = SharedState::new(AppConfig::default());
+        state.request_disconnect();
+        state.request_config_restart();
+        assert_eq!(
+            headless_next_action(&state),
+            HeadlessAction::RestartWithNewConfig
+        );
+        assert!(
+            !state.is_disconnect_requested(),
+            "restart consumption must clear the disconnect request"
+        );
+    }
+
+    /// A bot currently connecting must NOT get a duplicate spawn.
+    #[test]
+    fn test_next_action_connecting_waits() {
+        let state = SharedState::new(AppConfig::default());
+        assert!(state.try_begin_connecting());
+        assert_eq!(headless_next_action(&state), HeadlessAction::WaitMore);
+    }
+
+    /// An explicit disconnect request (the `disconnect_bot` tool) suppresses
+    /// auto-respawn — the supervisor must wait, not reconnect immediately.
+    #[test]
+    fn test_next_action_disconnect_requested_waits() {
+        let state = SharedState::new(AppConfig::default());
+        state.request_disconnect();
+        assert_eq!(headless_next_action(&state), HeadlessAction::WaitMore);
+    }
+
+    /// A bot already online waits (no re-spawn while the thread is alive).
+    #[test]
+    fn test_next_action_online_waits() {
+        let state = SharedState::new(AppConfig::default());
+        state.set_online(true);
+        assert_eq!(headless_next_action(&state), HeadlessAction::WaitMore);
     }
 }
