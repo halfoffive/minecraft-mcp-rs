@@ -212,12 +212,20 @@ jobs:
   # Publishes the six npm packages (5 platform packages + the main launcher)
   # built from the same artifacts as the GitHub Release.
   #
-  # Notes:
-  # - The auth token is a GRANULAR access token (legacy classic tokens were
-  #   removed by npm in Nov 2025). Add it as the `NPM_TOKEN` secret in repo
-  #   Settings > Secrets with Read+Write packages scope (2FA bypass enabled).
-  #   The token is NEVER written to any file — only referenced via
-  #   `secrets.NPM_TOKEN`.
+  # Authentication supports BOTH modes (npm picks whichever is available):
+  #   1. NPM_TOKEN secret (preferred for re-runs / manual runs): a GRANULAR
+  #      access token (legacy classic tokens were removed by npm in Nov 2025)
+  #      with Read+Write packages scope. When the secret exists, setup-node
+  #      writes it into .npmrc via NODE_AUTH_TOKEN and npm authenticates with
+  #      it. The token is NEVER written to any file — only referenced via
+  #      `secrets.NPM_TOKEN`.
+  #   2. npm Trusted Publishing (preferred going forward): with
+  #      `id-token: write`, `npm publish --provenance` automatically exchanges
+  #      the GitHub OIDC token for a short-lived npm token — NO token secret
+  #      needed, and provenance attestations are generated. Configure each of
+  #      the six packages on npmjs.com: package page → Settings → Trusted
+  #      Publishers → Link GitHub Actions with this repository, owner
+  #      `halfoffive`, workflow `release.yml` (no environment required).
   # - `--provenance` requires `id-token: write` and a GitHub-hosted runner.
   # - Publish order is platform-first, main last (the main package's
   #   optionalDependencies must already exist on the registry).
@@ -293,20 +301,13 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      - name: Verify NPM_TOKEN secret is present
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "::error::NPM_TOKEN secret is missing or empty — add it in repo Settings > Secrets (granular access token with Read+Write packages, 2FA bypass)"
-            exit 1
-          fi
-
       - name: Sync npm versions from Cargo.toml
         run: node npm/scripts/sync-versions.mjs
 
       - name: Publish packages (platform first, then main)
         env:
+          # Optional: only set when the NPM_TOKEN secret exists. Without it,
+          # npm falls back to Trusted Publishing via the OIDC token.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         shell: bash
         run: |
