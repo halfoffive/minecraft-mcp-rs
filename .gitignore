@@ -2,6 +2,7 @@
 
 # Oh My Openagent
 .sisyphus/
+.omo/
 
 # Trae IDE
 .trae/
@@ -23,3 +24,6 @@ docs/.vitepress/cache/
 
 # WorkBuddy agent workspace (memory, skills, tmp scripts)
 .workbuddy/
+
+# ZCode agent memory
+.zcode/
