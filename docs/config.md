@@ -22,6 +22,36 @@ thread.
 | `reconnect_max_delay_ms` | `60000` | Maximum reconnect backoff |
 | `command_timeout_secs` | `30` | Bot command timeout |
 
+## Config file persistence
+
+Settings are persisted to `config.json` in the OS config directory and
+reloaded on every startup — file values override defaults:
+
+| OS | Path |
+|----|------|
+| Windows | `%APPDATA%\minecraft-mcp-rs\config.json` |
+| Linux | `~/.config/minecraft-mcp-rs/config.json` |
+| macOS | `~/Library/Application Support/minecraft-mcp-rs/config.json` |
+
+The write is atomic (temp file + rename, `0600` on Unix). Point the binary at
+a different file with `--config <path>`.
+
+## Headless mode & CLI flags
+
+The binary accepts a small set of flags:
+
+| Flag | Description |
+|------|-------------|
+| `--headless` | No desktop window; auto-connect the bot and exit when the MCP transport closes |
+| `--stdio` | Force the MCP stdio transport (overrides the config) |
+| `--config <path>` | Load the config file at `<path>` |
+| `-h`, `--help` | Print usage to stderr and exit |
+
+In headless mode the bot auto-connects on startup, and an agent-driven config
+change (via the `update_settings` MCP tool) that touches the server
+connection fields reconnects automatically. `mcp_transport`/`mcp_address`/
+`mcp_port` changes take effect on the next process restart.
+
 ## Logging
 
 All log output goes to **stderr** only — stdout is reserved for MCP JSON-RPC

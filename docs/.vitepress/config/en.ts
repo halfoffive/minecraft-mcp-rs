@@ -11,6 +11,7 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> = {
       { text: 'Guide', link: '/guide/getting-started', activeMatch: '/guide/' },
       { text: 'Tools', link: '/tools', activeMatch: '/tools' },
       { text: 'Config', link: '/config', activeMatch: '/config' },
+      { text: 'npm', link: '/npm', activeMatch: '/npm' },
       { text: 'GitHub', link: 'https://github.com/your-org/minecraft-mcp-rs' }
     ],
 
@@ -34,6 +35,12 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> = {
         {
           text: 'Config',
           items: [{ text: 'Configuration', link: '/config' }]
+        }
+      ],
+      '/npm/': [
+        {
+          text: 'npm',
+          items: [{ text: 'Install via npm', link: '/npm' }]
         }
       ]
     },

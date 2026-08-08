@@ -15,7 +15,7 @@ hero:
 
 features:
   - title: "30+ MCP Tools"
-    details: "Bot abilities organized into 7 domains — query, movement, block, item, container, combat, and chat — plus a unified `act` tool. Exposed over stdio or remote HTTP."
+    details: "Bot abilities organized into 8 domains — query, movement, block, item, container, combat, chat, and settings — plus a unified `act` tool. Exposed over stdio or remote HTTP."
   - title: "Live World State"
     details: "The bot periodically snapshots its surroundings into a thread-safe `SharedState`, readable by all tools. Only changed blocks/chunks are recomputed between polling intervals."
   - title: "Remote HTTP Server"

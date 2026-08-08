@@ -20,6 +20,31 @@
 | `reconnect_max_delay_ms` | `60000` | 最大重连退避时间 |
 | `command_timeout_secs` | `30` | 机器人命令超时时间 |
 
+## 配置文件持久化
+
+设置会持久化到系统配置目录下的 `config.json`，并在每次启动时重新加载——文件中的值会覆盖默认值：
+
+| 系统 | 路径 |
+|----|------|
+| Windows | `%APPDATA%\minecraft-mcp-rs\config.json` |
+| Linux | `~/.config/minecraft-mcp-rs/config.json` |
+| macOS | `~/Library/Application Support/minecraft-mcp-rs/config.json` |
+
+写入是原子的（临时文件 + 重命名，Unix 下权限为 `0600`）。可用 `--config <path>` 指定其他文件。
+
+## 无头模式与命令行参数
+
+二进制接受少量命令行参数：
+
+| 参数 | 说明 |
+|------|-------------|
+| `--headless` | 无桌面窗口；自动连接机器人，MCP 传输关闭时退出进程 |
+| `--stdio` | 强制使用 MCP stdio 传输（覆盖配置） |
+| `--config <path>` | 从指定路径加载配置文件 |
+| `-h`, `--help` | 打印用法到 stderr 并退出 |
+
+无头模式下机器人启动时自动连接；通过 `update_settings` MCP 工具修改服务器连接相关字段会自动触发重连。`mcp_transport`/`mcp_address`/`mcp_port` 的变更在下次进程重启时生效。
+
 ## 日志
 
 所有日志输出仅写入 **stderr** —— stdout 保留给 MCP JSON-RPC 传输使用。

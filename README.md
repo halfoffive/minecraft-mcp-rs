@@ -28,9 +28,9 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 
 ## Features
 
-- **30+ MCP tools** organized into 7 domains, plus a unified `act` tool
+- **30+ MCP tools** organized into 8 domains, plus a unified `act` tool
 
-  提供 **30 余个 MCP 工具**，分为 7 个领域，外加统一的 `act` 工具。
+  提供 **30 余个 MCP 工具**，分为 8 个领域，外加统一的 `act` 工具。
 
 - **Bilingual UI (English / 简体中文)** — switch languages at runtime in the
   Settings panel; CJK system fonts are auto-detected so Chinese renders
@@ -106,9 +106,10 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 | **Container / 容器** | `open_container`, `take_from_container`, `put_into_container`, `close_container` |
 | **Combat / 战斗** | `attack_entity`, `shield_block` |
 | **Chat / 聊天** | `send_chat`, `execute_command`, `set_game_mode` |
+| **Settings / 设置** | `get_settings`, `update_settings`, `connect_bot`, `disconnect_bot` |
 | **Unified / 统一** | `act` — one tool that can move, smart-move, fly, mine, attack, or collect items and returns an environment snapshot |
 
-上述工具按功能领域分类；`act` 是一个统一入口，能够根据传入参数执行移动、智能移动、飞行、挖掘、攻击或拾取物品，并返回环境快照。
+上述工具按功能领域分类；`act` 是一个统一入口，能够根据传入参数执行移动、智能移动、飞行、挖掘、攻击或拾取物品，并返回环境快照。设置类工具（`get_settings` / `update_settings` / `connect_bot` / `disconnect_bot`）在机器人离线时也可用——LLM 客户端可以自行读取和修改所有配置，包括切换 Minecraft 服务器地址。
 
 ## Documentation
 
@@ -139,6 +140,66 @@ WenQuanYi) so Chinese text renders correctly without manual font setup.
 桌面 UI 支持 **英文** 与 **简体中文**。在"设置"面板的"语言"下拉框中切换，下一帧即
 生效，无需重连。启动时会自动探测系统默认中文字体（Windows `msyh.ttc`、macOS
 `PingFang.ttc`、Linux Noto / 文泉驿），无需手动安装字体即可正常显示中文。
+
+## Install via npm / 通过 npm 安装
+
+No Rust toolchain needed — prebuilt binaries are published to npm for Windows
+x64/arm64, macOS arm64, and Linux x64/arm64. Install globally:
+
+无需 Rust 工具链——预编译二进制已发布到 npm，支持 Windows x64/arm64、macOS arm64 和 Linux x64/arm64。全局安装：
+
+```bash
+npm install -g minecraft-mcp-rs
+```
+
+or run it directly without installing (each platform's binary is downloaded on
+demand):
+
+或无需安装直接运行（各平台的二进制按需下载）：
+
+```bash
+npx minecraft-mcp-rs --headless --stdio
+```
+
+Ready-to-paste Claude Desktop / Cursor config (stdio implies the bot runs
+headless and exits when the MCP client disconnects):
+
+可直接粘贴到 Claude Desktop / Cursor 的配置（stdio 意味着机器人以无头模式运行，并在 MCP 客户端断开时退出进程）：
+
+```json
+{
+  "mcpServers": {
+    "minecraft": {
+      "command": "npx",
+      "args": ["-y", "minecraft-mcp-rs", "--headless", "--stdio"]
+    }
+  }
+}
+```
+
+> For maintainers: npm publishing uses the `NPM_TOKEN` secret (a granular
+> access token) in the GitHub `release.yml` workflow. NEVER commit the token
+> or any fragment of it anywhere in the repository.
+
+> 维护者须知：npm 发布使用 GitHub `release.yml` 工作流中的 `NPM_TOKEN` 密钥（细粒度访问令牌）。切勿将令牌或其任何片段提交到仓库的任何位置。
+
+### CLI flags / 命令行参数
+
+The binary accepts a small set of flags (run `minecraft-mcp-rs --help` for the
+full usage):
+
+二进制接受少量命令行参数（运行 `minecraft-mcp-rs --help` 查看完整用法）：
+
+| Flag / 参数 | Description / 说明 |
+|-------------|---------------------|
+| `--headless` | Run without the desktop window; auto-connect the bot and exit when the MCP transport closes / 无桌面窗口运行；自动连接机器人，MCP 传输关闭时退出进程 |
+| `--stdio` | Force the MCP stdio transport (overrides the configured transport) / 强制使用 MCP stdio 传输（覆盖配置中的传输方式） |
+| `--config <path>` | Load the config file at `<path>` instead of the OS config dir / 从指定路径加载配置文件（替代系统配置目录） |
+| `-h`, `--help` | Print usage to stderr and exit / 打印用法到 stderr 并退出 |
+
+With no flags the desktop UI starts (the classic mode).
+
+不带任何参数时启动桌面 UI（经典模式）。
 
 ## Quick Start
 
@@ -254,8 +315,10 @@ All settings have sensible defaults and can be changed at runtime through the
 egui settings panel (fully editable — text inputs for strings, DragValue
 sliders for numeric fields). After editing, click **Connect** to apply the
 settings and spawn the bot connection on a dedicated background thread.
+Alternatively, an LLM agent can read and change every setting through the MCP
+settings tools (`get_settings` / `update_settings`).
 
-所有设置均有合理默认值，可在运行时通过 egui 设置面板修改（完全可编辑——字符串使用文本输入框，数值字段使用 DragValue 滑块）。编辑完成后点击 **Connect**，设置即会生效，并在专用后台线程上启动机器人连接。
+所有设置均有合理默认值，可在运行时通过 egui 设置面板修改（完全可编辑——字符串使用文本输入框，数值字段使用 DragValue 滑块）。编辑完成后点击 **Connect**，设置即会生效，并在专用后台线程上启动机器人连接。AI 代理也可以通过 MCP 设置工具（`get_settings` / `update_settings`）读取和修改所有设置。
 
 | Field / 字段 | Default / 默认值 | Description / 说明 |
 |--------------|------------------|--------------------|
@@ -275,6 +338,51 @@ settings and spawn the bot connection on a dedicated background thread.
 | `command_timeout_secs` | `30` | Bot command timeout / 机器人命令超时（秒） |
 
 数值型字段均可在 UI 中通过滑块或键盘输入调整；修改后需点击 **Connect** 才会应用到机器人连接。
+
+### Config file persistence / 配置文件持久化
+
+Settings are persisted to a `config.json` in the OS config directory and
+reloaded on every startup — file values override defaults:
+
+设置会持久化到系统配置目录下的 `config.json`，并在每次启动时重新加载——文件中的值会覆盖默认值：
+
+| OS / 系统 | Config file path / 配置文件路径 |
+|-----------|----------------------------------|
+| Windows | `%APPDATA%\minecraft-mcp-rs\config.json` |
+| Linux | `~/.config/minecraft-mcp-rs/config.json` |
+| macOS | `~/Library/Application Support/minecraft-mcp-rs/config.json` |
+
+The `mcp_token` is persisted too (write is atomic: temp file + rename, `0600`
+on Unix). An agent can also change any setting — including the Minecraft
+server — through the MCP settings tools; changing
+`mc_address`/`mc_port`/`ai_username` while connected triggers an automatic
+reconnect, while `mcp_transport`/`mcp_address`/`mcp_port` take effect on the
+next process restart.
+
+`mcp_token` 也会被持久化（原子写入：临时文件 + 重命名，Unix 下权限为 `0600`）。AI 代理还可以通过 MCP 设置工具修改任意设置——包括 Minecraft 服务器地址；已连接时修改 `mc_address`/`mc_port`/`ai_username` 会自动触发重连，而 `mcp_transport`/`mcp_address`/`mcp_port` 的变更在下次进程重启时生效。
+
+### Error contract / 错误契约
+
+Every MCP error carries a JSON-RPC code plus structured `data` with a
+machine-readable `reason`, a `retryable` bool, and variant-specific fields, so
+AI agents can distinguish "bot is gone, retry later" from "input is invalid":
+
+每个 MCP 错误都携带 JSON-RPC code 以及结构化 `data`（含机器可读的 `reason`、`retryable` 布尔值和各变体专属字段），AI 代理可以据此区分"机器人已断开，稍后重试"与"输入无效"：
+
+| Code / 错误码 | Variant / 变体 | `reason` | retryable |
+|---------------|----------------|----------|-----------|
+| -32000 | `Offline` | `bot_disconnected` | true |
+| -32001 | `CommandTimeout` | `command_timeout` | true |
+| -32002 | `BlockNotFound` | `block_not_found` | false |
+| -32003 | `ChunkNotLoaded` | `chunk_not_loaded` | true |
+| -32004 | `InventoryFull` | `inventory_full` | false |
+| -32005 | `MiningInterrupted` | `mining_interrupted` | false |
+| -32006 | `ContainerAlreadyOpen` | `container_already_open` | false |
+| -32007 | `ContainerTimeout` | `container_timeout` | true |
+| -32008 | `PathfindingFailed` | `pathfinding_failed` | false |
+| -32600 | `PermissionDenied` | `permission_denied` | false |
+| -32602 | `ToolNotFound` / `TooFar` / `InvalidParams` | `tool_not_found` / `too_far` / `invalid_params` | false |
+| -32603 | `Internal` | `internal_error` | false |
 
 ## Architecture
 

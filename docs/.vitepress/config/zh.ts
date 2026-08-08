@@ -11,6 +11,7 @@ export const zh: LocaleSpecificConfig<DefaultTheme.Config> = {
       { text: '指南', link: '/zh/guide/getting-started', activeMatch: '/zh/guide/' },
       { text: '工具', link: '/zh/tools', activeMatch: '/zh/tools' },
       { text: '配置', link: '/zh/config', activeMatch: '/zh/config' },
+      { text: 'npm', link: '/zh/npm', activeMatch: '/zh/npm' },
       { text: 'GitHub', link: 'https://github.com/your-org/minecraft-mcp-rs' }
     ],
 
@@ -34,6 +35,12 @@ export const zh: LocaleSpecificConfig<DefaultTheme.Config> = {
         {
           text: '配置',
           items: [{ text: '配置', link: '/zh/config' }]
+        }
+      ],
+      '/zh/npm/': [
+        {
+          text: 'npm',
+          items: [{ text: '通过 npm 安装', link: '/zh/npm' }]
         }
       ]
     },
