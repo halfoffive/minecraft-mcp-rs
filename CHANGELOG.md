@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [1.1.2] - 2026-08-09
+
+### Changed
+
+- **npm platform packages moved under the `@minecraft-mcp-rs` org:** the five
+  binary platform packages are published as
+  `@minecraft-mcp-rs/minecraft-mcp-rs-{windows-x64,windows-arm64,darwin-arm64,linux-x64,linux-arm64}`
+  (owned by the npm org). The main launcher stays unscoped as
+  `minecraft-mcp-rs`; its `optionalDependencies` and the bin shim's
+  `PLATFORMS` map now point at the scoped platform packages.
+- **CI publishes via npm Trusted Publishing:** the `npm-publish` job's
+  `npm publish --provenance` now authenticates through the GitHub OIDC token
+  (per-package Trusted Publisher configured on npmjs.com) — no `NPM_TOKEN`
+  secret needed; published versions carry provenance attestations.
+
+## [1.1.1] - 2026-08-08
+
+### Fixed
+
+- **npm main package version bump:** `minecraft-mcp-rs@1.1.1` was published to
+  work around npm's rule that an unpublished version number cannot be reused
+  (the `1.1.0` version was deleted from the registry during the org migration
+  and is permanently locked for this package name). No code changes in 1.1.1 —
+  the binary content is identical to 1.1.0; the platform packages were already
+  republished under the org scope at 1.1.0.
+
 ## [1.1.0] - 2026-08-08
 
 ### Added
