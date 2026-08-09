@@ -105,6 +105,9 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
                     .desired_width(180.0),
             );
         });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut edit.mcp_auth_enabled, i18n::tr(TextKey::RequireToken));
+        });
     }
 
     ui.separator();
