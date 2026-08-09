@@ -41,6 +41,7 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::TransportStdio => "Stdio (subprocess)",
         TextKey::Token => "Token:",
         TextKey::TokenHint => "Bearer token for HTTP auth",
+        TextKey::RequireToken => "Require Bearer token (HTTP):",
 
         // ── MCP server status / warnings ───────────────────────────────
         TextKey::McpServerLabel => "MCP:",
@@ -112,7 +113,7 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::CopyHint => {
             "Copy this JSON into your MCP client config (Claude Desktop / Cursor):"
         }
-        TextKey::NpxConfig => "npm / npx (no Rust toolchain needed):",
+        TextKey::NpxConfig => "npm / npx / bunx (no Rust toolchain needed):",
 
         // ── Language picker ────────────────────────────────────────────
         TextKey::Language => "Language:",
@@ -178,6 +179,7 @@ mod tests {
             TextKey::TransportStdio,
             TextKey::Token,
             TextKey::TokenHint,
+            TextKey::RequireToken,
             TextKey::McpServerLabel,
             TextKey::McpServerRunning,
             TextKey::McpServerStdio,

@@ -125,6 +125,8 @@ pub enum TextKey {
     Token,
     /// "Bearer token for HTTP auth" hint text.
     TokenHint,
+    /// "Require a Bearer token over HTTP (settings checkbox)".
+    RequireToken,
 
     // ── MCP server status / warnings ───────────────────────────────
     /// "MCP:" prefix label for the MCP server status line.
@@ -340,6 +342,7 @@ pub fn key_name(key: TextKey) -> &'static str {
         TextKey::TransportStdio => "TransportStdio",
         TextKey::Token => "Token",
         TextKey::TokenHint => "TokenHint",
+        TextKey::RequireToken => "RequireToken",
         TextKey::McpServerLabel => "McpServerLabel",
         TextKey::McpServerRunning => "McpServerRunning",
         TextKey::McpServerStdio => "McpServerStdio",

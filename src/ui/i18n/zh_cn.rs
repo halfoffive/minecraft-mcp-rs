@@ -41,6 +41,7 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::TransportStdio => "Stdio（子进程）",
         TextKey::Token => "令牌：",
         TextKey::TokenHint => "HTTP 认证的 Bearer 令牌",
+        TextKey::RequireToken => "需要 Bearer Token（HTTP）：",
 
         // ── MCP server status / warnings ───────────────────────────────
         TextKey::McpServerLabel => "MCP：",
@@ -110,7 +111,7 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         // ── MCP config panel ───────────────────────────────────────────
         TextKey::Copy => "复制",
         TextKey::CopyHint => "将此 JSON 复制到你的 MCP 客户端配置中（Claude Desktop / Cursor）：",
-        TextKey::NpxConfig => "npm / npx（无需 Rust 工具链）：",
+        TextKey::NpxConfig => "npm / npx / bunx（无需 Rust 工具链）：",
 
         // ── Language picker ────────────────────────────────────────────
         TextKey::Language => "语言：",
@@ -169,6 +170,7 @@ mod tests {
             TextKey::TransportStdio,
             TextKey::Token,
             TextKey::TokenHint,
+            TextKey::RequireToken,
             TextKey::McpServerLabel,
             TextKey::McpServerRunning,
             TextKey::McpServerStdio,
