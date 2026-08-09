@@ -3,8 +3,9 @@
 //! Renders a read-only, pretty-printed JSON configuration whose shape
 //! depends on the selected [`McpTransport`]:
 //!
-//! - `Http` — emits a `url` + `headers.Authorization` block for remote
-//!   HTTP clients.
+//! - `Http` — emits a `url` block, plus a `headers.Authorization` block
+//!   when HTTP auth is enabled (`mcp_auth_enabled`), for remote HTTP
+//!   clients.
 //! - `Stdio` — emits the classic `command` + `args` block for local
 //!   subprocess clients (Claude Desktop / Cursor).
 //!
@@ -30,6 +31,19 @@ use crate::ui::i18n::{self, TextKey};
 /// {
 ///   "mcpServers": {
 ///     "minecraft": {
+///       "url": "http://<mcp_address>:<mcp_port>/mcp"
+///     }
+///   }
+/// }
+/// ```
+///
+/// The `headers.Authorization` block is appended to the `minecraft` entry
+/// only when [`EditConfig::mcp_auth_enabled`] is true:
+///
+/// ```json
+/// {
+///   "mcpServers": {
+///     "minecraft": {
 ///       "url": "http://<mcp_address>:<mcp_port>/mcp",
 ///       "headers": {
 ///         "Authorization": "Bearer <mcp_token>"
@@ -46,7 +60,7 @@ use crate::ui::i18n::{self, TextKey};
 ///   "mcpServers": {
 ///     "minecraft": {
 ///       "command": "<absolute_path_to_executable>",
-///       "args": []
+///       "args": ["--stdio"]
 ///     }
 ///   }
 /// }
@@ -94,9 +108,9 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig) {
             .desired_width(f32::INFINITY),
     );
 
-    // ── npx variant (Stdio only) ───────────────────────────────
-    // The npx launcher only makes sense for the stdio transport — `npx`
-    // spawns the binary as a subprocess, which is exactly what the Stdio
+    // ── npx / bunx variants (Stdio only) ──────────────────────
+    // The npx / bunx launchers only make sense for the stdio transport —
+    // they spawn the binary as a subprocess, which is exactly what the Stdio
     // JSON block describes. HTTP transport is unaffected.
     if edit.mcp_transport == McpTransport::Stdio {
         let npx_text = build_npx_config_json();
@@ -110,6 +124,24 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig) {
         let mut npx_text = npx_text;
         ui.add(
             TextEdit::multiline(&mut npx_text)
+                .font(FontId::monospace(12.0))
+                .interactive(false)
+                .desired_width(f32::INFINITY),
+        );
+
+        // bunx variant — parallel block for users on Bun. `bunx` auto-installs
+        // the package without prompting, so this JSON has no `-y` flag.
+        let bunx_text = build_bunx_config_json();
+        ui.add_space(6.0);
+        ui.label(i18n::tr(TextKey::NpxConfig));
+        ui.horizontal(|ui| {
+            if ui.button(i18n::tr(TextKey::Copy)).clicked() {
+                ui.ctx().copy_text(bunx_text.clone());
+            }
+        });
+        let mut bunx_text = bunx_text;
+        ui.add(
+            TextEdit::multiline(&mut bunx_text)
                 .font(FontId::monospace(12.0))
                 .interactive(false)
                 .desired_width(f32::INFINITY),
@@ -136,7 +168,8 @@ fn format_host_for_url(host: &str) -> String {
 /// Returns a pretty-printed JSON string.  The shape branches on
 /// [`EditConfig::mcp_transport`]:
 ///
-/// - [`McpTransport::Http`] — `url` + `headers.Authorization` block.
+/// - [`McpTransport::Http`] — `url` (+ `headers.Authorization` only when
+///   [`EditConfig::mcp_auth_enabled`]).
 /// - [`McpTransport::Stdio`] — `command` + `args` block (uses
 ///   [`std::env::current_exe`] for the executable path).
 fn build_mcp_config_json(edit: &EditConfig) -> String {
@@ -144,14 +177,19 @@ fn build_mcp_config_json(edit: &EditConfig) -> String {
         McpTransport::Http => {
             let host = format_host_for_url(&edit.mcp_address);
             let url = format!("http://{host}:{}/mcp", edit.mcp_port);
+            // The Authorization header is only meaningful when the server's
+            // HTTP auth is actually enabled (`mcp_auth_enabled`). When auth
+            // is off the generated config must not leak the (possibly random)
+            // token into the clipboard-ready JSON, and clients should not
+            // send a bearer header to an unauthenticated endpoint.
+            let mut minecraft = serde_json::json!({ "url": url });
+            if edit.mcp_auth_enabled {
+                minecraft["headers"] =
+                    serde_json::json!({ "Authorization": format!("Bearer {}", edit.mcp_token) });
+            }
             serde_json::json!({
                 "mcpServers": {
-                    "minecraft": {
-                        "url": url,
-                        "headers": {
-                            "Authorization": format!("Bearer {}", edit.mcp_token)
-                        }
-                    }
+                    "minecraft": minecraft
                 }
             })
         }
@@ -160,11 +198,13 @@ fn build_mcp_config_json(edit: &EditConfig) -> String {
                 .ok()
                 .and_then(|p| p.to_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| "minecraft-mcp-rs".to_owned());
+            // `--stdio` is mandatory: with no args the binary prints help and
+            // exits (T1), which would silently kill the MCP subprocess.
             serde_json::json!({
                 "mcpServers": {
                     "minecraft": {
                         "command": exe_path,
-                        "args": []
+                        "args": ["--stdio"]
                     }
                 }
             })
@@ -184,7 +224,24 @@ fn build_npx_config_json() -> String {
         "mcpServers": {
             "minecraft": {
                 "command": "npx",
-                "args": ["-y", "minecraft-mcp-rs", "--headless", "--stdio"]
+                "args": ["-y", "minecraft-mcp-rs@latest", "--headless", "--stdio"]
+            }
+        }
+    });
+    serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".to_owned())
+}
+
+/// Build the bunx variant of the MCP client config JSON.
+///
+/// Same idea as [`build_npx_config_json`] but for users on Bun: `bunx`
+/// auto-installs the package without prompting, so no `-y` flag is needed
+/// (unlike `npx`). The args still mirror the binary's headless stdio flags.
+fn build_bunx_config_json() -> String {
+    let json = serde_json::json!({
+        "mcpServers": {
+            "minecraft": {
+                "command": "bunx",
+                "args": ["minecraft-mcp-rs@latest", "--headless", "--stdio"]
             }
         }
     });
@@ -231,6 +288,7 @@ mod tests {
         edit.mcp_address = "127.0.0.1".to_string();
         edit.mcp_port = 3000;
         edit.mcp_token = "my-token".to_string();
+        edit.mcp_auth_enabled = true;
 
         let json = build_mcp_config_json(&edit);
 
@@ -257,6 +315,7 @@ mod tests {
         edit.mcp_address = "::1".to_string();
         edit.mcp_port = 3000;
         edit.mcp_token = "test-token".to_string();
+        edit.mcp_auth_enabled = true;
 
         let json = build_mcp_config_json(&edit);
 
@@ -273,6 +332,7 @@ mod tests {
         edit.mcp_address = "localhost".to_string();
         edit.mcp_port = 8080;
         edit.mcp_token = "".to_string();
+        edit.mcp_auth_enabled = true;
 
         let json = build_mcp_config_json(&edit);
 
@@ -289,6 +349,7 @@ mod tests {
         edit.mcp_address = "127.0.0.1".to_string();
         edit.mcp_port = 3000;
         edit.mcp_token = "my-token".to_string();
+        edit.mcp_auth_enabled = true;
 
         let json = build_mcp_config_json(&edit);
 
@@ -307,6 +368,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_mcp_config_http_auth_off_no_headers() {
+        let mut edit = EditConfig::from(&AppConfig::default());
+        edit.mcp_transport = McpTransport::Http;
+        edit.mcp_address = "127.0.0.1".to_string();
+        edit.mcp_port = 3000;
+        edit.mcp_token = "my-token".to_string();
+        // `mcp_auth_enabled` stays false (EditConfig::from default) → the
+        // generated config must NOT carry an Authorization header.
+        assert!(
+            !edit.mcp_auth_enabled,
+            "precondition: auth should default off"
+        );
+
+        let json = build_mcp_config_json(&edit);
+
+        assert!(
+            json.contains(r#""url": "http://127.0.0.1:3000/mcp""#),
+            "wrong IPv4 url: {json}"
+        );
+        assert!(
+            !json.contains("Authorization"),
+            "auth off must not emit Authorization header: {json}"
+        );
+        assert!(
+            !json.contains("Bearer"),
+            "auth off must not emit Bearer: {json}"
+        );
+        assert!(
+            !json.contains("headers"),
+            "auth off must not emit headers block: {json}"
+        );
+        assert!(
+            !json.contains("my-token"),
+            "auth off must not leak the token: {json}"
+        );
+    }
+
     // -- Stdio transport ----------------------------------------------------
 
     #[test]
@@ -318,6 +417,10 @@ mod tests {
 
         assert!(json.contains("command"), "missing command: {json}");
         assert!(json.contains("args"), "missing args: {json}");
+        assert!(
+            json.contains("\"--stdio\""),
+            "stdio args must run the binary headless (--stdio): {json}"
+        );
         // HTTP-only keys should not appear in Stdio mode.
         assert!(
             !json.contains("\"url\""),
@@ -341,11 +444,33 @@ mod tests {
         assert!(json.contains("npx"), "missing npx command: {json}");
         assert!(json.contains("-y"), "missing -y flag: {json}");
         assert!(json.contains("minecraft-mcp-rs"), "missing package: {json}");
+        assert!(
+            json.contains("minecraft-mcp-rs@latest"),
+            "missing @latest pin: {json}"
+        );
         assert!(json.contains("--headless"), "missing --headless: {json}");
         assert!(json.contains("--stdio"), "missing --stdio: {json}");
         assert!(
             !json.contains("current_exe"),
             "npx config must not reference the local exe path: {json}"
+        );
+    }
+
+    // -- bunx variant ---------------------------------------------------------
+
+    #[test]
+    fn test_build_bunx_config_json_contents() {
+        let json = build_bunx_config_json();
+        assert!(json.contains("bunx"), "missing bunx command: {json}");
+        assert!(
+            json.contains("minecraft-mcp-rs@latest"),
+            "missing @latest package: {json}"
+        );
+        assert!(json.contains("--headless"), "missing --headless: {json}");
+        assert!(json.contains("--stdio"), "missing --stdio: {json}");
+        assert!(
+            !json.contains("\"-y\""),
+            "bunx must NOT use -y (it auto-installs without prompting): {json}"
         );
     }
 }
