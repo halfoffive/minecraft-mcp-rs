@@ -12,7 +12,8 @@
 | `mcp_transport` | `Http` | MCP 传输方式：`Stdio` 或 `Http` |
 | `mcp_address` | `127.0.0.1` | MCP HTTP 绑定地址（仅限回环） |
 | `mcp_port` | `3000` | MCP HTTP 端口 |
-| `mcp_token` | `minecraft-mcp-rs` | HTTP 传输的 Bearer 令牌 |
+| `mcp_token` | 随机 UUID v4 | HTTP 传输的 Bearer 令牌（可选鉴权，每次 `AppConfig::default()` 时随机生成） |
+| `mcp_auth_enabled` | `false` | 需要 Bearer Token 鉴权（默认关闭） |
 | `chunk_scan_radius` | `8` | 扫描的区块数（1–16） |
 | `block_perception_radius` | `32` | 方块感知范围（8–64） |
 | `snapshot_interval_ms` | `500` | 世界快照间隔 |
@@ -39,9 +40,12 @@
 | 参数 | 说明 |
 |------|-------------|
 | `--headless` | 无桌面窗口；自动连接机器人，MCP 传输关闭时退出进程 |
-| `--stdio` | 强制使用 MCP stdio 传输（覆盖配置） |
+| `--stdio` | 强制使用 MCP stdio 传输（覆盖配置）；单独使用时隐含无头模式 |
+| `--gui` | 打开桌面 UI（显式指定时优先于 `--stdio` 隐含的无头模式） |
 | `--config <path>` | 从指定路径加载配置文件 |
 | `-h`, `--help` | 打印用法到 stderr 并退出 |
+
+无参数时打印帮助并退出 0；`--gui` 打开桌面 UI。
 
 无头模式下机器人启动时自动连接；通过 `update_settings` MCP 工具修改服务器连接相关字段会自动触发重连。`mcp_transport`/`mcp_address`/`mcp_port` 的变更在下次进程重启时生效。
 

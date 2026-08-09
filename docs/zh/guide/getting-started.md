@@ -18,16 +18,16 @@ cargo build
 
 ## 运行
 
+不带参数运行 `cargo run` 会打印帮助并退出（退出码 0）。启动桌面 UI 需要显式传入 `--gui`：
+
 ```bash
-cargo run
+cargo run -- --gui
 ```
 
-这会同时启动 MCP 服务器和 egui 桌面 UI。在设置面板中选择 MCP 传输方式：
+无头运行（不打开窗口，MCP 传输关闭时退出进程）使用 `--headless`；`--stdio` 单独使用时也隐含无头模式。在设置面板中选择 MCP 传输方式：
 
 - **stdio** —— MCP 服务器监听 stdin/stdout（Claude Desktop / Cursor 的默认方式）。
-- **HTTP** —— MCP 服务器仅绑定到 `127.0.0.1`；设置端口和 Bearer 令牌
-  （默认为项目名 `minecraft-mcp-rs`）。MCP 配置面板会生成匹配的 JSON 配置，
-  方便复制到你的 MCP 客户端。
+- **HTTP** —— MCP 服务器仅绑定到 `127.0.0.1`；设置端口，并按需启用 Bearer 令牌鉴权（默认关闭；启用时默认令牌为随机 UUID v4，可在设置面板中覆盖）。MCP 配置面板会生成匹配的 JSON 配置，方便复制到你的 MCP 客户端。
 
 默认情况下，机器人会尝试以 `AI_Bot` 的身份连接 `127.0.0.1:25565`。可以在
 UI 面板中或启动前通过环境变量调整设置（参见[配置](../config)）。

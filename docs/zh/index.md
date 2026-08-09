@@ -19,7 +19,7 @@ features:
   - title: "实时世界状态"
     details: "机器人定期将其周围环境快照到线程安全的 `SharedState` 中，所有工具均可读取。两次轮询之间仅重新计算发生变化的方块/区块。"
   - title: "远程 HTTP 服务器"
-    details: "仅限回环地址（`127.0.0.1`）的 MCP HTTP 服务器，使用 Bearer 令牌保护。传输模式可在 UI 中切换；并为 Claude Desktop / Cursor 生成可复制的 JSON 配置。"
+    details: "仅限本地回环（`127.0.0.1`）的 MCP HTTP 服务器，可选 Bearer Token 鉴权（默认关闭）。传输模式可在 UI 中切换；并为 Claude Desktop / Cursor 生成可复制的 JSON 配置。"
   - title: "AI 视觉"
     details: "`get_world_view` 工具渲染附近方块的俯视 PNG 图并以 base64 返回，让多模态模型能够从视觉上理解世界。"
   - title: "智能移动与飞行"

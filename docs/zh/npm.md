@@ -13,7 +13,8 @@ npm install -g minecraft-mcp-rs
 或按需运行（首次运行时会下载匹配平台的二进制）：
 
 ```bash
-npx minecraft-mcp-rs --headless --stdio
+npx -y minecraft-mcp-rs@latest --headless --stdio
+bunx minecraft-mcp-rs@latest --headless --stdio
 ```
 
 ## Claude Desktop / Cursor 配置
@@ -25,13 +26,24 @@ npx minecraft-mcp-rs --headless --stdio
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@latest", "--headless", "--stdio"]
     }
   }
 }
 ```
 
-`--headless` 表示无桌面窗口运行，并在 MCP 传输关闭时退出进程；`--stdio` 强制使用 stdio 传输。
+`--headless` 表示无桌面窗口运行，并在 MCP 传输关闭时退出进程；`--stdio` 强制使用 stdio 传输。使用 bun 时，命令是 `bunx`（它会自动安装包，无需 `-y` 参数）：
+
+```json
+{
+  "mcpServers": {
+    "minecraft": {
+      "command": "bunx",
+      "args": ["minecraft-mcp-rs@latest", "--headless", "--stdio"]
+    }
+  }
+}
+```
 
 ## 平台包
 
