@@ -52,6 +52,7 @@ struct SettingsView {
     command_timeout_secs: u64,
     mcp_token: String,
     mcp_transport: String,
+    mcp_auth_enabled: bool,
     language: String,
 }
 
@@ -90,6 +91,7 @@ pub fn get_settings(state: &Arc<SharedState>) -> Result<String, BotError> {
         // NEVER expose the real token on a public surface.
         mcp_token: "***".to_string(),
         mcp_transport: transport_to_str(config.mcp_transport).to_string(),
+        mcp_auth_enabled: config.mcp_auth_enabled,
         language: language_to_str(config.language).to_string(),
     };
 
@@ -160,6 +162,8 @@ pub struct UpdateSettingsInput {
     pub mcp_token: Option<String>,
     /// MCP transport: "stdio" or "http". Takes effect on process restart.
     pub mcp_transport: Option<String>,
+    /// Require a Bearer token over HTTP (default: false).
+    pub mcp_auth_enabled: Option<bool>,
     /// UI language: "en" or "zh_cn".
     pub language: Option<String>,
 }
@@ -315,6 +319,14 @@ pub(crate) fn update_settings_with_path(
         // The token is a credential — the response only ever shows the
         // redacted form.
         applied.insert("mcp_token".into(), json!("***"));
+    }
+    if let Some(v) = input.mcp_auth_enabled
+        && v != candidate.mcp_auth_enabled
+    {
+        candidate.mcp_auth_enabled = v;
+        // Not a connection field and not a transport-restart field — the
+        // auth middleware hot-reads config, so no reconnect is triggered.
+        applied.insert("mcp_auth_enabled".into(), json!(v));
     }
     if let Some(v) = input.mcp_transport {
         let transport = parse_transport(&v)?;
@@ -487,6 +499,16 @@ mod tests {
         assert!(result.contains("\"online\": true"));
     }
 
+    #[test]
+    fn test_get_settings_includes_auth_enabled() {
+        let state = state_with_known_token();
+        let result = get_settings(&state).expect("get_settings should succeed");
+        assert!(
+            result.contains("\"mcp_auth_enabled\": false"),
+            "get_settings must expose the auth switch, got: {result}"
+        );
+    }
+
     // -- update_settings: validation ------------------------------------------
 
     #[test]
@@ -592,6 +614,60 @@ mod tests {
         assert!(
             value["applied"].as_object().unwrap().is_empty(),
             "unchanged values must not appear in applied: {result}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_update_settings_auth_enabled_toggles_and_persists() {
+        let state = state_with_known_token();
+        let path = temp_config_path("auth-enable");
+        // Force a known starting value so the toggle is a real change.
+        state.update_config(|cfg| cfg.mcp_auth_enabled = false);
+        let input = UpdateSettingsInput {
+            mcp_auth_enabled: Some(true),
+            ..Default::default()
+        };
+
+        let result =
+            update_settings_with_path(&state, input, Some(&path)).expect("update should succeed");
+
+        // In-memory value applied.
+        assert!(state.read_config().mcp_auth_enabled);
+
+        // Response reports the change.
+        let value: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(value["applied"]["mcp_auth_enabled"], json!(true));
+        assert_eq!(value["reconnect_triggered"], json!(false));
+        assert!(
+            value.get("note").is_none(),
+            "auth toggle must not carry a restart note: {result}"
+        );
+
+        // Persisted to disk: loading the same path round-trips the change.
+        let loaded = AppConfig::load_from_disk(Some(&path));
+        assert!(loaded.mcp_auth_enabled);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn test_update_settings_auth_enabled_same_value_not_applied() {
+        let state = state_with_known_token();
+        let path = temp_config_path("auth-same");
+        // Default is false — setting false again must be a no-op.
+        state.update_config(|cfg| cfg.mcp_auth_enabled = false);
+        let input = UpdateSettingsInput {
+            mcp_auth_enabled: Some(false),
+            ..Default::default()
+        };
+
+        let result =
+            update_settings_with_path(&state, input, Some(&path)).expect("update should succeed");
+        let value: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(
+            value["applied"].as_object().unwrap().is_empty(),
+            "unchanged auth value must not appear in applied: {result}"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
