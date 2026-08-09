@@ -1,13 +1,15 @@
 //! Minecraft MCP Server — binary entry point.
 //!
-//! Two modes:
-//! - **UI mode** (no CLI flags): runs the egui desktop window on the main
+//! Three modes (resolved by [`minecraft_mcp_rs::cli::resolve_mode`]):
+//! - **Help mode** (no arguments, or `-h`/`--help`): prints usage to stderr
+//!   and exits 0.
+//! - **UI mode** (`--gui`): runs the egui desktop window on the main
 //!   thread. The window's Connect button spawns the bot connection; closing
 //!   the window shuts everything down.
-//! - **Headless mode** (`--headless`): no window. A supervisor thread
-//!   auto-connects the bot on startup and re-spawns the connection after
-//!   agent-driven config changes. The process exits when the MCP transport
-//!   closes (stdio client gone) or on shutdown.
+//! - **Headless mode** (`--headless`, or `--stdio` alone): no window. A
+//!   supervisor thread auto-connects the bot on startup and re-spawns the
+//!   connection after agent-driven config changes. The process exits when
+//!   the MCP transport closes (stdio client gone) or on shutdown.
 //!
 //! Architecture:
 //! - Main thread: egui UI (UI mode) or supervisor orchestration (headless).
@@ -18,10 +20,6 @@
 //! - All logs → stderr, stdout = MCP channel only.
 //!
 //! Shared state is accessed lock-free by all threads.
-
-// Hide the console window in release builds on Windows. Debug builds retain
-// the console for diagnostic output (tracing logs, panics, etc.).
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -49,7 +47,9 @@ fn main() {
     // ══════════════════════════════════════════════════════════════════
     // Parse CLI arguments. Help prints to stderr and exits 0; a parse
     // error prints to stderr and exits 2 (stdout stays clean for the MCP
-    // transport either way).
+    // transport either way). No arguments (or `--help`) resolves to
+    // `RunMode::Help` — print usage and exit; otherwise `--gui` → GUI,
+    // `--headless`/`--stdio` → headless.
     // ══════════════════════════════════════════════════════════════════
     let args = match minecraft_mcp_rs::cli::parse_cli_args(std::env::args().skip(1)) {
         Ok(args) => args,
@@ -58,7 +58,8 @@ fn main() {
             std::process::exit(2);
         }
     };
-    if args.help {
+    let mode = minecraft_mcp_rs::cli::resolve_mode(&args);
+    if matches!(mode, minecraft_mcp_rs::cli::RunMode::Help) {
         minecraft_mcp_rs::cli::print_help();
         return;
     }
@@ -102,7 +103,7 @@ fn main() {
     let state_for_mcp = Arc::clone(&state);
     let sender_for_mcp = sender.clone();
     let receiver_for_mcp = Arc::clone(&receiver);
-    let headless = args.headless;
+    let headless = matches!(mode, minecraft_mcp_rs::cli::RunMode::Headless);
 
     // ══════════════════════════════════════════════════════════════════
     // Spawn the MCP server on a dedicated OS thread with its own tokio
