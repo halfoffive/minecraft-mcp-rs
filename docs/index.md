@@ -19,7 +19,7 @@ features:
   - title: "Live World State"
     details: "The bot periodically snapshots its surroundings into a thread-safe `SharedState`, readable by all tools. Only changed blocks/chunks are recomputed between polling intervals."
   - title: "Remote HTTP Server"
-    details: "A loopback-only (`127.0.0.1`) MCP HTTP server, Bearer-token protected. Transport mode is selectable in the UI; a copyable JSON config is generated for Claude Desktop / Cursor."
+    details: "A loopback-only (`127.0.0.1`) MCP HTTP server, optional Bearer-token auth (off by default). Transport mode is selectable in the UI; a copyable JSON config is generated for Claude Desktop / Cursor."
   - title: "AI Vision"
     details: "The `get_world_view` tool renders a top-down PNG of nearby blocks and returns it as base64, letting multimodal models reason about the world visually."
   - title: "Smart Movement & Flight"

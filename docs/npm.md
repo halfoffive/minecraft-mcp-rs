@@ -15,7 +15,8 @@ npm install -g minecraft-mcp-rs
 or run it on demand (downloads the matching platform binary the first time):
 
 ```bash
-npx minecraft-mcp-rs --headless --stdio
+npx -y minecraft-mcp-rs@latest --headless --stdio
+bunx minecraft-mcp-rs@latest --headless --stdio
 ```
 
 ## Claude Desktop / Cursor config
@@ -27,7 +28,21 @@ Add this to your MCP client config:
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@latest", "--headless", "--stdio"]
+    }
+  }
+}
+```
+
+Using Bun instead? Swap the command to `bunx` and drop the `-y` flag (bunx
+installs and runs packages without prompting):
+
+```json
+{
+  "mcpServers": {
+    "minecraft": {
+      "command": "bunx",
+      "args": ["minecraft-mcp-rs@latest", "--headless", "--stdio"]
     }
   }
 }

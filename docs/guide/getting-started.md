@@ -19,18 +19,20 @@ cargo build
 ## Run
 
 ```bash
-cargo run
+cargo run -- --gui
 ```
 
-This starts both the MCP server and the egui desktop UI. Choose the MCP
-transport in the Settings panel:
+`cargo run` with no arguments prints the usage and exits; the desktop UI
+starts with `--gui`. Choose the MCP transport in the Settings panel:
 
 - **stdio** — the MCP server listens on stdin/stdout (default for Claude
-  Desktop / Cursor).
-- **HTTP** — the MCP server binds to `127.0.0.1` only; set the port and
-  Bearer token (defaults to the project name `minecraft-mcp-rs`). The MCP
-  Config panel generates the matching JSON config for copying into your MCP
-  client.
+  Desktop / Cursor). `--stdio` alone (without `--gui`) implies headless
+  mode: no window, auto-connect, and the process exits when the MCP
+  transport closes.
+- **HTTP** — the MCP server binds to `127.0.0.1` only; set the port and an
+  optional Bearer token (auth is off by default; the token defaults to a
+  random UUID v4). The MCP Config panel generates the matching JSON config
+  for copying into your MCP client.
 
 By default the bot tries to connect to `127.0.0.1:25565` as `AI_Bot`. Tweak
 settings in the UI panel or via environment before startup (see

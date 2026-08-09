@@ -14,7 +14,8 @@ thread.
 | `mcp_transport` | `Http` | MCP transport: `Stdio` or `Http` |
 | `mcp_address` | `127.0.0.1` | MCP HTTP bind address (loopback only) |
 | `mcp_port` | `3000` | MCP HTTP port |
-| `mcp_token` | `minecraft-mcp-rs` | Bearer token for HTTP transport |
+| `mcp_auth_enabled` | `false` | Require a Bearer token over HTTP (off by default) |
+| `mcp_token` | random UUID v4 | Bearer token for HTTP transport (optional; only checked when auth is enabled) |
 | `chunk_scan_radius` | `8` | Chunks to scan (1–16) |
 | `block_perception_radius` | `32` | Block awareness range (8–64) |
 | `snapshot_interval_ms` | `500` | World snapshot interval |
@@ -42,10 +43,14 @@ The binary accepts a small set of flags:
 
 | Flag | Description |
 |------|-------------|
+| `--gui` | Open the desktop UI |
 | `--headless` | No desktop window; auto-connect the bot and exit when the MCP transport closes |
-| `--stdio` | Force the MCP stdio transport (overrides the config) |
+| `--stdio` | Force the MCP stdio transport (overrides the config); alone (without `--gui`) this implies headless mode |
 | `--config <path>` | Load the config file at `<path>` |
 | `-h`, `--help` | Print usage to stderr and exit |
+
+With no arguments the binary prints help and exits 0; `--gui` opens the
+desktop UI.
 
 In headless mode the bot auto-connects on startup, and an agent-driven config
 change (via the `update_settings` MCP tool) that touches the server
