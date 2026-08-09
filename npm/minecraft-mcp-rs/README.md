@@ -5,7 +5,8 @@ MCP server that controls a Minecraft bot (azalea) — prebuilt native binaries.
 ## Usage
 
 ```bash
-npx minecraft-mcp-rs --headless --stdio
+npx -y minecraft-mcp-rs@latest --headless --stdio
+bunx minecraft-mcp-rs@latest --headless --stdio
 ```
 
 or install globally:
@@ -22,11 +23,14 @@ For Claude Desktop / Cursor, add to your MCP client config:
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@latest", "--headless", "--stdio"]
     }
   }
 }
 ```
+
+> Using bun? Replace `"command": "npx"` with `"command": "bunx"` and drop the
+> `-y` flag (bunx installs on demand without prompting).
 
 See the [root README](https://github.com/halfoffive/minecraft-mcp-rs#readme) for
 the full documentation (config file, MCP tools, CLI flags).
