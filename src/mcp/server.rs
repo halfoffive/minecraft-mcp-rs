@@ -588,23 +588,49 @@ fn is_bearer_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
         .is_some_and(|token| !token.is_empty() && constant_time_eq(token, expected_token))
 }
 
+/// Decide whether an HTTP request passes Bearer-token authentication.
+///
+/// Pure, side-effect-free decision used by [`bearer_auth_middleware`] so the
+/// auth policy is testable without a router. Three ordered rules:
+///
+/// 1. **Auth off** (`auth_enabled == false`) → `true` immediately. This
+///    short-circuits BEFORE any token comparison, so no timing side channel
+///    is reachable when authentication is disabled.
+/// 2. **Empty configured token** → `false`. An empty `expected_token` with
+///    auth enabled is a misconfiguration (fail-closed, never open) — the
+///    config layer's `validate()` forbids this combination.
+/// 3. Otherwise delegate to [`is_bearer_authorized`], which compares via
+///    [`constant_time_eq`] to avoid a timing side channel.
+fn is_request_authorized(auth_enabled: bool, expected_token: &str, headers: &HeaderMap) -> bool {
+    if !auth_enabled {
+        return true;
+    }
+    if expected_token.is_empty() {
+        return false;
+    }
+    is_bearer_authorized(headers, expected_token)
+}
+
 /// Axum middleware that enforces the configured Bearer token.
 ///
 /// Returns 401 Unauthorized for missing, empty, or mismatched tokens when
-/// a token is configured. If the configured token is empty, authentication
-/// is disabled (all requests pass through). Valid requests are forwarded
-/// to the inner MCP streamable HTTP handler.
+/// authentication is enabled (`mcp_auth_enabled`). If authentication is
+/// disabled, all requests pass through. Valid requests are forwarded to the
+/// inner MCP streamable HTTP handler.
 async fn bearer_auth_middleware(
     State(state): State<Arc<SharedState>>,
     request: Request,
     next: Next,
 ) -> Response {
-    let expected_token = state.read_config().mcp_token.clone();
-    // If no token is configured, skip authentication entirely
-    if expected_token.is_empty() {
-        return next.run(request).await;
-    }
-    if is_bearer_authorized(request.headers(), &expected_token) {
+    // Scope the config read guard tightly: `RwLockReadGuard` is `!Send`, so
+    // keeping it alive across `next.run(request).await` would make the
+    // middleware future non-`Send` and break axum's `FromFn` Service impl.
+    // The guard is dropped here, before the request is moved into `next.run`.
+    let authorized = {
+        let cfg = state.read_config();
+        is_request_authorized(cfg.mcp_auth_enabled, &cfg.mcp_token, request.headers())
+    };
+    if authorized {
         next.run(request).await
     } else {
         (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
@@ -697,6 +723,7 @@ mod tests {
     use super::*;
     use crate::channel::create_command_channel;
     use crate::config::AppConfig;
+    use axum::http::HeaderValue;
 
     /// Verify get_info() returns the expected server name.
     #[test]
@@ -1230,5 +1257,60 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("Authorization", "Bearer ".parse().unwrap());
         assert!(!is_bearer_authorized(&headers, "expected-secret"));
+    }
+
+    // ── is_request_authorized pure-function tests ───────────────────────
+
+    /// Auth disabled: every request passes, even with no/mismatched header.
+    /// The auth-ON code path must be short-circuited BEFORE any token
+    /// comparison (no timing side channel is reachable when auth is off).
+    #[test]
+    fn test_is_request_authorized_off_passes() {
+        let headers = HeaderMap::new();
+        assert!(is_request_authorized(false, "sekrit", &headers));
+
+        // Also verify a fully-present token that would match is moot when
+        // auth is disabled — auth-off bypasses the whole comparison.
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", HeaderValue::from_static("Bearer sekrit"));
+        assert!(is_request_authorized(false, "sekrit", &headers));
+    }
+
+    /// Auth enabled with an empty configured token: reject ALL requests.
+    /// An empty expected token is a misconfiguration (validate() forbids it
+    /// when auth is on) and must fail closed, never open.
+    #[test]
+    fn test_is_request_authorized_on_empty_token_rejects() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", HeaderValue::from_static("Bearer sekrit"));
+        assert!(!is_request_authorized(true, "", &headers));
+
+        // Even a matching-looking empty bearer token cannot pass.
+        let mut headers2 = HeaderMap::new();
+        headers2.insert("Authorization", HeaderValue::from_static("Bearer "));
+        assert!(!is_request_authorized(true, "", &headers2));
+    }
+
+    /// Auth enabled + correct token: passes.
+    #[test]
+    fn test_is_request_authorized_on_correct_token_passes() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", HeaderValue::from_static("Bearer sekrit"));
+        assert!(is_request_authorized(true, "sekrit", &headers));
+    }
+
+    /// Auth enabled + wrong token: rejected (constant-time compare).
+    #[test]
+    fn test_is_request_authorized_on_wrong_token_rejects() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", HeaderValue::from_static("Bearer wrong"));
+        assert!(!is_request_authorized(true, "sekrit", &headers));
+    }
+
+    /// Auth enabled + non-empty token + no Authorization header: rejected.
+    #[test]
+    fn test_is_request_authorized_on_missing_header_rejects() {
+        let headers = HeaderMap::new();
+        assert!(!is_request_authorized(true, "sekrit", &headers));
     }
 }
