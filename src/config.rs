@@ -107,6 +107,12 @@ pub struct AppConfig {
     /// surfaces (e.g. the `get_settings` MCP tool) must redact it.
     #[serde(default = "default_mcp_token")]
     pub mcp_token: String,
+    /// Whether MCP clients must present a valid bearer token (default:
+    /// `false`). When `true`, [`AppConfig::validate`] rejects an empty
+    /// [`AppConfig::mcp_token`]; when `false`, an empty token is allowed
+    /// (e.g. stdio transport or a trusted loopback network).
+    #[serde(default)]
+    pub mcp_auth_enabled: bool,
     /// Transport the MCP server uses to communicate with clients
     /// (default: [`McpTransport::Http`]).
     #[serde(default)]
@@ -205,6 +211,7 @@ impl Default for AppConfig {
             reconnect_max_delay_ms: default_reconnect_max_delay_ms(),
             command_timeout_secs: default_command_timeout_secs(),
             mcp_token: default_mcp_token(),
+            mcp_auth_enabled: false,
             mcp_transport: McpTransport::default(),
             language: Language::from_system_locale(),
         }
@@ -265,8 +272,8 @@ impl AppConfig {
         if self.command_timeout_secs == 0 {
             return Err("command_timeout_secs must be greater than 0".into());
         }
-        if self.mcp_token.is_empty() {
-            return Err("mcp_token must not be empty".into());
+        if self.mcp_auth_enabled && self.mcp_token.is_empty() {
+            return Err("mcp_token must not be empty when auth is enabled".into());
         }
         Ok(())
     }
@@ -561,10 +568,62 @@ mod tests {
 
     #[test]
     fn test_validate_rejects_empty_token() {
+        // An empty token is only rejected when auth is enabled.
         let mut config = AppConfig::default();
+        config.mcp_auth_enabled = true;
         config.mcp_token.clear();
         let err = config.validate().unwrap_err();
         assert!(err.contains("mcp_token"), "got: {err}");
+    }
+
+    #[test]
+    fn test_default_auth_disabled() {
+        // Auth must be opt-in: existing stdio / trusted-loopback setups keep
+        // working without a token.
+        let config = AppConfig::default();
+        assert!(!config.mcp_auth_enabled);
+    }
+
+    #[test]
+    fn test_validate_allows_empty_token_when_auth_off() {
+        let mut config = AppConfig::default();
+        config.mcp_auth_enabled = false;
+        config.mcp_token.clear();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_token_when_auth_on() {
+        let mut config = AppConfig::default();
+        config.mcp_auth_enabled = true;
+        config.mcp_token.clear();
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("auth"), "got: {err}");
+    }
+
+    #[test]
+    fn test_old_config_without_auth_field_deserializes() {
+        // A JSON payload lacking the `mcp_auth_enabled` field (as written by
+        // older binaries before MCP auth existed) must still deserialize,
+        // with the field falling back to its `#[serde(default)]` value.
+        let json = r#"{
+            "mc_address": "127.0.0.1",
+            "mc_port": 25565,
+            "ai_username": "AI_Bot",
+            "mcp_address": "127.0.0.1",
+            "mcp_port": 3000,
+            "task_name": "mining",
+            "chunk_scan_radius": 8,
+            "block_perception_radius": 32,
+            "snapshot_interval_ms": 500,
+            "reconnect_initial_delay_ms": 5000,
+            "reconnect_max_delay_ms": 60000,
+            "command_timeout_secs": 30,
+            "mcp_token": "minecraft-mcp-rs",
+            "mcp_transport": "Http"
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).expect("must deserialize");
+        assert!(!config.mcp_auth_enabled);
     }
 
     // -- Validation: chunk_scan_radius --------------------------------------
@@ -799,6 +858,7 @@ mod tests {
         config.reconnect_max_delay_ms = 30_000;
         config.command_timeout_secs = 10;
         config.mcp_token = "roundtrip-token-123".into();
+        config.mcp_auth_enabled = true;
         config.mcp_transport = McpTransport::Stdio;
         config.language = Language::ZhCn;
         config
@@ -860,6 +920,7 @@ mod tests {
         // The token MUST roundtrip — persistence is the whole point of
         // removing `skip_serializing`.
         assert_eq!(loaded.mcp_token, original.mcp_token);
+        assert_eq!(loaded.mcp_auth_enabled, original.mcp_auth_enabled);
         assert_eq!(loaded.mcp_transport, original.mcp_transport);
         assert_eq!(loaded.language, original.language);
     }
