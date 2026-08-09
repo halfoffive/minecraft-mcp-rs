@@ -19,11 +19,11 @@ const { spawnSync } = require("node:child_process");
 // The binary names match what the CI npm-publish job stages into each
 // platform package (see .github/workflows/release.yml).
 const PLATFORMS = {
-  "win32-x64": ["minecraft-mcp-rs-windows-x64", "minecraft-mcp-rs.exe"],
-  "win32-arm64": ["minecraft-mcp-rs-windows-arm64", "minecraft-mcp-rs.exe"],
-  "darwin-arm64": ["minecraft-mcp-rs-darwin-arm64", "minecraft-mcp-rs"],
-  "linux-x64": ["minecraft-mcp-rs-linux-x64", "minecraft-mcp-rs"],
-  "linux-arm64": ["minecraft-mcp-rs-linux-arm64", "minecraft-mcp-rs"],
+  "win32-x64": ["@minecraft-mcp-rs/minecraft-mcp-rs-windows-x64", "minecraft-mcp-rs.exe"],
+  "win32-arm64": ["@minecraft-mcp-rs/minecraft-mcp-rs-windows-arm64", "minecraft-mcp-rs.exe"],
+  "darwin-arm64": ["@minecraft-mcp-rs/minecraft-mcp-rs-darwin-arm64", "minecraft-mcp-rs"],
+  "linux-x64": ["@minecraft-mcp-rs/minecraft-mcp-rs-linux-x64", "minecraft-mcp-rs"],
+  "linux-arm64": ["@minecraft-mcp-rs/minecraft-mcp-rs-linux-arm64", "minecraft-mcp-rs"],
 };
 
 const platformKey = `${process.platform}-${process.arch}`;

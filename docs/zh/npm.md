@@ -39,11 +39,11 @@ npx minecraft-mcp-rs --headless --stdio
 
 | 包名 | 平台 |
 |---------|----------|
-| `minecraft-mcp-rs-windows-x64` | Windows x64 |
-| `minecraft-mcp-rs-windows-arm64` | Windows arm64 |
-| `minecraft-mcp-rs-darwin-arm64` | macOS arm64 |
-| `minecraft-mcp-rs-linux-x64` | Linux x64 |
-| `minecraft-mcp-rs-linux-arm64` | Linux arm64 |
+| `@minecraft-mcp-rs/minecraft-mcp-rs-windows-x64` | Windows x64 |
+| `@minecraft-mcp-rs/minecraft-mcp-rs-windows-arm64` | Windows arm64 |
+| `@minecraft-mcp-rs/minecraft-mcp-rs-darwin-arm64` | macOS arm64 |
+| `@minecraft-mcp-rs/minecraft-mcp-rs-linux-x64` | Linux x64 |
+| `@minecraft-mcp-rs/minecraft-mcp-rs-linux-arm64` | Linux arm64 |
 
 ## 故障排查
 
