@@ -7,7 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`--gui` CLI flag:** the desktop UI can now be requested explicitly, and a
+  bare invocation with no arguments prints the usage to stderr and exits 0
+  instead of silently starting the UI. `--stdio` alone (without `--gui`) now
+  implies headless server mode; when both are given, precedence is
+  `--headless` > `--gui`.
+- **`mcp_auth_enabled` HTTP Bearer-token switch (default OFF):** new config
+  field gating the HTTP transport's token check. `validate()` rejects an
+  empty token only when auth is enabled; an axum middleware gate
+  (`is_request_authorized`, timing-safe compare, fail-closed when enabled)
+  enforces the `Authorization` header at request time; `get_settings` /
+  `update_settings` expose the flag (raw bool, not redacted); the Settings
+  panel renders a "Require Bearer token" checkbox (HTTP transport only); the
+  MCP Config panel omits the `Authorization` header from generated JSON when
+  auth is off. Upgrade note: existing configs keep their persisted token, but
+  auth is OFF by default after upgrading.
+- **bunx variant of the MCP client config snippet:** the MCP Config panel and
+  the docs now offer a `bunx minecraft-mcp-rs@latest --headless --stdio`
+  snippet alongside the existing `npx` one.
+
+### Changed
+
+- **Release builds keep the Windows console:** the `windows_subsystem`
+  attribute was removed, so release builds no longer hide the console window;
+  `tracing` logs are visible on startup in every build configuration.
+- **`@latest` pinned in client snippets:** documentation and the UI MCP Config
+  panel now recommend `npx -y minecraft-mcp-rs@latest --headless --stdio` and
+  `bunx minecraft-mcp-rs@latest --headless --stdio`, so MCP clients always
+  fetch the newest published release.
+
+### Fixed
+
+- **Wrong Minecraft port no longer hangs (audit verdict):** the first
+  connection attempt retries at most 3 times, then fail-fasts with the error
+  surfaced in the Status panel; clicking Disconnect during a connect attempt
+  aborts it immediately (`tokio::select!` + cancellation token + ECS
+  `AppExit`); HTTP bind failures surface via `McpServerStatus::Failed` with
+  red Status-panel text. See `src/bot/connection.rs:210-221,254-297` and
+  `src/state.rs:379-392`.
 
 ## [1.1.2] - 2026-08-09
 
