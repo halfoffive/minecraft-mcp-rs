@@ -43,10 +43,11 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 
   **实时世界状态** —— 机器人会定期将周围环境快照保存到线程安全的 `SharedState`，所有工具均可读取。
 
-- **Remote MCP HTTP server** — loopback-only (`127.0.0.1`), Bearer-token
-  protected; transport mode (stdio / HTTP) selectable in the UI
+- **Remote MCP HTTP server** — loopback-only (`127.0.0.1`), optional
+  Bearer-token auth (off by default); transport mode (stdio / HTTP) selectable
+  in the UI
 
-  **远程 MCP HTTP 服务** —— 仅限本地回环（`127.0.0.1`），受 Bearer Token 保护；stdio / HTTP 传输模式可在 UI 中选择。
+  **远程 MCP HTTP 服务** —— 仅限本地回环（`127.0.0.1`），可选 Bearer Token 鉴权（默认关闭）；stdio / HTTP 传输模式可在 UI 中选择。
 
 - **AI vision for multimodal models** — `get_world_view` renders a top-down PNG
   of nearby blocks and returns it as base64
@@ -158,7 +159,8 @@ demand):
 或无需安装直接运行（各平台的二进制按需下载）：
 
 ```bash
-npx minecraft-mcp-rs --headless --stdio
+npx -y minecraft-mcp-rs@latest --headless --stdio
+bunx minecraft-mcp-rs@latest --headless --stdio
 ```
 
 Ready-to-paste Claude Desktop / Cursor config (stdio implies the bot runs
@@ -171,11 +173,16 @@ headless and exits when the MCP client disconnects):
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@latest", "--headless", "--stdio"]
     }
   }
 }
 ```
+
+For bunx users, replace `"command": "npx"` with `"command": "bunx"` and drop
+the `-y` flag.
+
+使用 bunx 的用户请将 `"command": "npx"` 替换为 `"command": "bunx"`，并去掉 `-y` 参数。
 
 > For maintainers: npm publishing uses the `NPM_TOKEN` secret (a granular
 > access token) in the GitHub `release.yml` workflow. NEVER commit the token
@@ -193,13 +200,15 @@ full usage):
 | Flag / 参数 | Description / 说明 |
 |-------------|---------------------|
 | `--headless` | Run without the desktop window; auto-connect the bot and exit when the MCP transport closes / 无桌面窗口运行；自动连接机器人，MCP 传输关闭时退出进程 |
-| `--stdio` | Force the MCP stdio transport (overrides the configured transport) / 强制使用 MCP stdio 传输（覆盖配置中的传输方式） |
+| `--gui` | Open the desktop window explicitly / 显式打开桌面窗口 |
+| `--stdio` | Force the MCP stdio transport; implies headless when used alone (overrides the configured transport) / 强制使用 MCP stdio 传输；单独使用时隐含无头模式（覆盖配置中的传输方式） |
 | `--config <path>` | Load the config file at `<path>` instead of the OS config dir / 从指定路径加载配置文件（替代系统配置目录） |
 | `-h`, `--help` | Print usage to stderr and exit / 打印用法到 stderr 并退出 |
 
-With no flags the desktop UI starts (the classic mode).
+With NO arguments the binary prints help and exits; use `--gui` to open the
+desktop UI.
 
-不带任何参数时启动桌面 UI（经典模式）。
+不带任何参数时，二进制打印帮助信息并退出；使用 `--gui` 打开桌面 UI。
 
 ## Quick Start
 
@@ -222,11 +231,15 @@ cargo build
 ### Run
 
 ```bash
-cargo run
+cargo run              # no args: prints help and exits
+cargo run -- --gui     # starts the egui desktop UI
+cargo run -- --stdio   # headless: stdio MCP server only, no window
 ```
 
-This starts both the MCP server and the egui desktop UI. Choose the MCP
-transport in the Settings panel:
+`cargo run` with no arguments prints the help text and exits. Pass `--gui` to
+start the egui desktop UI, or `--stdio` alone to run headless (the MCP server
+listens on stdin/stdout, the mode Claude Desktop / Cursor use). In the UI,
+choose the MCP transport in the Settings panel:
 
 - **stdio** — the MCP server listens on stdin/stdout (default for Claude
   Desktop / Cursor).
@@ -235,7 +248,7 @@ transport in the Settings panel:
   override it in the Settings panel). The MCP Config panel generates the
   matching JSON config for copying into your MCP client.
 
-运行后会同时启动 MCP 服务器与 egui 桌面 UI。在“设置”面板中选择 MCP 传输方式：
+运行 `cargo run`（不带参数）会打印帮助信息并退出。传入 `--gui` 启动 egui 桌面 UI，单独传入 `--stdio` 则以无头模式运行（MCP 服务器监听标准输入 / 输出，即 Claude Desktop / Cursor 使用的模式）。在 UI 的“设置”面板中选择 MCP 传输方式：
 
 - **stdio** —— MCP 服务器监听标准输入 / 输出（Claude Desktop / Cursor 的默认方式）。
 - **HTTP** —— MCP 服务器仅绑定到 `127.0.0.1`；可在 UI 中设置端口与 Bearer Token（每次 `AppConfig::default()` 时随机生成 UUID v4，可在设置面板中覆盖）。MCP 配置面板会生成对应的 JSON 配置，可复制到你的 MCP 客户端中。
@@ -328,7 +341,8 @@ settings tools (`get_settings` / `update_settings`).
 | `mcp_transport` | `Http` | MCP transport: `Stdio` or `Http` / MCP 传输方式：`Stdio` 或 `Http` |
 | `mcp_address` | `127.0.0.1` | MCP HTTP bind address (loopback only) / MCP HTTP 绑定地址（仅本地回环） |
 | `mcp_port` | `3000` | MCP HTTP port / MCP HTTP 端口 |
-| `mcp_token` | random UUID v4 | Bearer token for HTTP transport (generated on each `AppConfig::default()`) / HTTP 传输的 Bearer Token（每次 `AppConfig::default()` 时随机生成） |
+| `mcp_token` | random UUID v4 | Bearer token for HTTP transport, used only when auth is enabled (generated on each `AppConfig::default()`) / HTTP 传输的 Bearer Token，仅在启用鉴权时使用（每次 `AppConfig::default()` 时随机生成） |
+| `mcp_auth_enabled` | `false` | Require a Bearer token over HTTP / 要求 HTTP 请求携带 Bearer Token |
 | `language` | `En` | UI language: `En` or `ZhCn` / UI 语言：`En` 或 `ZhCn` |
 | `chunk_scan_radius` | `8` | Chunks to scan (1–16) / 扫描区块半径（1–16） |
 | `block_perception_radius` | `32` | Block awareness range (8–64) / 方块感知范围（8–64） |
@@ -353,13 +367,14 @@ reloaded on every startup — file values override defaults:
 | macOS | `~/Library/Application Support/minecraft-mcp-rs/config.json` |
 
 The `mcp_token` is persisted too (write is atomic: temp file + rename, `0600`
-on Unix). An agent can also change any setting — including the Minecraft
+on Unix). After upgrading, HTTP auth is off by default even for configs that
+contain a token. An agent can also change any setting — including the Minecraft
 server — through the MCP settings tools; changing
 `mc_address`/`mc_port`/`ai_username` while connected triggers an automatic
 reconnect, while `mcp_transport`/`mcp_address`/`mcp_port` take effect on the
 next process restart.
 
-`mcp_token` 也会被持久化（原子写入：临时文件 + 重命名，Unix 下权限为 `0600`）。AI 代理还可以通过 MCP 设置工具修改任意设置——包括 Minecraft 服务器地址；已连接时修改 `mc_address`/`mc_port`/`ai_username` 会自动触发重连，而 `mcp_transport`/`mcp_address`/`mcp_port` 的变更在下次进程重启时生效。
+`mcp_token` 也会被持久化（原子写入：临时文件 + 重命名，Unix 下权限为 `0600`）。升级后，即使配置文件中包含 Token，HTTP 鉴权默认也是关闭的。AI 代理还可以通过 MCP 设置工具修改任意设置——包括 Minecraft 服务器地址；已连接时修改 `mc_address`/`mc_port`/`ai_username` 会自动触发重连，而 `mcp_transport`/`mcp_address`/`mcp_port` 的变更在下次进程重启时生效。
 
 ### Error contract / 错误契约
 
