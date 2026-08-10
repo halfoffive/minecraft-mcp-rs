@@ -214,7 +214,7 @@ fn build_mcp_config_json(edit: &EditConfig) -> String {
 }
 
 /// The exact npm package specifier for the published binary, e.g.
-/// `minecraft-mcp-rs@1.1.2`.
+/// `minecraft-mcp-rs@<version>`.
 ///
 /// Derived from `env!("CARGO_PKG_VERSION")` so the pin can never drift from
 /// the Cargo.toml version — the npm packages share that version via
