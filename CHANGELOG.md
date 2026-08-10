@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   auth is off. Upgrade note: existing configs keep their persisted token, but
   auth is OFF by default after upgrading.
 - **bunx variant of the MCP client config snippet:** the MCP Config panel and
-  the docs now offer a `bunx minecraft-mcp-rs@latest --headless --stdio`
+  the docs now offer a `bunx minecraft-mcp-rs@1.1.2 --headless --stdio`
   snippet alongside the existing `npx` one.
 
 ### Changed
@@ -33,10 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Release builds keep the Windows console:** the `windows_subsystem`
   attribute was removed, so release builds no longer hide the console window;
   `tracing` logs are visible on startup in every build configuration.
-- **`@latest` pinned in client snippets:** documentation and the UI MCP Config
-  panel now recommend `npx -y minecraft-mcp-rs@latest --headless --stdio` and
-  `bunx minecraft-mcp-rs@latest --headless --stdio`, so MCP clients always
-  fetch the newest published release.
+- **Version-pinned client snippets:** documentation and the UI MCP Config
+  panel now pin an exact release (`minecraft-mcp-rs@1.1.2`). The UI snippet
+  derives the version from `env!("CARGO_PKG_VERSION")` so it never goes stale;
+  markdown docs use a literal `@1.1.2` (bump it whenever the Cargo/npm version
+  changes).
+- **Single-Minecraft-version notice + compatibility table:** the README,
+  getting-started guides, and npm install docs now state that **only
+  Minecraft Java Edition 1.21.11** is supported (no multi-version support) and
+  include a server-version → tool-version table (1.21.11 ↔ 1.1.2) so users
+  pick the correct release for their server.
 
 ### Fixed
 
