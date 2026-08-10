@@ -213,18 +213,30 @@ fn build_mcp_config_json(edit: &EditConfig) -> String {
     serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".to_owned())
 }
 
+/// The exact npm package specifier for the published binary, e.g.
+/// `minecraft-mcp-rs@1.1.2`.
+///
+/// Derived from `env!("CARGO_PKG_VERSION")` so the pin can never drift from
+/// the Cargo.toml version — the npm packages share that version via
+/// `npm/scripts/sync-versions.mjs` on release. We pin an exact version (never
+/// the floating `@latest` tag) so MCP clients get a reproducible binary.
+fn npm_package_pin() -> String {
+    format!("minecraft-mcp-rs@{}", env!("CARGO_PKG_VERSION"))
+}
+
 /// Build the npm / npx variant of the MCP client config JSON.
 ///
 /// Launches the published npm package through `npx` — no Rust toolchain
 /// needed on the client machine. Requires the package to be published (see
 /// `npm/` and the `npm-publish` CI job); the args mirror the flags the
-/// binary parses: `--headless --stdio`.
+/// binary parses: `--headless --stdio`. The package specifier is pinned to
+/// the exact version via [`npm_package_pin`] (drift-proof against Cargo).
 fn build_npx_config_json() -> String {
     let json = serde_json::json!({
         "mcpServers": {
             "minecraft": {
                 "command": "npx",
-                "args": ["-y", "minecraft-mcp-rs@latest", "--headless", "--stdio"]
+                "args": ["-y", npm_package_pin(), "--headless", "--stdio"]
             }
         }
     });
@@ -235,13 +247,15 @@ fn build_npx_config_json() -> String {
 ///
 /// Same idea as [`build_npx_config_json`] but for users on Bun: `bunx`
 /// auto-installs the package without prompting, so no `-y` flag is needed
-/// (unlike `npx`). The args still mirror the binary's headless stdio flags.
+/// (unlike `npx`). The args still mirror the binary's headless stdio flags,
+/// and the package specifier is pinned to the exact version via
+/// [`npm_package_pin`].
 fn build_bunx_config_json() -> String {
     let json = serde_json::json!({
         "mcpServers": {
             "minecraft": {
                 "command": "bunx",
-                "args": ["minecraft-mcp-rs@latest", "--headless", "--stdio"]
+                "args": [npm_package_pin(), "--headless", "--stdio"]
             }
         }
     });
@@ -445,8 +459,12 @@ mod tests {
         assert!(json.contains("-y"), "missing -y flag: {json}");
         assert!(json.contains("minecraft-mcp-rs"), "missing package: {json}");
         assert!(
-            json.contains("minecraft-mcp-rs@latest"),
-            "missing @latest pin: {json}"
+            json.contains(&format!("minecraft-mcp-rs@{}", env!("CARGO_PKG_VERSION"))),
+            "missing version-pinned package: {json}"
+        );
+        assert!(
+            !json.contains("@latest"),
+            "must not use @latest, should pin the Cargo version: {json}"
         );
         assert!(json.contains("--headless"), "missing --headless: {json}");
         assert!(json.contains("--stdio"), "missing --stdio: {json}");
@@ -463,14 +481,32 @@ mod tests {
         let json = build_bunx_config_json();
         assert!(json.contains("bunx"), "missing bunx command: {json}");
         assert!(
-            json.contains("minecraft-mcp-rs@latest"),
-            "missing @latest package: {json}"
+            json.contains(&format!("minecraft-mcp-rs@{}", env!("CARGO_PKG_VERSION"))),
+            "missing version-pinned package: {json}"
+        );
+        assert!(
+            !json.contains("@latest"),
+            "must not use @latest, should pin the Cargo version: {json}"
         );
         assert!(json.contains("--headless"), "missing --headless: {json}");
         assert!(json.contains("--stdio"), "missing --stdio: {json}");
         assert!(
             !json.contains("\"-y\""),
             "bunx must NOT use -y (it auto-installs without prompting): {json}"
+        );
+    }
+
+    #[test]
+    fn test_package_pin_matches_cargo_version() {
+        let pin = npm_package_pin();
+        assert_eq!(
+            pin,
+            format!("minecraft-mcp-rs@{}", env!("CARGO_PKG_VERSION")),
+            "pin must match the Cargo.toml version"
+        );
+        assert!(
+            !pin.contains("@latest"),
+            "pin must never be the floating @latest tag: {pin}"
         );
     }
 }
