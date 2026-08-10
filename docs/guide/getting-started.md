@@ -7,8 +7,14 @@ Minecraft bot controlled via the Model Context Protocol (MCP).
 
 - [Rust nightly](https://rustup.rs/) — pinned in `rust-toolchain.toml`
   (edition 2024; azalea 0.15.1's build script requires nightly)
-- A **Minecraft Java Edition 1.21.11** server (local or remote)
+- A **Minecraft Java Edition 1.21.11** server (local or remote) — **the only supported version**
 - An **MCP client** — Claude Desktop, Cursor, or any MCP-compatible LLM host
+
+> Only **Minecraft Java Edition 1.21.11** is supported — no other server version works. If your server runs a different version, install the matching `minecraft-mcp-rs` release (see [npm install](../npm#version-compatibility)).
+
+| Minecraft server version | minecraft-mcp-rs version |
+|--------------------------|--------------------------|
+| 1.21.11                  | 1.1.2                    |
 
 ## Build
 

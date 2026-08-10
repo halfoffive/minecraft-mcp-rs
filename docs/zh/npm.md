@@ -13,8 +13,8 @@ npm install -g minecraft-mcp-rs
 或按需运行（首次运行时会下载匹配平台的二进制）：
 
 ```bash
-npx -y minecraft-mcp-rs@latest --headless --stdio
-bunx minecraft-mcp-rs@latest --headless --stdio
+npx -y minecraft-mcp-rs@1.1.2 --headless --stdio
+bunx minecraft-mcp-rs@1.1.2 --headless --stdio
 ```
 
 ## Claude Desktop / Cursor 配置
@@ -26,7 +26,7 @@ bunx minecraft-mcp-rs@latest --headless --stdio
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs@latest", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@1.1.2", "--headless", "--stdio"]
     }
   }
 }
@@ -39,11 +39,21 @@ bunx minecraft-mcp-rs@latest --headless --stdio
   "mcpServers": {
     "minecraft": {
       "command": "bunx",
-      "args": ["minecraft-mcp-rs@latest", "--headless", "--stdio"]
+      "args": ["minecraft-mcp-rs@1.1.2", "--headless", "--stdio"]
     }
   }
 }
 ```
+
+## 版本兼容性
+
+minecraft-mcp-rs **仅支持 Minecraft Java Edition 1.21.11**，其他 Minecraft 版本**均不支持**——请选择与你服务器版本匹配的 minecraft-mcp-rs 版本：
+
+| Minecraft 服务器版本 | minecraft-mcp-rs 版本 |
+|----------------------|-----------------------|
+| 1.21.11              | 1.1.2                 |
+
+上面示例中的 `@1.1.2` 是刻意固定的版本号：不同的工具版本可能对应不同的 Minecraft 版本。请始终安装与你服务器版本匹配的发行版，并在每次升级前重新核对此表。
 
 ## 平台包
 

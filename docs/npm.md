@@ -15,8 +15,8 @@ npm install -g minecraft-mcp-rs
 or run it on demand (downloads the matching platform binary the first time):
 
 ```bash
-npx -y minecraft-mcp-rs@latest --headless --stdio
-bunx minecraft-mcp-rs@latest --headless --stdio
+npx -y minecraft-mcp-rs@1.1.2 --headless --stdio
+bunx minecraft-mcp-rs@1.1.2 --headless --stdio
 ```
 
 ## Claude Desktop / Cursor config
@@ -28,7 +28,7 @@ Add this to your MCP client config:
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs@latest", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@1.1.2", "--headless", "--stdio"]
     }
   }
 }
@@ -42,7 +42,7 @@ installs and runs packages without prompting):
   "mcpServers": {
     "minecraft": {
       "command": "bunx",
-      "args": ["minecraft-mcp-rs@latest", "--headless", "--stdio"]
+      "args": ["minecraft-mcp-rs@1.1.2", "--headless", "--stdio"]
     }
   }
 }
@@ -50,6 +50,20 @@ installs and runs packages without prompting):
 
 `--headless` runs without the desktop window and exits the process when the
 MCP transport closes; `--stdio` forces the stdio transport.
+
+## Version compatibility
+
+minecraft-mcp-rs supports **only Minecraft Java Edition 1.21.11**. Other
+Minecraft versions are **NOT** supported — pick the minecraft-mcp-rs version
+that matches your server:
+
+| Minecraft server version | minecraft-mcp-rs version |
+|--------------------------|--------------------------|
+| 1.21.11                  | 1.1.2                    |
+
+The `@1.1.2` pins in the snippets above are intentional: a different tool
+version may target a different Minecraft version. Always install the exact
+release matching your server, and re-check this table before every upgrade.
 
 ## Platform packages
 

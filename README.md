@@ -24,6 +24,18 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 
 该机器人目标版本为 **Minecraft Java Edition 1.21.11**（通过 azalea 0.15.1 实现）。
 
+> ⚠ **Single Minecraft version / 仅支持单一 Minecraft 版本**
+>
+> This tool supports **only Minecraft Java Edition 1.21.11** — other Minecraft versions are **NOT** supported. There is no multi-version compatibility layer.
+>
+> 本工具**仅支持 Minecraft Java Edition 1.21.11**——其他 Minecraft 版本**均不支持**。本工具没有多版本兼容层。
+>
+> | Minecraft server version / MC 服务器版本 | minecraft-mcp-rs version / 工具版本 |
+> |---|---|
+> | 1.21.11 | 1.1.2 |
+>
+> Pick the minecraft-mcp-rs version that matches your Minecraft server, and re-check this table before every upgrade. / 请选择与你的 Minecraft 服务器版本匹配的 minecraft-mcp-rs 版本，并在每次升级前重新核对此表。
+
 [azalea]: https://github.com/azalea-rs/azalea
 
 ## Features
@@ -159,8 +171,8 @@ demand):
 或无需安装直接运行（各平台的二进制按需下载）：
 
 ```bash
-npx -y minecraft-mcp-rs@latest --headless --stdio
-bunx minecraft-mcp-rs@latest --headless --stdio
+npx -y minecraft-mcp-rs@1.1.2 --headless --stdio
+bunx minecraft-mcp-rs@1.1.2 --headless --stdio
 ```
 
 Ready-to-paste Claude Desktop / Cursor config (stdio implies the bot runs
@@ -173,7 +185,7 @@ headless and exits when the MCP client disconnects):
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs@latest", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@1.1.2", "--headless", "--stdio"]
     }
   }
 }
@@ -215,10 +227,10 @@ desktop UI.
 ### Prerequisites
 
 - [Rust nightly](https://rustup.rs/) (pinned in `rust-toolchain.toml`, edition 2024; azalea 0.15.1 requires nightly)
-- A Minecraft Java Edition 1.21.11 server (local or remote)
+- A **Minecraft Java Edition 1.21.11** server (local or remote) — **the only supported Minecraft version**
 - An MCP client (Claude Desktop, Cursor, or any MCP-compatible LLM host)
 
-前置条件：需要安装 [Rust nightly](https://rustup.rs/)（`rust-toolchain.toml` 已固定，edition 2024；azalea 0.15.1 要求 nightly）、一个 Minecraft Java Edition 1.21.11 服务器（本地或远程），以及一个 MCP 客户端（Claude Desktop、Cursor 或任何兼容 MCP 的 LLM 宿主）。
+前置条件：需要安装 [Rust nightly](https://rustup.rs/)（`rust-toolchain.toml` 已固定，edition 2024；azalea 0.15.1 要求 nightly）、一个 **Minecraft Java Edition 1.21.11** 服务器（本地或远程，**唯一受支持的 Minecraft 版本**），以及一个 MCP 客户端（Claude Desktop、Cursor 或任何兼容 MCP 的 LLM 宿主）。
 
 ### Build
 

@@ -7,8 +7,14 @@ Minecraft 机器人 —— 的构建、运行与测试。
 
 - [Rust nightly](https://rustup.rs/) —— 在 `rust-toolchain.toml` 中固定
   （edition 2024；azalea 0.15.1 的构建脚本要求 nightly）
-- 一个 **Minecraft Java Edition 1.21.11** 服务器（本地或远程均可）
+- 一个 **Minecraft Java Edition 1.21.11** 服务器（本地或远程均可）——**唯一受支持的版本**
 - 一个 **MCP 客户端** —— Claude Desktop、Cursor 或任何兼容 MCP 的 LLM 宿主
+
+> 本工具**仅支持 Minecraft Java Edition 1.21.11**，其他服务器版本均无法工作。如果你的服务器运行不同版本，请安装匹配的 `minecraft-mcp-rs` 发行版（参见 [npm 安装](../npm#版本兼容性)）。
+
+| Minecraft 服务器版本 | minecraft-mcp-rs 版本 |
+|----------------------|-----------------------|
+| 1.21.11              | 1.1.2                 |
 
 ## 构建
 
