@@ -107,7 +107,7 @@ jobs:
           path: minecraft-mcp-rs-${{ matrix.label }}.*
 
   lint:
-    name: Lint & Test
+    name: fmt → clippy → test
     runs-on: [ubuntu-24, x64, small]
     steps:
       - name: Checkout
@@ -119,14 +119,14 @@ jobs:
           rustup toolchain install nightly --component rust-src,rustfmt,clippy --profile minimal
           rustup default nightly
 
-      - name: Run tests
-        run: cargo test --locked --all-targets
+      - name: Check formatting
+        run: cargo fmt --check
 
       - name: Run clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Check formatting
-        run: cargo fmt --check
+      - name: Run tests
+        run: cargo test --locked --all-targets
 
   release:
     name: Create AtomGit Release

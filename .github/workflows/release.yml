@@ -114,7 +114,7 @@ jobs:
           if-no-files-found: error
 
   lint:
-    name: Lint & Test
+    name: fmt → clippy → test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -130,14 +130,14 @@ jobs:
         with:
           key: release-lint-ubuntu
 
-      - name: Run tests
-        run: cargo test --locked --all-targets
+      - name: Check formatting
+        run: cargo fmt --check
 
       - name: Run clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Check formatting
-        run: cargo fmt --check
+      - name: Run tests
+        run: cargo test --locked --all-targets
 
   release:
     name: Create GitHub Release

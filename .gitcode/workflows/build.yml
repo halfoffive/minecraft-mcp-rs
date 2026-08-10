@@ -51,6 +51,7 @@ permissions:
 jobs:
   build:
     name: ${{ matrix.label }}
+    needs: lint
     runs-on:
       - ${{ matrix.runner }}
       - ${{ matrix.arch }}
@@ -102,7 +103,7 @@ jobs:
           path: minecraft-mcp-rs-${{ matrix.label }}*
 
   lint:
-    name: Lint & Test
+    name: fmt → clippy → test
     runs-on: [ubuntu-24, x64, small]
     steps:
       - name: Checkout
@@ -114,11 +115,11 @@ jobs:
           rustup toolchain install nightly --component rustfmt,clippy --profile minimal
           rustup default nightly
 
-      - name: Run tests
-        run: cargo test --locked --all-targets
+      - name: Check formatting
+        run: cargo fmt --check
 
       - name: Run clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Check formatting
-        run: cargo fmt --check
+      - name: Run tests
+        run: cargo test --locked --all-targets
