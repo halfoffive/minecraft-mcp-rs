@@ -5,6 +5,80 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.4] - 2026-08-12
+
+### Fixed
+
+- **Headless mode with the HTTP transport no longer hangs on exit:** the
+  process could previously only be killed with Ctrl+C after `--headless`
+  (without `--stdio`) bound the default HTTP transport, because the shutdown
+  token was triggered only *after* `serve_http` returned, and `serve_http`
+  only returns when the token fires. The HTTP server's graceful shutdown now
+  races the shutdown token against an OS `SIGINT` (`shutdown_signal`), so
+  Ctrl+C drains in-flight requests and exits cleanly in every mode.
+- **"Command Stats" panel now reports real numbers:** the processed /
+  succeeded / failed counters were never incremented by production code
+  (only by unit tests), so the UI always showed 0/0/0/0%. `dispatch` now
+  records every command that reaches the executor — including compound-op
+  sub-commands and validation/offline rejections.
+- **World-view preview no longer shows a stale frame after disconnect:** the
+  cached render was never cleared on disconnect, so the preview panel kept
+  displaying a frozen screenshot while the bot was offline. Disconnects now
+  clear the world-view cache, and a missing cache forces the preview texture
+  to be dropped.
+- **`attack_entity` rejects targets missing from the world snapshot:** the
+  bot-side handler now mirrors the MCP layer's existence check and returns
+  `InvalidParams` (previously the reach check was silently bypassed for
+  entities absent from the snapshot).
+
+### Performance
+
+- **Snapshot path no longer deep-clones the world on every tick:** the
+  per-tick builder carried the *entire* previous snapshot (including its
+  `block_index` HashMap) into `SnapshotBuilder`, and the built snapshot was
+  cloned once more just to return it. The builder now takes only the block
+  list, and the built snapshot is moved into `SharedState` — the per-tick
+  clone cost drops from O(total blocks) to O(dirty blocks + surviving block
+  strings).
+- **Throttled ticks no longer spawn a wasted task:** the snapshot-interval
+  throttle check now runs *before* spawning the build task, so ~18 of every
+  20 ticks (500 ms interval against 20 TPS) skip the task entirely instead
+  of spawning one that immediately returns.
+- **Block names are cached per block state:** `block_state_to_name` resolves
+  each distinct `BlockState` id once instead of paying `format!` +
+  `to_snake_case` (two allocations) per block per tick during dirty-chunk
+  scans.
+- **`get_nearby_blocks` filter no longer allocates per block:** the
+  case-insensitive substring match uses a new non-allocating ASCII helper
+  (`utils::contains_ascii_case_insensitive`) instead of lowercasing every
+  candidate block type.
+- **Command dispatch no longer clones the command for the executor loop:**
+  `BotCommandWithResponder` is destructured and the command moved into the
+  handler.
+
+### Changed
+
+- **`i18n` moved to the crate root (`src/i18n/`):** the translation layer now
+  lives at the top level instead of under `src/ui/`, removing the `mcp → ui`
+  reverse dependency (`tools_settings` used `crate::ui::i18n`). No user-facing
+  change — the `Language` serialization (`En`/`ZhCn`) is unchanged.
+- **`anyhow` dependency removed:** the crate never used it; `eyre` remains
+  for rare error-context needs.
+- **Removed dead validation checks:** `AppConfig::validate` no longer checks
+  `mc_port`/`mcp_port` against `65535` — both fields are `u16`, so the
+  checks could never fire (the `== 0` lower-bound checks remain).
+
+### Docs & housekeeping
+
+- Docs-site GitHub links point to the real owner (`halfoffive`) instead of
+  the `your-org` placeholder.
+- README npm-publishing note now documents npm Trusted Publishing (OIDC) as
+  the primary auth path, with `NPM_TOKEN` as the fallback.
+- `deploy-docs.yml` upgraded `actions/checkout` from `v5` to `v6` to match
+  the other workflows.
+- Removed the unused `simulate_container_open` test stub and fixed two
+  mojibake characters in `command_validate.rs` doc comments.
+
 ## [1.1.3] - 2026-08-10
 
 ### Added
