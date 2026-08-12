@@ -38,10 +38,17 @@ src/
   command_validate.rs — Coordinate validation and command pre-checks
   snapshot.rs         — World snapshot data structures and chunk summaries
   tool_select.rs      — Best-tool selection logic
-  utils.rs            — Common utility helpers (e.g. `to_snake_case`)
+  utils.rs            — Common utility helpers (e.g. `to_snake_case`,
+                        `contains_ascii_case_insensitive`)
   compound_ops.rs     — Compound operations (e.g. mine-and-collect pipeline)
   channel.rs          — Cross-thread BotCommand channel (tokio mpsc + oneshot);
                         ReceiverSlot + ReceiverLease for executor lifecycle
+  i18n/               — UI internationalization (functional, one file per
+                        language; lives at crate root so both ui/ and mcp/ can
+                        use it without an mcp→ui dependency)
+    mod.rs            — Language enum, TextKey enum, thread-safe current()/set()/tr()
+    en.rs             — English lookup table
+    zh_cn.rs          — Simplified Chinese lookup table
   logging.rs          — tracing-subscriber setup (stderr only; stdout = MCP transport)
   bot/                — Minecraft bot lifecycle
     mod.rs            — Re-exports
@@ -58,10 +65,6 @@ src/
   ui/                 — Desktop UI
     app.rs            — egui app shell
     fonts.rs          — CJK system font auto-detection + injection into egui FontDefinitions
-    i18n/             — UI internationalization (functional, one file per language)
-      mod.rs          — Language enum, TextKey enum, thread-safe current()/set()/tr()
-      en.rs           — English lookup table
-      zh_cn.rs        — Simplified Chinese lookup table
     settings.rs       — Settings panel (includes MCP transport / port / token / language)
     status.rs         — Status panel with live stats
     mcp_config.rs     — Copyable, live-generated MCP client JSON config
@@ -74,7 +77,7 @@ tests/
 
 - **Doc comments (`//!`)** on every module, doc comments (`///`) on every public type and function.
 - **Section separators:** `// ═══`, `// ----`, or `// ≡≡≡` lines between logical sections within a file.
-- **Error handling:** `BotError` (thiserror) for all bot/MCP errors; `anyhow` for top-level main errors; `eyre` available but rarely used.
+- **Error handling:** `BotError` (thiserror) for all bot/MCP errors; `eyre` for rarely-needed error context (no `anyhow` dependency).
 - **Thread safety:** `Arc<SharedState>` shared across threads; `ArcSwap` for lock-free snapshot reads; `RwLock` for config/stats; `AtomicBool` for online flag; `Mutex` for container handle and chat messages.
 - **Testing:** Unit tests in `#[cfg(test)] mod tests { .. }` at bottom of each source file; integration tests in `tests/`; property tests with `proptest` crate.
 - **Logging:** `tracing` crate macros only; all output to stderr (`stdout` reserved for MCP JSON-RPC transport). Enabled via `init_logging()` called once at startup.
@@ -85,6 +88,13 @@ tests/
 ## Notes
 
 <!-- Quick-add space for future notes -->
+- **Run-stats accounting (1.1.4):** `CommandExecutor::dispatch` is a thin wrapper around `dispatch_inner` that increments `RunStats` (`commands_processed` + `commands_succeeded`/`commands_failed`) on **every** command reaching the executor — including compound-op sub-commands and validation/offline rejections (the UI panel reports "received commands"). The atomics use `Ordering::Relaxed`. Regression tests: `test_dispatch_records_success_in_run_stats` / `test_dispatch_records_failure_in_run_stats` in `bot/commands.rs::tests`.
+- **HTTP shutdown (1.1.4):** `serve_http`'s graceful shutdown races the `shutdown_token` against `tokio::signal::ctrl_c()` via `shutdown_signal` (`src/mcp/server.rs`). Ctrl+C now exits cleanly in every mode — in particular headless mode with the default HTTP transport, which previously deadlocked (the token was only triggered after `serve_http` returned, and `serve_http` only returned after the token fired). UI/stdio paths are unchanged. Test: `test_shutdown_signal_returns_on_token_cancel`.
+- **`update_from_tick` → `build_and_store` (1.1.4):** `SnapshotUpdater::update_from_tick` (which cloned the whole snapshot just to return it) was replaced by `check_and_update_timer()` (pure throttle check, no reset side effects for callers) + `build_and_store(&bot) -> bool` (moves the snapshot into `SharedState`, returns whether a repaint is due). `handle_tick` runs the throttle check **before** spawning the build task, so throttled ticks (~18 of 20 per second) no longer spawn a wasted task.
+- **`SnapshotBuilder` production constructor (1.1.4):** `SnapshotBuilder::new(old_blocks: Vec<BlockEntry>)` is the per-tick path — it carries over **only the block list** (not the old snapshot, whose `block_index` HashMap and unused fields used to be deep-cloned every 500 ms). Unset fields fall back to `WorldSnapshot::default()`. `SnapshotBuilder::from_old(old: WorldSnapshot)` keeps the old full-snapshot semantics for tests. The per-tick caller must supply every field via `with_*` (it does).
+- **Block-name cache (1.1.4):** `block_state_to_name` resolves each distinct `BlockState` id once into a `LazyLock<Mutex<HashMap<BlockState, String>>>` cache instead of paying `format!` + `to_snake_case` per block per tick. `BlockState` is a `Copy` `Hash` u16 wrapper.
+- **`contains_ascii_case_insensitive` (1.1.4):** `src/utils.rs` hosts the non-allocating ASCII substring matcher; `get_nearby_blocks` uses it per block instead of `block_type.to_lowercase()` (which allocated per block).
+- **`AttackEntity` snapshot guard (1.1.4):** `handle_attack_entity` rejects a target missing from the world snapshot with `BotError::InvalidParams` before attacking (the MCP layer already enforced the same check). Tests: `test_attack_entity_missing_from_snapshot_rejected`.
 - **规范:** 函数式编程，大量注释。写完后使用`cargo fmt`格式化；及时编写`cargo test`自动化测试，`cargo test`全过才能交付，编写遵循TDD；需要运行`cargo clippy`检验，全过才能交付；最后更新`README.md`、`CHANGELOG.md`和`AGENTS.md`，然后提交并推送git。
 - **Settings panel:** Uses `EditConfig` local edit buffers (in `app.rs`); fields rendered via `TextEdit::singleline`/`DragValue`. Edits applied to `SharedState` only on Connect. The `sender` parameter was removed from `settings_panel` — the UI doesn't send commands directly.
 - **MCP Config panel:** Renders a copyable JSON config (with the executable's absolute path resolved at runtime) for MCP clients like Claude Desktop / Cursor. Uses egui 0.34.3's clipboard API; schemars 1.0 `Schema` (via `schema_for!`) drives any schema rendering.
