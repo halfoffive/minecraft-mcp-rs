@@ -32,7 +32,7 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 >
 > | Minecraft server version / MC 服务器版本 | minecraft-mcp-rs version / 工具版本 |
 > |---|---|
-> | 1.21.11 | 1.1.3 |
+> | 1.21.11 | 1.1.4 |
 >
 > Pick the minecraft-mcp-rs version that matches your Minecraft server, and re-check this table before every upgrade. / 请选择与你的 Minecraft 服务器版本匹配的 minecraft-mcp-rs 版本，并在每次升级前重新核对此表。
 
@@ -171,8 +171,8 @@ demand):
 或无需安装直接运行（各平台的二进制按需下载）：
 
 ```bash
-npx -y minecraft-mcp-rs@1.1.3 --headless --stdio
-bunx minecraft-mcp-rs@1.1.3 --headless --stdio
+npx -y minecraft-mcp-rs@1.1.4 --headless --stdio
+bunx minecraft-mcp-rs@1.1.4 --headless --stdio
 ```
 
 Ready-to-paste Claude Desktop / Cursor config (stdio implies the bot runs
@@ -185,7 +185,7 @@ headless and exits when the MCP client disconnects):
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs@1.1.3", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@1.1.4", "--headless", "--stdio"]
     }
   }
 }
@@ -196,11 +196,14 @@ the `-y` flag.
 
 使用 bunx 的用户请将 `"command": "npx"` 替换为 `"command": "bunx"`，并去掉 `-y` 参数。
 
-> For maintainers: npm publishing uses the `NPM_TOKEN` secret (a granular
-> access token) in the GitHub `release.yml` workflow. NEVER commit the token
-> or any fragment of it anywhere in the repository.
+> For maintainers: npm publishing authenticates via npm **Trusted Publishing
+> (OIDC)** — each package on npmjs.com → Settings → Trusted Publishers →
+> GitHub Actions, owner `halfoffive`, workflow `release.yml`. When OIDC is
+> not configured, the `NPM_TOKEN` secret (a granular access token) is used
+> instead. NEVER commit the token or any fragment of it anywhere in the
+> repository.
 
-> 维护者须知：npm 发布使用 GitHub `release.yml` 工作流中的 `NPM_TOKEN` 密钥（细粒度访问令牌）。切勿将令牌或其任何片段提交到仓库的任何位置。
+> 维护者须知：npm 发布通过 npm **Trusted Publishing（OIDC）** 认证 —— 在 npmjs.com 上每个包的 Settings → Trusted Publishers → GitHub Actions，属主 `halfoffive`，workflow `release.yml`。若未配置 OIDC，则回退使用 `NPM_TOKEN` 密钥（细粒度访问令牌）。切勿将令牌或其任何片段提交到仓库的任何位置。
 
 ### CLI flags / 命令行参数
 

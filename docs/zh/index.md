@@ -11,7 +11,7 @@ hero:
       link: /zh/guide/getting-started
     - theme: alt
       text: GitHub
-      link: https://github.com/your-org/minecraft-mcp-rs
+      link: https://github.com/halfoffive/minecraft-mcp-rs
 
 features:
   - title: "30+ MCP 工具"

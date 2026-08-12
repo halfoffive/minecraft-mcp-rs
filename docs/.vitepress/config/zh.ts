@@ -1,7 +1,5 @@
 import type { DefaultTheme, LocaleSpecificConfig } from 'vitepress'
 
-// NOTE: The GitHub owner/org below is a placeholder (`your-org`). Update it to
-// the real repository owner before publishing docs.
 export const zh: LocaleSpecificConfig<DefaultTheme.Config> = {
   lang: 'zh-CN',
   title: 'minecraft-mcp-rs',
@@ -12,7 +10,7 @@ export const zh: LocaleSpecificConfig<DefaultTheme.Config> = {
       { text: '工具', link: '/zh/tools', activeMatch: '/zh/tools' },
       { text: '配置', link: '/zh/config', activeMatch: '/zh/config' },
       { text: 'npm', link: '/zh/npm', activeMatch: '/zh/npm' },
-      { text: 'GitHub', link: 'https://github.com/your-org/minecraft-mcp-rs' }
+      { text: 'GitHub', link: 'https://github.com/halfoffive/minecraft-mcp-rs' }
     ],
 
     sidebar: {
@@ -46,7 +44,7 @@ export const zh: LocaleSpecificConfig<DefaultTheme.Config> = {
     },
 
     editLink: {
-      pattern: 'https://github.com/your-org/minecraft-mcp-rs/edit/main/docs/:path',
+      pattern: 'https://github.com/halfoffive/minecraft-mcp-rs/edit/main/docs/:path',
       text: '在 GitHub 上编辑此页'
     },
 
