@@ -2,7 +2,6 @@
 
 pub mod app;
 pub mod fonts;
-pub mod i18n;
 pub mod mcp_config;
 pub mod preview;
 pub mod settings;

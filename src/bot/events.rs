@@ -332,6 +332,11 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     state.shared_state.set_online(false);
     state.shared_state.set_connected_since(None);
 
+    // Drop the cached world-view render so the UI preview panel (and a
+    // later `get_world_view` call) does not keep showing a frame from the
+    // previous connection after the bot goes offline.
+    state.shared_state.clear_world_view_cache();
+
     // Clear the ECS handle — the bot is already disconnecting, so
     // request_disconnect no longer needs to write AppExit::Success.
     state.shared_state.clear_bot_ecs();
@@ -410,6 +415,14 @@ async fn handle_tick(bot: Client, state: BotState) {
     );
     let egui_ctx = state.egui_ctx.clone();
 
+    // Throttle check BEFORE spawning the build task: azalea fires ~20 ticks
+    // per second against a 500 ms snapshot interval, so a post-spawn check
+    // would create (and immediately throw away) a task on every one of the
+    // ~18 throttled ticks.
+    if !updater.check_and_update_timer() {
+        return;
+    }
+
     // Reclaim any snapshot tasks that have already finished before adding a
     // new one. This prevents unbounded growth of `spawn_local` handles.
     let mut tick_tasks = state.tick_tasks.lock().unwrap_or_else(|e| e.into_inner());
@@ -420,7 +433,7 @@ async fn handle_tick(bot: Client, state: BotState) {
     }
 
     tick_tasks.spawn_local(async move {
-        if updater.update_from_tick(&bot).await.is_some()
+        if updater.build_and_store(&bot).await
             && let Some(ctx) = &egui_ctx
         {
             ctx.request_repaint();

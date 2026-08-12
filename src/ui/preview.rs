@@ -14,8 +14,29 @@ use base64::Engine;
 use egui::{ColorImage, Image, TextureHandle, Ui};
 use std::sync::Arc;
 
+use crate::i18n::{self, TextKey};
 use crate::state::SharedState;
-use crate::ui::i18n::{self, TextKey};
+
+/// Decide whether the preview texture must be rebuilt this frame.
+///
+/// `cache` is the current world-view cache entry; `last_annotation` is the
+/// annotation JSON the texture was last built from.
+///
+/// - `(Some(c), Some(prev))` → rebuild only when the annotation changed.
+/// - `(Some(_), None)` → first render — build.
+/// - `(None, _)` → no cache (nothing rendered yet, or the bot went offline
+///   and `handle_disconnect` cleared the cache) — clear the stale texture
+///   so the panel does not keep showing a frozen frame after a disconnect.
+fn should_rebuild(
+    cache: &Option<crate::state::WorldViewCache>,
+    last_annotation: &Option<String>,
+) -> bool {
+    match (cache, last_annotation) {
+        (Some(c), Some(prev)) => c.annotation_json != *prev,
+        (Some(_), None) => true,
+        (None, _) => true,
+    }
+}
 
 /// Render the world-view preview panel.
 ///
@@ -39,16 +60,12 @@ pub fn preview_panel(
 ) {
     let cache = state.get_world_view_cache();
 
-    // Rebuild the texture only when the annotation JSON changes (i.e. the
-    // cached render actually changed). This avoids re-decoding the PNG
-    // every frame, which would be a noticeable CPU hit at scale=8.
-    let need_rebuild = match (&cache, &*last_annotation) {
-        (Some(c), Some(prev)) => c.annotation_json != *prev,
-        (Some(_), None) => true,
-        (None, _) => false,
-    };
-
-    if need_rebuild {
+    // Rebuild the texture only when the cached render actually changed
+    // (annotation JSON differs) or the cache is gone (first render, or a
+    // disconnect cleared it — a stale frame must not linger). This avoids
+    // re-decoding the PNG every frame, which would be a noticeable CPU hit
+    // at scale=8.
+    if should_rebuild(&cache, &*last_annotation) {
         if let Some(ref c) = cache {
             match decode_png_to_texture(ui.ctx(), &c.png_base64) {
                 Ok(handle) => {
@@ -216,5 +233,56 @@ mod tests {
         assert!(state.get_world_view_cache().is_none());
         // And last_error should be set.
         assert!(state.last_error().is_some());
+    }
+
+    // ── should_rebuild (A3) ─────────────────────────────────────────
+
+    /// A missing cache always forces a rebuild/clear — the very first frame
+    /// must build the texture, and a disconnect-cleared cache must drop the
+    /// stale texture instead of keeping a frozen frame.
+    #[test]
+    fn test_should_rebuild_missing_cache_always_rebuilds() {
+        let cache: Option<crate::state::WorldViewCache> = None;
+        assert!(should_rebuild(&cache, &None));
+        assert!(should_rebuild(&cache, &Some("old annotation".into())));
+    }
+
+    /// A fresh cache entry with no previous annotation must be rendered.
+    #[test]
+    fn test_should_rebuild_first_render() {
+        let cache = Some(crate::state::WorldViewCache {
+            snapshot_timestamp: 1,
+            radius: 8,
+            scale: 2,
+            png_base64: "x".into(),
+            annotation_json: "ann".into(),
+        });
+        assert!(should_rebuild(&cache, &None));
+    }
+
+    /// An unchanged annotation is a cache hit — no rebuild.
+    #[test]
+    fn test_should_rebuild_unchanged_annotation_skips() {
+        let cache = Some(crate::state::WorldViewCache {
+            snapshot_timestamp: 1,
+            radius: 8,
+            scale: 2,
+            png_base64: "x".into(),
+            annotation_json: "ann".into(),
+        });
+        assert!(!should_rebuild(&cache, &Some("ann".into())));
+    }
+
+    /// A changed annotation forces a rebuild.
+    #[test]
+    fn test_should_rebuild_changed_annotation_rebuilds() {
+        let cache = Some(crate::state::WorldViewCache {
+            snapshot_timestamp: 1,
+            radius: 8,
+            scale: 2,
+            png_base64: "x".into(),
+            annotation_json: "new-ann".into(),
+        });
+        assert!(should_rebuild(&cache, &Some("old-ann".into())));
     }
 }

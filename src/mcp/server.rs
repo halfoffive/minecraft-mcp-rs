@@ -24,6 +24,7 @@ use rmcp::{
     },
 };
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::channel::{BotCommandSender, ReceiverSlot};
@@ -611,8 +612,7 @@ fn is_request_authorized(auth_enabled: bool, expected_token: &str, headers: &Hea
     is_bearer_authorized(headers, expected_token)
 }
 
-/// Axum middleware that enforces the configured Bearer token.
-///
+/// Axum middleware that enforces the configured Bearer token.///
 /// Returns 401 Unauthorized for missing, empty, or mismatched tokens when
 /// authentication is enabled (`mcp_auth_enabled`). If authentication is
 /// disabled, all requests pass through. Valid requests are forwarded to the
@@ -634,6 +634,24 @@ async fn bearer_auth_middleware(
         next.run(request).await
     } else {
         (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+    }
+}
+
+/// Wait for either the shutdown token or a Ctrl+C signal.
+///
+/// `serve_http`'s graceful shutdown races the shutdown token (triggered by
+/// window close, `disconnect_bot`, or the headless stdio client exiting)
+/// against an OS Ctrl+C, so the process can be terminated cleanly from a
+/// terminal even in headless mode where nothing else triggers the token.
+/// Returning from this future makes axum drain in-flight requests and exit
+/// `serve_http`; `main.rs` then triggers the shutdown token (headless) or
+/// the window's `Drop` handles it (UI mode).
+async fn shutdown_signal(token: CancellationToken) {
+    tokio::select! {
+        _ = token.cancelled() => {}
+        _ = tokio::signal::ctrl_c() => {
+            info!("Ctrl+C received — shutting down MCP HTTP server");
+        }
     }
 }
 
@@ -700,7 +718,7 @@ pub async fn serve_http(
 
     if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            shutdown_token.cancelled().await;
+            shutdown_signal(shutdown_token).await;
         })
         .await
     {
@@ -724,6 +742,22 @@ mod tests {
     use crate::channel::create_command_channel;
     use crate::config::AppConfig;
     use axum::http::HeaderValue;
+
+    /// `shutdown_signal` resolves when the shutdown token is cancelled —
+    /// this is the path the UI (window close) and headless stdio client exit
+    /// rely on. The Ctrl+C branch cannot be exercised in CI (no terminal
+    /// signal injection), so only the token branch is covered here.
+    #[tokio::test]
+    async fn test_shutdown_signal_returns_on_token_cancel() {
+        let token = CancellationToken::new();
+        let token_for_test = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            token_for_test.cancel();
+        });
+        // Must resolve (not hang) once the token fires.
+        shutdown_signal(token).await;
+    }
 
     /// Verify get_info() returns the expected server name.
     #[test]

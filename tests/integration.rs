@@ -520,6 +520,12 @@ async fn test_query_tools_offline_return_error() {
         minecraft_mcp_rs::mcp::tools_query::get_chunk_summary(&state),
         Err(BotError::Offline(_))
     ));
+    // get_world_view (multi-content: image + annotation) is also gated on
+    // online status — offline must yield Offline, not a render attempt.
+    assert!(matches!(
+        minecraft_mcp_rs::mcp::tools_query::get_world_view(&state, 8, 2),
+        Err(BotError::Offline(_))
+    ));
 }
 
 // ═══════════════════════════════════════════════════════════════

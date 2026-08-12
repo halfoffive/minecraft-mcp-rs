@@ -84,8 +84,26 @@ pub struct SnapshotBuilder {
 }
 
 impl SnapshotBuilder {
-    /// Start building from an existing snapshot.
-    pub fn new(old: WorldSnapshot) -> Self {
+    /// Start building from the previous snapshot's block list (production
+    /// path).
+    ///
+    /// Only the blocks are carried over: the per-tick snapshot path always
+    /// replaces every other field via the `with_*` setters, so the previous
+    /// full snapshot — including its `block_index` HashMap and every field
+    /// the builder would otherwise deep-clone — is never copied each tick.
+    /// Fields not set by `with_*` default to their `WorldSnapshot` defaults.
+    pub fn new(old_blocks: Vec<BlockEntry>) -> Self {
+        Self::from_old(WorldSnapshot {
+            blocks: old_blocks,
+            ..WorldSnapshot::default()
+        })
+    }
+
+    /// Start building from a full previous snapshot (test / fallback path).
+    ///
+    /// All fields not replaced by the `with_*` setters fall back to the old
+    /// snapshot's values.
+    pub fn from_old(old: WorldSnapshot) -> Self {
         Self {
             old,
             dirty_blocks: HashSet::new(),
@@ -364,12 +382,46 @@ mod tests {
             vec![block(BlockPos::new(0, 64, 0), "stone")],
             vec![entity(1, BlockPos::new(0, 64, 0), "zombie")],
         );
-        let new = SnapshotBuilder::new(old.clone()).build();
+        let new = SnapshotBuilder::from_old(old.clone()).build();
         assert_eq!(new.blocks.len(), old.blocks.len());
         assert_eq!(new.entities.len(), old.entities.len());
         assert_eq!(new.self_player.username, old.self_player.username);
         assert_eq!(new.chunk_summary, old.chunk_summary);
         assert!(new.timestamp >= old.timestamp);
+    }
+
+    /// The production `new` constructor carries over the block list and
+    /// replaces dirty regions, exactly like `from_old` — but unset fields
+    /// fall back to `WorldSnapshot::default()` instead of the old snapshot.
+    #[test]
+    fn test_builder_new_production_constructor() {
+        let old = make_snapshot(
+            vec![
+                block(BlockPos::new(0, 64, 0), "stone"),
+                block(BlockPos::new(1, 64, 0), "dirt"),
+            ],
+            vec![entity(1, BlockPos::new(0, 64, 0), "zombie")],
+        );
+        let mut tracker = DirtyTracker::new();
+        tracker.mark_block_dirty(BlockPos::new(0, 64, 0));
+
+        let new = SnapshotBuilder::new(old.blocks.clone())
+            .with_dirty_tracker(&mut tracker)
+            .with_blocks(vec![block(BlockPos::new(0, 64, 0), "gold_block")])
+            .build();
+
+        // Dirty filtering works on the carried-over blocks.
+        assert_eq!(new.blocks.len(), 2);
+        let types: Vec<_> = new.blocks.iter().map(|b| b.block_type.clone()).collect();
+        assert!(types.contains(&"gold_block".into()));
+        assert!(types.contains(&"dirt".into()));
+        assert!(!types.contains(&"stone".into()));
+
+        // Unset fields default instead of falling back to the old snapshot.
+        assert!(new.entities.is_empty());
+        assert_eq!(new.self_player.username, "");
+        assert!(new.chunk_summary.is_empty());
+        assert_eq!(new.commands_enabled, None);
     }
 
     #[test]
@@ -384,7 +436,7 @@ mod tests {
         let mut tracker = DirtyTracker::new();
         tracker.mark_block_dirty(BlockPos::new(0, 64, 0));
 
-        let new = SnapshotBuilder::new(old)
+        let new = SnapshotBuilder::from_old(old)
             .with_dirty_tracker(&mut tracker)
             .with_blocks(vec![block(BlockPos::new(0, 64, 0), "gold_block")])
             .build();
@@ -409,7 +461,7 @@ mod tests {
         let mut tracker = DirtyTracker::new();
         tracker.mark_chunk_dirty((0, 0));
 
-        let new = SnapshotBuilder::new(old)
+        let new = SnapshotBuilder::from_old(old)
             .with_dirty_tracker(&mut tracker)
             .with_blocks(vec![block(BlockPos::new(0, 64, 0), "gold_block")])
             .build();
@@ -424,7 +476,7 @@ mod tests {
     #[test]
     fn test_builder_replaces_entities() {
         let old = make_snapshot(vec![], vec![entity(1, BlockPos::new(0, 0, 0), "zombie")]);
-        let new = SnapshotBuilder::new(old)
+        let new = SnapshotBuilder::from_old(old)
             .with_entities(Some(vec![entity(2, BlockPos::new(10, 0, 10), "creeper")]))
             .build();
         assert_eq!(new.entities.len(), 1);
@@ -435,7 +487,7 @@ mod tests {
     #[test]
     fn test_builder_clears_entities_with_empty_vec() {
         let old = make_snapshot(vec![], vec![entity(1, BlockPos::new(0, 0, 0), "zombie")]);
-        let new = SnapshotBuilder::new(old)
+        let new = SnapshotBuilder::from_old(old)
             .with_entities(Some(Vec::new()))
             .build();
         assert!(new.entities.is_empty());
@@ -444,7 +496,7 @@ mod tests {
     #[test]
     fn test_builder_with_entities_none_keeps_old() {
         let old = make_snapshot(vec![], vec![entity(1, BlockPos::new(0, 0, 0), "zombie")]);
-        let new = SnapshotBuilder::new(old.clone())
+        let new = SnapshotBuilder::from_old(old.clone())
             .with_entities(None)
             .build();
         assert_eq!(new.entities.len(), 1);
@@ -454,7 +506,7 @@ mod tests {
     #[test]
     fn test_builder_keeps_old_entities_when_none_provided() {
         let old = make_snapshot(vec![], vec![entity(1, BlockPos::new(0, 0, 0), "zombie")]);
-        let new = SnapshotBuilder::new(old.clone()).build();
+        let new = SnapshotBuilder::from_old(old.clone()).build();
         assert_eq!(new.entities.len(), 1);
         assert_eq!(new.entities[0].id, 1);
     }
@@ -474,7 +526,7 @@ mod tests {
             position_precise: None,
             yaw: None,
         };
-        let new = SnapshotBuilder::new(old)
+        let new = SnapshotBuilder::from_old(old)
             .with_self_player(new_player.clone())
             .build();
         assert_eq!(new.self_player.username, "Alex");
@@ -485,7 +537,7 @@ mod tests {
     #[test]
     fn test_builder_updates_chunk_summary() {
         let old = make_snapshot(vec![], vec![]);
-        let new = SnapshotBuilder::new(old)
+        let new = SnapshotBuilder::from_old(old)
             .with_chunk_summary(vec![(0, 0), (1, 0), (0, 1)])
             .build();
         assert_eq!(new.chunk_summary.len(), 3);
@@ -506,7 +558,7 @@ mod tests {
         tracker.mark_block_dirty(BlockPos::new(1, 64, 0));
         tracker.mark_chunk_dirty((1, 0));
 
-        let new = SnapshotBuilder::new(old)
+        let new = SnapshotBuilder::from_old(old)
             .with_dirty_tracker(&mut tracker)
             .with_blocks(vec![
                 block(BlockPos::new(1, 64, 0), "diamond_block"),
@@ -540,7 +592,7 @@ mod tests {
         let mut tracker = DirtyTracker::new();
         tracker.mark_block_dirty(BlockPos::new(0, 64, 0));
 
-        let new = SnapshotBuilder::new(old)
+        let new = SnapshotBuilder::from_old(old)
             .with_dirty_tracker(&mut tracker)
             .with_blocks(vec![block(BlockPos::new(0, 64, 0), "replaced")])
             .build();
@@ -572,7 +624,7 @@ mod tests {
         let mut tracker = DirtyTracker::new();
         tracker.mark_chunk_dirty((0, 0));
 
-        let new = SnapshotBuilder::new(old)
+        let new = SnapshotBuilder::from_old(old)
             .with_dirty_tracker(&mut tracker)
             .with_blocks(vec![block(BlockPos::new(0, 64, 0), "new_a")])
             .build();
@@ -590,7 +642,7 @@ mod tests {
     fn test_builder_preserves_commands_enabled() {
         let mut old = make_snapshot(vec![], vec![]);
         old.commands_enabled = Some(true);
-        let new = SnapshotBuilder::new(old.clone()).build();
+        let new = SnapshotBuilder::from_old(old.clone()).build();
         assert_eq!(new.commands_enabled, Some(true));
     }
 

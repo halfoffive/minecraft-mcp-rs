@@ -5,6 +5,7 @@
 //! sends a [`BotResult`] back through the oneshot channel.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use azalea::pathfinder::goals::BlockPosGoal;
@@ -14,7 +15,9 @@ use tracing::{debug, trace, warn};
 
 use crate::block_data::ItemStack;
 use crate::bot::ops::CompoundOpExecutor;
-use crate::channel::{BotCommandReceiver, BotCommandSender, ReceiverLease};
+use crate::channel::{
+    BotCommandReceiver, BotCommandSender, BotCommandWithResponder, ReceiverLease,
+};
 use crate::command_validate::clamp_to_i32;
 use crate::error::BotError;
 use crate::state::SharedState;
@@ -532,9 +535,15 @@ impl<B: BotActions> CommandExecutor<B> {
             .recv()
             .await
         {
-            debug!(command = ?wrapped.command, "dispatching command");
-            let result = self.dispatch(wrapped.command.clone()).await;
-            if wrapped.respond_to.send(result).is_err() {
+            // Destructure before dispatch so the command is moved (not
+            // cloned) into the handler and the responder stays usable after.
+            let BotCommandWithResponder {
+                command,
+                respond_to,
+            } = wrapped;
+            debug!(command = ?command, "dispatching command");
+            let result = self.dispatch(command).await;
+            if respond_to.send(result).is_err() {
                 warn!("command responder dropped — result lost");
             }
         }
@@ -555,9 +564,13 @@ impl<B: BotActions> CommandExecutor<B> {
             let wrapped = lease.receiver_mut().recv().await;
             match wrapped {
                 Some(wrapped) => {
-                    debug!(command = ?wrapped.command, "dispatching command");
-                    let result = self.dispatch(wrapped.command.clone()).await;
-                    if wrapped.respond_to.send(result).is_err() {
+                    let BotCommandWithResponder {
+                        command,
+                        respond_to,
+                    } = wrapped;
+                    debug!(command = ?command, "dispatching command");
+                    let result = self.dispatch(command).await;
+                    if respond_to.send(result).is_err() {
                         warn!("command responder dropped — result lost");
                     }
                 }
@@ -568,8 +581,34 @@ impl<B: BotActions> CommandExecutor<B> {
         trace!("command executor loop ended (channel closed)");
     }
 
-    /// Dispatch a single command and return the result.
+    /// Dispatch a single command and record it in the run stats.
+    ///
+    /// Every command that reaches the executor (including compound-operation
+    /// sub-commands) counts toward the UI's "Command Stats" panel — see
+    /// [`RunStats`](crate::config::RunStats). Validation rejections and
+    /// offline denials count as failures, because the panel reports
+    /// "received commands", not "executed commands".
     pub(crate) async fn dispatch(&self, cmd: BotCommand) -> Result<BotResult, BotError> {
+        let result = self.dispatch_inner(cmd).await;
+        {
+            // Scope the stats guard tightly: the atomics do not need the
+            // guard held past this block.
+            let stats = self.state.read_run_stats();
+            stats.commands_processed.fetch_add(1, Ordering::Relaxed);
+            if result.is_ok() {
+                stats.commands_succeeded.fetch_add(1, Ordering::Relaxed);
+            } else {
+                stats.commands_failed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        result
+    }
+
+    /// Execute a single command without recording run stats.
+    ///
+    /// The actual dispatch logic lives here so [`dispatch`](Self::dispatch)
+    /// can wrap it with the stats bookkeeping without changing the match.
+    async fn dispatch_inner(&self, cmd: BotCommand) -> Result<BotResult, BotError> {
         // Defense-in-depth: validate parameter bounds for every command before
         // execution. MCP handlers validate too, but this central gate catches
         // any handler that misses a bound (container slot/count, walk distance)
@@ -1028,18 +1067,25 @@ impl<B: BotActions> CommandExecutor<B> {
         // The snapshot may be slightly stale, so the threshold is generous.
         const MAX_ATTACK_REACH: f64 = 6.0;
         let snapshot = self.state.read_snapshot();
-        if let Some(entity) = snapshot.entities.iter().find(|e| e.id == entity_id) {
-            let dx = (entity.position.x - snapshot.self_player.position.x) as f64;
-            let dy = (entity.position.y - snapshot.self_player.position.y) as f64;
-            let dz = (entity.position.z - snapshot.self_player.position.z) as f64;
-            let distance = (dx * dx + dy * dy + dz * dz).sqrt();
-            if distance > MAX_ATTACK_REACH {
-                return Err(BotError::TooFar {
-                    target: entity.position,
-                    current: snapshot.self_player.position,
-                    max_distance: MAX_ATTACK_REACH,
-                });
-            }
+        let Some(entity) = snapshot.entities.iter().find(|e| e.id == entity_id) else {
+            // Mirrors the MCP layer's existence check: attacking an entity we
+            // cannot see in the snapshot is a parameter error, not a bot
+            // failure — the ID may be stale or fabricated.
+            drop(snapshot);
+            return Err(BotError::InvalidParams(format!(
+                "Entity with ID {entity_id} not found in current world snapshot"
+            )));
+        };
+        let dx = (entity.position.x - snapshot.self_player.position.x) as f64;
+        let dy = (entity.position.y - snapshot.self_player.position.y) as f64;
+        let dz = (entity.position.z - snapshot.self_player.position.z) as f64;
+        let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+        if distance > MAX_ATTACK_REACH {
+            return Err(BotError::TooFar {
+                target: entity.position,
+                current: snapshot.self_player.position,
+                max_distance: MAX_ATTACK_REACH,
+            });
         }
         drop(snapshot);
         self.bot.attack_entity(entity_id)?;
@@ -1658,7 +1704,13 @@ mod tests {
 
     /// Create a WorldSnapshot seeded with basic data for query tests.
     fn make_populated_snapshot(state: &SharedState) {
-        let snap = crate::types::WorldSnapshot {
+        state.update_snapshot(make_populated_snapshot_defaults());
+    }
+
+    /// Defaults shared by snapshot-seeded tests: a stone block, a zombie
+    /// (entity 42) at (3,64,1), and a player at (0,64,0).
+    fn make_populated_snapshot_defaults() -> crate::types::WorldSnapshot {
+        crate::types::WorldSnapshot {
             blocks: vec![BlockEntry {
                 position: BlockPos::new(5, 64, 0),
                 block_type: "stone".into(),
@@ -1688,8 +1740,7 @@ mod tests {
             chunk_summary: vec![(0, 0), (1, 0)],
             commands_enabled: None,
             ..Default::default()
-        };
-        state.update_snapshot(snap);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1699,6 +1750,44 @@ mod tests {
     #[test]
     fn test_new_constructs() {
         let (_executor, _sender, _state, _log) = make_executor();
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Run-stats bookkeeping (A2)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// A successful dispatch increments `commands_processed` and
+    /// `commands_succeeded` (and nothing else).
+    #[tokio::test]
+    async fn test_dispatch_records_success_in_run_stats() {
+        let (executor, _sender, state, _log) = make_executor();
+        let result = executor.dispatch(BotCommand::QueryInventory).await;
+        assert!(
+            result.is_ok(),
+            "query should succeed while online: {result:?}"
+        );
+
+        let stats = state.read_run_stats();
+        assert_eq!(stats.commands_processed.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.commands_succeeded.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.commands_failed.load(Ordering::Relaxed), 0);
+    }
+
+    /// A failed dispatch (bot offline) increments `commands_processed` and
+    /// `commands_failed` — the panel reports received commands, so denials
+    /// count as failures.
+    #[tokio::test]
+    async fn test_dispatch_records_failure_in_run_stats() {
+        let (executor, _sender, state, _log) = make_executor();
+        state.set_online(false);
+
+        let result = executor.dispatch(BotCommand::QueryInventory).await;
+        assert!(matches!(result, Err(BotError::Offline(_))));
+
+        let stats = state.read_run_stats();
+        assert_eq!(stats.commands_processed.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.commands_succeeded.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.commands_failed.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -2218,7 +2307,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_attack_entity_success() {
-        let (executor, sender, _state, log) = make_executor();
+        let (executor, sender, state, log) = make_executor();
+        // Seed the snapshot with entity 42 (at (3,64,1), within attack reach
+        // of the player at (0,64,0)) so the reach check passes.
+        make_populated_snapshot(&state);
         let handle = spawn_executor(executor);
 
         let result = send_and_await(&sender, BotCommand::AttackEntity(42)).await;
@@ -2234,8 +2326,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_attack_entity_failure() {
-        let (executor, sender, _state, log) = make_executor();
+        let (executor, sender, state, log) = make_executor();
         log.attack_succeeds.store(false, Ordering::SeqCst);
+        // Seed entity 99 in the snapshot so the reach check passes and the
+        // underlying attack failure is what surfaces.
+        state.update_snapshot(crate::types::WorldSnapshot {
+            entities: vec![EntityEntry {
+                id: 99,
+                uuid: "target-99".into(),
+                entity_type: "zombie".into(),
+                position: BlockPos::new(3, 64, 1),
+                display_name: Some("Zombie".into()),
+                health: Some(20.0),
+            }],
+            ..make_populated_snapshot_defaults()
+        });
         let handle = spawn_executor(executor);
 
         let result = send_and_await(&sender, BotCommand::AttackEntity(99)).await;
@@ -2243,6 +2348,27 @@ mod tests {
 
         drop(sender);
         handle.await.expect("executor should finish");
+    }
+
+    /// An entity absent from the snapshot is rejected as `InvalidParams`
+    /// before any attack attempt (defence-in-depth; the MCP layer already
+    /// enforces the same existence check).
+    #[tokio::test]
+    async fn test_attack_entity_missing_from_snapshot_rejected() {
+        let (executor, sender, state, log) = make_executor();
+        make_populated_snapshot(&state); // contains entity 42 only
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::AttackEntity(999)).await;
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        assert!(
+            log.attack_calls.lock().unwrap().is_empty(),
+            "no attack may be issued for a target missing from the snapshot"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════

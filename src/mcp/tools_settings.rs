@@ -25,8 +25,8 @@ use crate::channel::{BotCommandSender, ReceiverSlot};
 use crate::config::AppConfig;
 use crate::config::McpTransport;
 use crate::error::BotError;
+use crate::i18n::Language;
 use crate::state::{McpServerStatus, SharedState};
-use crate::ui::i18n::Language;
 
 // ── get_settings ───────────────────────────────────────────────────────────
 
@@ -341,7 +341,7 @@ pub(crate) fn update_settings_with_path(
             candidate.language = language;
             applied.insert("language".into(), json!(language_to_str(language)));
             // Next-frame effect in UI mode; harmless in headless mode.
-            crate::ui::i18n::set(language);
+            crate::i18n::set(language);
         }
     }
 
@@ -766,10 +766,10 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(value["applied"]["language"], json!("zh_cn"));
         assert_eq!(state.read_config().language, Language::ZhCn);
-        assert_eq!(crate::ui::i18n::current(), Language::ZhCn);
+        assert_eq!(crate::i18n::current(), Language::ZhCn);
 
         // Restore the global i18n state for other tests.
-        crate::ui::i18n::set(Language::En);
+        crate::i18n::set(Language::En);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

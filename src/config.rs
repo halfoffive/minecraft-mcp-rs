@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
-use crate::ui::i18n::Language;
+use crate::i18n::Language;
 
 // ---------------------------------------------------------------------------
 // McpTransport — transport selection for the MCP server
@@ -231,14 +231,8 @@ impl AppConfig {
         if self.mc_port == 0 {
             return Err("mc_port must not be 0".into());
         }
-        if (self.mc_port as u32) > 65535 {
-            return Err("mc_port must be <= 65535".into());
-        }
         if self.mcp_port == 0 {
             return Err("mcp_port must not be 0".into());
-        }
-        if (self.mcp_port as u32) > 65535 {
-            return Err("mcp_port must be <= 65535".into());
         }
         if self.mcp_address != "localhost" {
             self.mcp_address

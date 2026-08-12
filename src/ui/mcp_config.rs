@@ -16,8 +16,8 @@
 use egui::{FontId, TextEdit, Ui};
 
 use crate::config::McpTransport;
+use crate::i18n::{self, TextKey};
 use crate::ui::app::EditConfig;
-use crate::ui::i18n::{self, TextKey};
 
 /// Render the MCP Config panel.
 ///

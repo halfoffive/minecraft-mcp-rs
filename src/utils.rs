@@ -24,6 +24,33 @@ pub fn to_snake_case(s: &str) -> String {
     result
 }
 
+/// Case-insensitive ASCII substring search (single allocation for the
+/// lowercased needle, none per haystack).
+///
+/// `needle` must already be lowercased. `haystack` is scanned byte-wise with
+/// a non-allocating ASCII-folding comparison, so filtering thousands of
+/// blocks by `block_type` no longer allocates one lowercase `String` per
+/// block (see `get_nearby_blocks`). Non-ASCII bytes are compared verbatim —
+/// block/item ids are pure ASCII, so this is safe for them; for non-ASCII
+/// input the comparison is byte-exact rather than case-insensitive.
+pub fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let needle_bytes = needle.as_bytes();
+    let hay_bytes = haystack.as_bytes();
+    if needle_bytes.len() > hay_bytes.len() {
+        return false;
+    }
+    let last_start = hay_bytes.len() - needle_bytes.len();
+    (0..=last_start).any(|start| {
+        hay_bytes[start..start + needle_bytes.len()]
+            .iter()
+            .zip(needle_bytes)
+            .all(|(h, n)| h.eq_ignore_ascii_case(n))
+    })
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════
@@ -70,5 +97,36 @@ mod tests {
         assert_eq!(to_snake_case("OakPlanks"), "oak_planks");
         assert_eq!(to_snake_case("DiamondOre"), "diamond_ore");
         assert_eq!(to_snake_case("NetheriteBlock"), "netherite_block");
+    }
+
+    // ── contains_ascii_case_insensitive (B5) ────────────────────────
+
+    #[test]
+    fn test_contains_ascii_case_insensitive_matches() {
+        assert!(contains_ascii_case_insensitive("GrassBlock", "grass"));
+        assert!(contains_ascii_case_insensitive("grass_block", "GRASS"));
+        assert!(contains_ascii_case_insensitive("DIAMOND_ORE", "ore"));
+        assert!(contains_ascii_case_insensitive("stone", "ST"));
+    }
+
+    #[test]
+    fn test_contains_ascii_case_insensitive_no_match() {
+        assert!(!contains_ascii_case_insensitive("grass_block", "dirt"));
+        assert!(!contains_ascii_case_insensitive("stone", "nt")); // non-contiguous
+        assert!(!contains_ascii_case_insensitive("ab", "abc")); // needle longer
+    }
+
+    #[test]
+    fn test_contains_ascii_case_insensitive_empty_needle() {
+        assert!(contains_ascii_case_insensitive("", ""));
+        assert!(contains_ascii_case_insensitive("stone", ""));
+    }
+
+    #[test]
+    fn test_contains_ascii_case_insensitive_multi_byte_verbatim() {
+        // Non-ASCII bytes are compared verbatim (no case folding) — ids are
+        // ASCII, but the helper must not panic or allocate on them.
+        assert!(contains_ascii_case_insensitive("石stone", "stone"));
+        assert!(!contains_ascii_case_insensitive("石", "石石"));
     }
 }

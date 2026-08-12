@@ -233,18 +233,6 @@ mod tests {
         state.set_online(true);
     }
 
-    /// Simulate an open container by storing a dummy handle.
-    /// Since we cannot construct a real `ContainerHandle` in tests,
-    /// we use `set_container_handle` to set the internal Option to `Some`.
-    /// The actual handle type doesn't matter for `has_container_open()` checks.
-    #[allow(dead_code)]
-    fn simulate_container_open(_state: &SharedState) {
-        // ContainerHandle can't be constructed in tests — we test the
-        // has_container_open() path via the existing state API.
-        // For integration tests, a real Minecraft connection is needed.
-        // Unit tests below validate the error paths (offline, no container open).
-    }
-
     // ── open_container ──────────────────────────────────────────
 
     #[tokio::test]

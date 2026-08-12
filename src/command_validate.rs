@@ -2,7 +2,7 @@
 //!
 //! This module provides validation functions that check command parameters
 //! for correctness before they are passed to the bot engine. Validation is
-//! stateless �?it only checks that the values themselves are within expected
+//! stateless — it only checks that the values themselves are within expected
 //! ranges, without consulting any external state.
 
 use crate::error::BotError;
@@ -1037,7 +1037,7 @@ mod tests {
     fn test_all_variants_pass_or_fail_validation() {
         let cmds = all_commands();
         for cmd in &cmds {
-            // Every command must return either Ok or Err �?no panics.
+            // Every command must return either Ok or Err — no panics.
             let _ = validate_command(cmd);
         }
     }

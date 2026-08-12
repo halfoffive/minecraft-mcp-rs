@@ -97,7 +97,8 @@ pub fn get_nearby_blocks(
 
     // Pre-compute the lowercased filter once outside the hot closure so we
     // don't allocate a new `String` per block when filtering thousands of
-    // nearby blocks.
+    // nearby blocks. The per-block match uses the non-allocating ASCII
+    // substring helper (block ids are pure ASCII).
     let ft_lower = filter_type
         .as_deref()
         .filter(|ft| !ft.is_empty())
@@ -112,7 +113,7 @@ pub fn get_nearby_blocks(
                 && (b.position.z - center.z).abs() <= r
         })
         .filter(|b| match &ft_lower {
-            Some(ft) => b.block_type.to_lowercase().contains(ft.as_str()),
+            Some(ft) => crate::utils::contains_ascii_case_insensitive(&b.block_type, ft),
             None => true,
         })
         .collect();

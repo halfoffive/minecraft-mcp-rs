@@ -23,8 +23,8 @@ use egui::Context;
 use crate::bot::spawn::{join_with_timeout, spawn_bot_connection};
 use crate::channel::{BotCommandReceiver, BotCommandSender};
 use crate::config::{AppConfig, McpTransport};
+use crate::i18n::Language;
 use crate::state::SharedState;
-use crate::ui::i18n::Language;
 use crate::ui::{mcp_config, preview, settings, status};
 
 /// Main egui application shell.
@@ -301,62 +301,50 @@ impl App for MinecraftApp {
         let cfg_lang = self.state.read_config().language;
         if self.last_language != cfg_lang {
             self.last_language = cfg_lang;
-            crate::ui::i18n::set(cfg_lang);
+            crate::i18n::set(cfg_lang);
         }
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            ui.heading(crate::ui::i18n::tr(crate::ui::i18n::TextKey::AppTitle));
+            ui.heading(crate::i18n::tr(crate::i18n::TextKey::AppTitle));
             ui.separator();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.collapsing(
-                    crate::ui::i18n::tr(crate::ui::i18n::TextKey::Settings),
-                    |ui| {
-                        if let Some(ref mut edit) = self.edit_config {
-                            let connect_clicked = settings::settings_panel(ui, &self.state, edit);
+                ui.collapsing(crate::i18n::tr(crate::i18n::TextKey::Settings), |ui| {
+                    if let Some(ref mut edit) = self.edit_config {
+                        let connect_clicked = settings::settings_panel(ui, &self.state, edit);
 
-                            if connect_clicked {
-                                // Persist edits before connecting. If
-                                // validation fails, surface the error via
-                                // `last_error` (shown in the Status panel)
-                                // and skip connecting so the user can fix
-                                // the invalid field.
-                                match edit.apply(&self.state) {
-                                    Ok(()) => self.connect_bot(),
-                                    Err(e) => self.state.set_last_error(e),
-                                }
+                        if connect_clicked {
+                            // Persist edits before connecting. If
+                            // validation fails, surface the error via
+                            // `last_error` (shown in the Status panel)
+                            // and skip connecting so the user can fix
+                            // the invalid field.
+                            match edit.apply(&self.state) {
+                                Ok(()) => self.connect_bot(),
+                                Err(e) => self.state.set_last_error(e),
                             }
                         }
-                    },
-                );
+                    }
+                });
 
-                ui.collapsing(
-                    crate::ui::i18n::tr(crate::ui::i18n::TextKey::Status),
-                    |ui| {
-                        status::status_panel(ui, &self.state);
-                    },
-                );
+                ui.collapsing(crate::i18n::tr(crate::i18n::TextKey::Status), |ui| {
+                    status::status_panel(ui, &self.state);
+                });
 
-                ui.collapsing(
-                    crate::ui::i18n::tr(crate::ui::i18n::TextKey::Preview),
-                    |ui| {
-                        preview::preview_panel(
-                            ui,
-                            &self.state,
-                            &mut self.preview_texture,
-                            &mut self.preview_last_annotation,
-                        );
-                    },
-                );
+                ui.collapsing(crate::i18n::tr(crate::i18n::TextKey::Preview), |ui| {
+                    preview::preview_panel(
+                        ui,
+                        &self.state,
+                        &mut self.preview_texture,
+                        &mut self.preview_last_annotation,
+                    );
+                });
 
-                ui.collapsing(
-                    crate::ui::i18n::tr(crate::ui::i18n::TextKey::McpConfig),
-                    |ui| {
-                        if let Some(ref edit) = self.edit_config {
-                            mcp_config::mcp_config_panel(ui, edit);
-                        }
-                    },
-                );
+                ui.collapsing(crate::i18n::tr(crate::i18n::TextKey::McpConfig), |ui| {
+                    if let Some(ref edit) = self.edit_config {
+                        mcp_config::mcp_config_panel(ui, edit);
+                    }
+                });
             });
         });
     }
@@ -364,3 +352,48 @@ impl App for MinecraftApp {
 
 // Tests for the bot-connection spawn helper (incl. `join_with_timeout`,
 // which used to live in this file) are in `src/bot/spawn.rs::tests`.
+
+// ═══════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::state::SharedState;
+
+    /// `EditConfig::apply` persists every edited field into `SharedState`.
+    #[test]
+    fn test_edit_config_apply_persists_changes() {
+        let state = SharedState::new(AppConfig::default());
+        let mut edit = EditConfig::from(&state.read_config().clone());
+        edit.mc_address = "mc.example.com".into();
+        edit.mc_port = 25566;
+        edit.ai_username = "Robot".into();
+        edit.mcp_port = 9011;
+        edit.command_timeout_secs = 42;
+
+        edit.apply(&state).expect("valid edit should apply");
+
+        let cfg = state.read_config();
+        assert_eq!(cfg.mc_address, "mc.example.com");
+        assert_eq!(cfg.mc_port, 25566);
+        assert_eq!(cfg.ai_username, "Robot");
+        assert_eq!(cfg.mcp_port, 9011);
+        assert_eq!(cfg.command_timeout_secs, 42);
+    }
+
+    /// An invalid edit (empty `mc_address`) is rejected and leaves the
+    /// stored config untouched.
+    #[test]
+    fn test_edit_config_apply_rejects_invalid_and_leaves_config() {
+        let state = SharedState::new(AppConfig::default());
+        let mut edit = EditConfig::from(&state.read_config().clone());
+        edit.mc_address.clear();
+
+        assert!(edit.apply(&state).is_err());
+        // The original config is unchanged.
+        assert!(!state.read_config().mc_address.is_empty());
+    }
+}

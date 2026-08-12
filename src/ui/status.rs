@@ -9,8 +9,23 @@ use egui::Ui;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use crate::i18n::{self, TextKey};
 use crate::state::{McpServerStatus, SharedState};
-use crate::ui::i18n::{self, TextKey};
+
+/// Compute the command success rate as a percentage.
+///
+/// Returns `None` when there is nothing to measure yet (`processed == 0`),
+/// so the UI can omit the rate line instead of showing "0%". The rate is
+/// clamped to `[0, 100]` — `succeeded` should never exceed `processed`, but
+/// the counters are updated from a racing executor, so a defensive clamp
+/// keeps the display honest.
+pub fn success_rate(processed: u64, succeeded: u64) -> Option<f64> {
+    if processed == 0 {
+        return None;
+    }
+    let rate = (succeeded as f64 / processed as f64) * 100.0;
+    Some(rate.clamp(0.0, 100.0))
+}
 
 /// Render the status panel.
 ///
@@ -218,8 +233,7 @@ pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
         ui.label(format!("{} {}", i18n::tr(TextKey::Succeeded), succeeded));
         ui.label(format!("{} {}", i18n::tr(TextKey::Failed), failed));
 
-        if processed > 0 {
-            let rate = (succeeded as f64 / processed as f64) * 100.0;
+        if let Some(rate) = success_rate(processed, succeeded) {
             ui.label(format!("{} {:.1}%", i18n::tr(TextKey::SuccessRate), rate));
         }
     });
@@ -243,4 +257,40 @@ pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
                 });
         }
     });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::success_rate;
+
+    /// No processed commands → no rate (UI omits the line).
+    #[test]
+    fn test_success_rate_none_when_nothing_processed() {
+        assert_eq!(success_rate(0, 0), None);
+        assert_eq!(success_rate(0, 5), None);
+    }
+
+    #[test]
+    fn test_success_rate_full() {
+        let rate = success_rate(10, 10).expect("rate exists");
+        assert!((rate - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_success_rate_partial() {
+        let rate = success_rate(4, 3).expect("rate exists");
+        assert!((rate - 75.0).abs() < 1e-9);
+    }
+
+    /// A racing executor can momentarily make `succeeded > processed`; the
+    /// rate must be clamped rather than reporting >100%.
+    #[test]
+    fn test_success_rate_clamps_over_100() {
+        let rate = success_rate(2, 5).expect("rate exists");
+        assert!(rate <= 100.0);
+    }
 }

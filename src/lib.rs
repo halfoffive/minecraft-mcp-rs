@@ -2,7 +2,7 @@
 //!
 //! Architecture: types → logic → state → bot → mcp → ui
 //! Module structure maps to the crate's layered design:
-//! - Top-level: foundational types, error handling, config, utilities
+//! - Top-level: foundational types, error handling, config, utilities, i18n
 //! - `bot`: Minecraft bot lifecycle, event handling, command execution
 //! - `mcp`: Model Context Protocol server and tool implementations
 //! - `ui`: Desktop UI (status, settings, app shell)
@@ -14,6 +14,7 @@ pub mod command_validate;
 pub mod compound_ops;
 pub mod config;
 pub mod error;
+pub mod i18n;
 pub mod logging;
 pub mod mining_calc;
 pub mod snapshot;
@@ -45,7 +46,6 @@ pub mod mcp {
 pub mod ui {
     pub mod app;
     pub mod fonts;
-    pub mod i18n;
     pub mod mcp_config;
     pub mod preview;
     pub mod settings;

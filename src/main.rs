@@ -78,7 +78,7 @@ fn main() {
     // constructing any UI strings (notably the window title passed to
     // `eframe::run_native` below).  This ensures the title and all UI text
     // honour the user's saved language from the very first frame.
-    minecraft_mcp_rs::ui::i18n::set(config.language);
+    minecraft_mcp_rs::i18n::set(config.language);
 
     // ══════════════════════════════════════════════════════════════════
     // Create shared state and command channel.
@@ -209,7 +209,7 @@ fn main() {
     };
 
     eframe::run_native(
-        minecraft_mcp_rs::ui::i18n::tr(minecraft_mcp_rs::ui::i18n::TextKey::AppTitle),
+        minecraft_mcp_rs::i18n::tr(minecraft_mcp_rs::i18n::TextKey::AppTitle),
         native_options,
         Box::new(move |cc| {
             // Install the platform-default CJK system font so Simplified
@@ -221,7 +221,7 @@ fn main() {
             // anything changed between the early `set()` call above and
             // the egui closure firing.
             let lang = state_for_egui.read_config().language;
-            minecraft_mcp_rs::ui::i18n::set(lang);
+            minecraft_mcp_rs::i18n::set(lang);
             Ok(Box::new(MinecraftApp::new(
                 state_for_egui,
                 sender_for_egui,

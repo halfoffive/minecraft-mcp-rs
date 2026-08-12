@@ -5,7 +5,7 @@
 //! and atomically updating [`SharedState`] via [`WorldSnapshot`].
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use azalea::Client;
@@ -78,7 +78,11 @@ impl SnapshotUpdater {
 
     /// Returns `true` if enough time has passed since the last update.
     /// Resets the timer on success so the caller does not need to.
-    fn check_and_update_timer(&self) -> bool {
+    ///
+    /// `pub(crate)`: `handle_tick` calls this **before** spawning the
+    /// build task so a throttled tick never spawns a wasted task (azalea
+    /// fires ~20 ticks/sec against a 500 ms snapshot interval).
+    pub(crate) fn check_and_update_timer(&self) -> bool {
         let mut last = self.last_update.lock().unwrap_or_else(|e| e.into_inner());
         if last.elapsed() >= Duration::from_millis(self.interval_ms) {
             *last = Instant::now();
@@ -90,25 +94,26 @@ impl SnapshotUpdater {
 
     // ── Main tick handler ───────────────────────────────────
 
-    /// Called on every Tick event.
+    /// Build a fresh snapshot and store it in [`SharedState`], moving the
+    /// snapshot in (no clone — the previous `update_from_tick` cloned the
+    /// whole snapshot just to return it; the caller only needs a bool).
     ///
-    /// Returns `Some(snapshot)` if a new snapshot was built and stored in
-    /// [`SharedState`], or `None` if the call was throttled (interval has
-    /// not elapsed yet).
-    pub async fn update_from_tick(&self, bot: &Client) -> Option<WorldSnapshot> {
-        if !self.check_and_update_timer() {
-            return None;
-        }
-
+    /// Returns `true` if a new snapshot was built and stored (callers use
+    /// this to trigger a UI repaint).
+    ///
+    /// The caller is expected to have passed the
+    /// [`check_and_update_timer`](Self::check_and_update_timer) gate first
+    /// — this method does not throttle.
+    pub async fn build_and_store(&self, bot: &Client) -> bool {
         match build_snapshot_inner(bot, &self.shared_state, &self.dirty_tracker).await {
             Ok(snapshot) => {
-                self.shared_state.update_snapshot(snapshot.clone());
+                self.shared_state.update_snapshot(snapshot);
                 debug!("snapshot updated via SnapshotUpdater");
-                Some(snapshot)
+                true
             }
             Err(e) => {
                 warn!("snapshot build failed: {e}");
-                None
+                false
             }
         }
     }
@@ -317,7 +322,10 @@ async fn build_snapshot_inner(
         }
     }
 
-    let mut builder = SnapshotBuilder::new((*old_snapshot).clone())
+    // Only the old snapshot's blocks are carried into the builder — the
+    // production path replaces every other field via `with_*` below, so the
+    // old snapshot (incl. its `block_index` HashMap) is not deep-cloned.
+    let mut builder = SnapshotBuilder::new(old_snapshot.blocks.clone())
         .with_dirty_tracker(&mut builder_tracker)
         .with_self_player(self_player);
 
@@ -511,11 +519,33 @@ fn read_commands_enabled(bot: &Client) -> Option<bool> {
         .map(|level| level.0 > 0)
 }
 
+/// Cache of resolved block names, keyed by the raw [`BlockState`] id.
+///
+/// A dirty-chunk scan re-reads thousands of blocks per snapshot tick, and
+/// each block name used to pay `format!("{kind:?}")` + `to_snake_case()` —
+/// two heap allocations per block, every tick. `BlockState` is a `Copy`
+/// `Hash` id, so the parse cost is now paid once per distinct block state
+/// instead of once per block.
+static BLOCK_NAME_CACHE: LazyLock<Mutex<HashMap<azalea::block::BlockState, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 fn block_state_to_name(block_state: azalea::block::BlockState) -> String {
+    {
+        let cache = BLOCK_NAME_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(name) = cache.get(&block_state) {
+            return name.clone();
+        }
+    }
+    // Miss: compute outside the lock (the Debug formatting below allocates).
     #[allow(deprecated)]
     let block_kind = azalea::registry::Block::from(block_state);
     let debug_name = format!("{block_kind:?}");
-    to_snake_case(&debug_name)
+    let name = to_snake_case(&debug_name);
+    BLOCK_NAME_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(block_state, name.clone());
+    name
 }
 
 fn azalea_gamemode_to_ours(gm: azalea::core::game_type::GameMode) -> GameMode {
