@@ -38,6 +38,13 @@ pub(crate) trait BotActions {
     /// Start pathfinding to a block position and await completion (or timeout).
     async fn goto(&self, pos: &BlockPos) -> Result<(), BotError>;
 
+    /// Stop the currently running pathfinder (if any).
+    ///
+    /// Used after a movement timeout so the bot does not keep walking toward
+    /// a goal the caller has already given up on. Must be callable at any
+    /// time, including when no pathfinding is active.
+    fn stop_pathfinding(&self);
+
     /// Whether the bot is currently within the pathfinder's "arrived"
     /// radius of the most recent `goto` goal.
     ///
@@ -59,6 +66,16 @@ pub(crate) trait BotActions {
 
     /// Drop items from an inventory slot (0-35).
     fn drop_item(&self, slot: u8, count: u8);
+
+    /// Swap the stack in `source_menu_slot` with the hotbar slot
+    /// `target_hotbar_slot` (0-8) via a container swap-click.
+    ///
+    /// `source_menu_slot` is a *menu* slot index: for the player menu the
+    /// main inventory is 9-35 and the hotbar is 36-44. Used by
+    /// [`BotCommand::MoveItemToHotbar`] to bring an inventory item into the
+    /// hotbar without any server-side command. No-op when a container window
+    /// is open (the click would target the container menu instead).
+    fn swap_hotbar(&self, source_menu_slot: u16, target_hotbar_slot: u8);
 
     /// Start using the currently held item.
     fn start_use_item(&self);
@@ -231,6 +248,10 @@ impl BotActions for RealBotClient {
         }
     }
 
+    fn stop_pathfinding(&self) {
+        self.client.stop_pathfinding();
+    }
+
     async fn jump(&self) {
         self.client.set_jumping(true);
         // A full Minecraft jump takes ~300ms from lift-off to landing; the
@@ -296,6 +317,30 @@ impl BotActions for RealBotClient {
         if switched_hotbar {
             self.client.set_selected_hotbar_slot(original_slot);
         }
+    }
+
+    fn swap_hotbar(&self, source_menu_slot: u16, target_hotbar_slot: u8) {
+        use azalea_inventory::operations::SwapClick;
+
+        // The container click is only valid against the player menu (window
+        // id 0). While a container is open `get_inventory()` returns a handle
+        // targeting the container window, so the swap would act on the wrong
+        // menu — bail out and let the caller report the limitation.
+        let inventory = self.client.get_inventory();
+        if inventory.id() != 0 {
+            warn!(
+                source_menu_slot,
+                target_hotbar_slot,
+                "swap_hotbar skipped: a container window is open (id {}), \
+                 swap would target the container menu",
+                inventory.id()
+            );
+            return;
+        }
+        inventory.click(SwapClick {
+            source_slot: source_menu_slot,
+            target_slot: target_hotbar_slot,
+        });
     }
 
     fn start_use_item(&self) {
@@ -569,7 +614,13 @@ impl<B: BotActions> CommandExecutor<B> {
                         respond_to,
                     } = wrapped;
                     debug!(command = ?command, "dispatching command");
+                    // Mark the executor busy for the duration of the command so
+                    // query tools can tell that a `force` snapshot refresh may
+                    // return pre-command state (the serial loop cannot process
+                    // a refresh request while it is inside this command).
+                    self.state.set_executor_busy(true);
                     let result = self.dispatch(command).await;
+                    self.state.set_executor_busy(false);
                     if respond_to.send(result).is_err() {
                         warn!("command responder dropped — result lost");
                     }
@@ -578,6 +629,7 @@ impl<B: BotActions> CommandExecutor<B> {
             }
         }
 
+        self.state.set_executor_busy(false);
         trace!("command executor loop ended (channel closed)");
     }
 
@@ -638,7 +690,11 @@ impl<B: BotActions> CommandExecutor<B> {
 
             // ── Item / inventory ──────────────────────────────────
             BotCommand::SwitchHotbarSlot(slot) => self.handle_switch_hotbar_slot(slot),
-            BotCommand::DropItem(slot, count) => self.handle_drop_item(slot, count),
+            BotCommand::DropItem(slot, count) => self.handle_drop_item(slot, count).await,
+            BotCommand::MoveItemToHotbar(hotbar_slot, item_id, count) => {
+                self.handle_move_item_to_hotbar(hotbar_slot, item_id, count)
+                    .await
+            }
             BotCommand::UseItem => self.handle_use_item(),
             BotCommand::UseItemWithSlot(slot) => self.handle_use_item_with_slot(slot),
             BotCommand::EquipTool(tool) => self.handle_equip_tool(tool, None),
@@ -662,7 +718,7 @@ impl<B: BotActions> CommandExecutor<B> {
 
             // ── Chat / command ────────────────────────────────────
             BotCommand::SendChat(msg) => self.handle_send_chat(msg),
-            BotCommand::ExecuteCommand(cmd) => self.handle_execute_command(cmd),
+            BotCommand::ExecuteCommand(cmd) => self.handle_execute_command(cmd).await,
             BotCommand::SetGameMode(mode) => self.handle_set_game_mode(mode),
 
             // ── Queries ───────────────────────────────────────────
@@ -680,18 +736,64 @@ impl<B: BotActions> CommandExecutor<B> {
 
     async fn handle_move_to(&self, pos: BlockPos) -> Result<BotResult, BotError> {
         trace!(?pos, "MoveTo");
-        self.bot.goto(&pos).await?;
-
-        // Verify the target was actually reached.
-        if !self.state.is_online() {
-            return Err(BotError::Offline("disconnected during movement".into()));
+        match self.goto_with_margin(pos).await {
+            GotoOutcome::Completed(Ok(())) => {
+                // Verify the target was actually reached.
+                if !self.state.is_online() {
+                    return Err(BotError::Offline("disconnected during movement".into()));
+                }
+                Ok(BotResult {
+                    success: true,
+                    message: format!("Moved to {}", pos),
+                    data: None,
+                })
+            }
+            GotoOutcome::Completed(Err(e)) => Err(e),
+            // The envelope timeout is about to fire — return a structured
+            // partial result (current position + distance covered) instead of
+            // letting `send_command` produce a bare `CommandTimeout`.
+            GotoOutcome::TimedOut {
+                start,
+                current,
+                timeout_secs,
+            } => Ok(movement_timeout_result(
+                "MoveTo",
+                pos,
+                start,
+                current,
+                timeout_secs,
+            )),
         }
+    }
 
-        Ok(BotResult {
-            success: true,
-            message: format!("Moved to {}", pos),
-            data: None,
-        })
+    /// Run [`BotActions::goto`] with a margin short of the command envelope
+    /// timeout so a long movement returns a *structured* "timed out" result
+    /// (with current position and distance moved) instead of a bare
+    /// `BotError::CommandTimeout` from `send_command`.
+    ///
+    /// On timeout the pathfinder is stopped so the bot does not keep walking
+    /// toward a goal the caller has already given up on.
+    async fn goto_with_margin(&self, target: BlockPos) -> GotoOutcome {
+        // Read the configured timeout from shared state — the same value
+        // `BotCommandSender::send_command`'s envelope timeout uses.
+        let timeout_dur = Duration::from_secs(self.state.read_config().command_timeout_secs);
+        let timeout_secs = timeout_dur.as_secs();
+        // Leave a small margin for the executor to reply before the envelope
+        // timeout in `BotCommandSender::send_command` abandons the response.
+        let goto_window = timeout_dur.saturating_sub(MOVEMENT_REPLY_MARGIN);
+        let start = self.state.read_snapshot().self_player.position;
+        match tokio::time::timeout(goto_window, self.bot.goto(&target)).await {
+            Ok(result) => GotoOutcome::Completed(result),
+            Err(_) => {
+                self.bot.stop_pathfinding();
+                let current = self.state.read_snapshot().self_player.position;
+                GotoOutcome::TimedOut {
+                    start,
+                    current,
+                    timeout_secs,
+                }
+            }
+        }
     }
 
     async fn handle_walk_direction(
@@ -876,7 +978,14 @@ impl<B: BotActions> CommandExecutor<B> {
         })
     }
 
-    fn handle_drop_item(&self, slot: u8, count: u8) -> Result<BotResult, BotError> {
+    /// Drop items from a slot and verify the drop actually landed.
+    ///
+    /// The previous implementation returned success unconditionally, so a
+    /// drop that was silently rejected by the server (e.g. the slot was
+    /// already empty, or a container window was open and the click targeted
+    /// the wrong menu) still reported "Dropped N item(s)". We now read the
+    /// inventory before and after the click and report the truth.
+    async fn handle_drop_item(&self, slot: u8, count: u8) -> Result<BotResult, BotError> {
         trace!(slot, count, "DropItem");
         // A count of 0 means "drop nothing" — return early without touching the
         // inventory or hotbar selection. Previously `drop_item` clamped the
@@ -888,11 +997,138 @@ impl<B: BotActions> CommandExecutor<B> {
                 data: None,
             });
         }
+
+        // Snapshot the affected slot before the click. A None entry means the
+        // slot was already empty — the click would throw from an empty slot,
+        // which the server may reject silently.
+        let before = self.bot.inventory_entries();
+        let before_count = before
+            .get(slot as usize)
+            .and_then(|opt| opt.as_ref())
+            .map(|stack| stack.count)
+            .unwrap_or(0);
+
         self.bot.drop_item(slot, count);
+
+        // Give the server a moment to apply the click and send the
+        // container-content packets back.
+        sleep(Duration::from_millis(250)).await;
+        let after = self.bot.inventory_entries();
+
+        let removed = before_count.saturating_sub(
+            after
+                .get(slot as usize)
+                .and_then(|opt| opt.as_ref())
+                .map(|stack| stack.count)
+                .unwrap_or(0),
+        );
+
+        // The inventory read comes back empty when a non-player menu (e.g. a
+        // chest) is open — the click then targeted the wrong window and was
+        // never sent by azalea. Report honestly instead of faking success.
+        if after.is_empty() && !before.is_empty() {
+            return Ok(BotResult {
+                success: true,
+                message: format!(
+                    "Dropped {} item(s) from slot {} (container window open; drop may not apply until the container is closed)",
+                    count, slot
+                ),
+                data: Some(serde_json::json!({"verified": false, "container_window_open": true})),
+            });
+        }
+
+        if removed >= count {
+            Ok(BotResult {
+                success: true,
+                message: format!("Dropped {} item(s) from slot {}", count, slot),
+                data: Some(serde_json::json!({"verified": true, "removed": removed})),
+            })
+        } else if before_count == 0 {
+            // Slot was empty before the drop — the click had nothing to throw.
+            Ok(BotResult {
+                success: false,
+                message: format!(
+                    "Drop did not change inventory slot {slot}: the slot is already empty"
+                ),
+                data: Some(serde_json::json!({"verified": false, "removed": 0})),
+            })
+        } else {
+            // The server rejected the click or the slot count did not drop.
+            Ok(BotResult {
+                success: false,
+                message: format!(
+                    "Drop did not change inventory slot {slot}: server rejected the click or the window did not match (removed {removed} of {count})"
+                ),
+                data: Some(serde_json::json!({"verified": false, "removed": removed})),
+            })
+        }
+    }
+
+    /// Move an inventory stack into a hotbar slot via a container swap-click.
+    ///
+    /// Finds the first inventory slot holding at least `count` of `item_id`,
+    /// then swaps it with hotbar slot `hotbar_slot` (0-8). This is the
+    /// in-game "press the hotbar number while clicking a slot" operation and
+    /// needs no server-side command — it only moves items that already exist
+    /// in the inventory, so it cannot conjure items (that still requires an
+    /// `/give`-style command).
+    async fn handle_move_item_to_hotbar(
+        &self,
+        hotbar_slot: u8,
+        item_id: String,
+        count: u8,
+    ) -> Result<BotResult, BotError> {
+        trace!(hotbar_slot, %item_id, count, "MoveItemToHotbar");
+        let entries = self.bot.inventory_entries();
+
+        // Locate the first slot with a matching item id and enough count.
+        let source_idx = entries.iter().position(
+            |opt| matches!(opt, Some(stack) if stack.item_id == item_id && stack.count >= count),
+        );
+
+        let Some(source_idx) = source_idx else {
+            return Err(BotError::InvalidParams(format!(
+                "item_id '{item_id}' not found in inventory (need at least {count} in one slot)"
+            )));
+        };
+
+        // Logical inventory index → player-menu slot: hotbar 0-8 maps to menu
+        // 36-44, main inventory 9-35 maps to menu 9-35 (identity).
+        let source_menu_slot: u16 = if source_idx <= 8 {
+            36 + source_idx as u16
+        } else {
+            source_idx as u16
+        };
+
+        self.bot.swap_hotbar(source_menu_slot, hotbar_slot);
+
+        // Wait for the server to apply the swap and send container-content
+        // packets back, then verify the hotbar slot now holds the item.
+        sleep(Duration::from_millis(250)).await;
+        let verified = matches!(
+            self.bot.inventory_entries().get(hotbar_slot as usize),
+            Some(Some(stack)) if stack.item_id == item_id && stack.count >= count
+        );
+
         Ok(BotResult {
-            success: true,
-            message: format!("Dropped {} item(s) from slot {}", count, slot),
-            data: None,
+            success: verified,
+            message: format!(
+                "Moved {}x {} into hotbar slot {} (source inventory slot {source_idx}){}",
+                count,
+                item_id,
+                hotbar_slot,
+                if verified {
+                    ""
+                } else {
+                    " — unverified: a container window may be open"
+                }
+            ),
+            data: Some(serde_json::json!({
+                "verified": verified,
+                "source_slot": source_idx,
+                "source_menu_slot": source_menu_slot,
+                "hotbar_slot": hotbar_slot,
+            })),
         })
     }
 
@@ -1124,18 +1360,67 @@ impl<B: BotActions> CommandExecutor<B> {
         })
     }
 
-    fn handle_execute_command(&self, cmd: String) -> Result<BotResult, BotError> {
+    /// Execute a Minecraft command and verify the server did not reject it.
+    ///
+    /// The server reports command failures (e.g. `Incorrect argument for
+    /// command ...`, `Unknown command`) as a chat/system message rather than
+    /// an error packet. We record the chat baseline, send the command, wait a
+    /// short window for feedback, and diff the new system messages: a match
+    /// against a known rejection pattern is returned as
+    /// [`BotError::CommandRejected`] so the MCP client learns the truth
+    /// instead of seeing a fake success (previously `execute_command` always
+    /// returned "Executed command: ..."). When no rejection is detected the
+    /// command is reported as executed, with the newest system feedback
+    /// attached to the message when available.
+    async fn handle_execute_command(&self, cmd: String) -> Result<BotResult, BotError> {
         trace!(%cmd, "ExecuteCommand");
         // The MCP layer (tools_chat::handle_execute_command) already
         // normalises the leading `/`, so `cmd` is passed straight to chat.
         // Re-prepending here would produce `//command`, which Minecraft
         // treats as a normal chat message rather than a command.
+        let baseline_len = self.state.get_chat_messages().len();
         self.bot.chat(&cmd);
+
+        // Give the server a short window to reply with rejection feedback.
+        sleep(Duration::from_millis(COMMAND_FEEDBACK_WAIT_MS)).await;
+        let feedback = self.server_feedback_after(baseline_len);
+
+        // Borrow-check friendly: search a reference so `feedback` can be used
+        // again below when building the success message.
+        let rejection = feedback
+            .as_ref()
+            .and_then(|fb| is_command_rejection(fb).then_some(fb));
+        if let Some(rejection) = rejection {
+            return Err(BotError::CommandRejected {
+                command: cmd.clone(),
+                feedback: rejection.clone(),
+            });
+        }
+
+        // No rejection detected — report success, attaching the newest system
+        // feedback (if any) so clients can still see e.g. the result of the
+        // command ("Teleported X to ...", "Seed: [...]").
+        let message = match &feedback {
+            Some(fb) => format!("Executed command: {} (server: {fb})", cmd),
+            None => format!("Executed command: {}", cmd),
+        };
         Ok(BotResult {
             success: true,
-            message: format!("Executed command: {}", cmd),
-            data: None,
+            message,
+            data: feedback.map(|fb| serde_json::json!({ "feedback": fb })),
         })
+    }
+
+    /// Collect system chat messages that arrived after `baseline_len`
+    /// (strictly after the pre-command baseline), returning the newest one.
+    fn server_feedback_after(&self, baseline_len: usize) -> Option<String> {
+        self.state
+            .get_chat_messages()
+            .iter()
+            .skip(baseline_len)
+            .filter(|(sender, _)| sender.eq_ignore_ascii_case("System"))
+            .map(|(_, message)| message.clone())
+            .next_back()
     }
 
     fn handle_set_game_mode(&self, mode: GameMode) -> Result<BotResult, BotError> {
@@ -1196,53 +1481,68 @@ impl<B: BotActions> CommandExecutor<B> {
     async fn handle_smart_move(&self, target: BlockPos) -> Result<BotResult, BotError> {
         trace!(?target, "SmartMove");
 
-        let goto_result = self.bot.goto(&target).await;
-        let current_pos = self.state.read_snapshot().self_player.position;
+        match self.goto_with_margin(target).await {
+            GotoOutcome::TimedOut {
+                start,
+                current,
+                timeout_secs,
+            } => Ok(movement_timeout_result(
+                "SmartMove",
+                target,
+                start,
+                current,
+                timeout_secs,
+            )),
+            GotoOutcome::Completed(goto_result) => {
+                let current_pos = self.state.read_snapshot().self_player.position;
 
-        match goto_result {
-            Ok(()) => {
-                // Reached the target (or pathfinder believes it did).
-                let reached = (current_pos.x - target.x).abs() <= 1
-                    && (current_pos.y - target.y).abs() <= 1
-                    && (current_pos.z - target.z).abs() <= 1;
-                let reason = if reached { "reached" } else { "obstacle" };
-                let obstacle = if reached {
-                    None
-                } else {
-                    // Look for a solid block directly ahead (between current
-                    // and target) to report as the obstacle.
-                    find_obstacle_block(&self.state.read_snapshot(), current_pos, target)
-                };
+                match goto_result {
+                    Ok(()) => {
+                        // Reached the target (or pathfinder believes it did).
+                        let reached = (current_pos.x - target.x).abs() <= 1
+                            && (current_pos.y - target.y).abs() <= 1
+                            && (current_pos.z - target.z).abs() <= 1;
+                        let reason = if reached { "reached" } else { "obstacle" };
+                        let obstacle = if reached {
+                            None
+                        } else {
+                            // Look for a solid block directly ahead (between
+                            // current and target) to report as the obstacle.
+                            find_obstacle_block(&self.state.read_snapshot(), current_pos, target)
+                        };
 
-                // F2-6: `success` must reflect whether the target was actually
-                // reached. Previously this branch reported `success: true`
-                // even when an obstacle stopped the bot short — dishonest.
-                Ok(BotResult {
-                    success: reached,
-                    message: format!("SmartMove to {target}: {reason}"),
-                    data: Some(serde_json::json!({
-                        "reached": reached,
-                        "reason": reason,
-                        "position": [current_pos.x, current_pos.y, current_pos.z],
-                        "obstacle": obstacle,
-                    })),
-                })
-            }
-            Err(e) => {
-                // Pathfinder failed — treat as obstacle. F2-6: report
-                // `success: false` (previously `true` despite the block).
-                let obstacle =
-                    find_obstacle_block(&self.state.read_snapshot(), current_pos, target);
-                Ok(BotResult {
-                    success: false,
-                    message: format!("SmartMove to {target} blocked: {e}"),
-                    data: Some(serde_json::json!({
-                        "reached": false,
-                        "reason": "obstacle",
-                        "position": [current_pos.x, current_pos.y, current_pos.z],
-                        "obstacle": obstacle,
-                    })),
-                })
+                        // F2-6: `success` must reflect whether the target was
+                        // actually reached. Previously this branch reported
+                        // `success: true` even when an obstacle stopped the bot
+                        // short — dishonest.
+                        Ok(BotResult {
+                            success: reached,
+                            message: format!("SmartMove to {target}: {reason}"),
+                            data: Some(serde_json::json!({
+                                "reached": reached,
+                                "reason": reason,
+                                "position": [current_pos.x, current_pos.y, current_pos.z],
+                                "obstacle": obstacle.map(obstacle_to_json),
+                            })),
+                        })
+                    }
+                    Err(e) => {
+                        // Pathfinder failed — treat as obstacle. F2-6: report
+                        // `success: false` (previously `true` despite the block).
+                        let obstacle =
+                            find_obstacle_block(&self.state.read_snapshot(), current_pos, target);
+                        Ok(BotResult {
+                            success: false,
+                            message: format!("SmartMove to {target} blocked: {e}"),
+                            data: Some(serde_json::json!({
+                                "reached": false,
+                                "reason": "obstacle",
+                                "position": [current_pos.x, current_pos.y, current_pos.z],
+                                "obstacle": obstacle.map(obstacle_to_json),
+                            })),
+                        })
+                    }
+                }
             }
         }
     }
@@ -1268,25 +1568,39 @@ impl<B: BotActions> CommandExecutor<B> {
             });
         }
 
-        // In creative mode the pathfinder can fly. Fall back to goto.
-        let goto_result = self.bot.goto(&target).await;
-        let final_pos = self.state.read_snapshot().self_player.position;
+        match self.goto_with_margin(target).await {
+            GotoOutcome::TimedOut {
+                start,
+                current,
+                timeout_secs,
+            } => Ok(movement_timeout_result(
+                "FlyTo",
+                target,
+                start,
+                current,
+                timeout_secs,
+            )),
+            GotoOutcome::Completed(goto_result) => {
+                // In creative mode the pathfinder can fly. Fall back to goto.
+                let final_pos = self.state.read_snapshot().self_player.position;
 
-        let reached = (final_pos.x - target.x).abs() <= 1
-            && (final_pos.y - target.y).abs() <= 1
-            && (final_pos.z - target.z).abs() <= 1;
-        let reason = if reached { "reached" } else { "obstacle" };
+                let reached = (final_pos.x - target.x).abs() <= 1
+                    && (final_pos.y - target.y).abs() <= 1
+                    && (final_pos.z - target.z).abs() <= 1;
+                let reason = if reached { "reached" } else { "obstacle" };
 
-        let success = goto_result.is_ok() || reached;
-        Ok(BotResult {
-            success,
-            message: format!("FlyTo {target}: {reason}"),
-            data: Some(serde_json::json!({
-                "reached": reached,
-                "reason": reason,
-                "position": [final_pos.x, final_pos.y, final_pos.z],
-            })),
-        })
+                let success = goto_result.is_ok() || reached;
+                Ok(BotResult {
+                    success,
+                    message: format!("FlyTo {target}: {reason}"),
+                    data: Some(serde_json::json!({
+                        "reached": reached,
+                        "reason": reason,
+                        "position": [final_pos.x, final_pos.y, final_pos.z],
+                    })),
+                })
+            }
+        }
     }
 
     /// Collect dropped item entities within `radius` blocks of the player.
@@ -1450,38 +1764,173 @@ impl<B: BotActions> CommandExecutor<B> {
 // Free-function helpers for v2 handlers
 // ═══════════════════════════════════════════════════════════════
 
+/// How long the executor waits for server feedback after sending a
+/// `/execute`-style command before deciding whether it was rejected.
+///
+/// The server replies to command failures (and most successes) over chat
+/// within a few hundred milliseconds; waiting longer would delay every
+/// `execute_command` call without improving detection.
+const COMMAND_FEEDBACK_WAIT_MS: u64 = 400;
+
+/// Margin (in seconds) subtracted from the command timeout when wrapping a
+/// movement `goto`. The movement must report back *before* the
+/// `BotCommandSender::send_command` envelope timeout, otherwise the MCP
+/// client sees a bare `CommandTimeout` instead of the structured partial
+/// result (`position`, `distance`, ...) this executor builds.
+const MOVEMENT_REPLY_MARGIN: Duration = Duration::from_secs(1);
+
+/// Outcome of a [`CommandExecutor::goto_with_margin`] run.
+enum GotoOutcome {
+    /// The inner `goto` finished before the margin deadline.
+    Completed(Result<(), BotError>),
+    /// The margin deadline elapsed before `goto` returned — the pathfinder
+    /// was stopped and a structured partial result should be reported.
+    TimedOut {
+        /// Player position when the movement started.
+        start: BlockPos,
+        /// Player position when the deadline elapsed (may be unchanged).
+        current: BlockPos,
+        /// The configured command timeout in seconds.
+        timeout_secs: u64,
+    },
+}
+
+/// Build the structured "movement timed out" [`BotResult`] returned when a
+/// `goto` exceeds the command timeout. Carries the current position and the
+/// distance actually covered so the MCP client can decide whether to retry,
+/// continue, or cancel — instead of a bare `CommandTimeout` error with no
+/// context (S-fix #3).
+fn movement_timeout_result(
+    op: &str,
+    target: BlockPos,
+    start: BlockPos,
+    current: BlockPos,
+    timeout_secs: u64,
+) -> BotResult {
+    let dx = (current.x - start.x) as f64;
+    let dy = (current.y - start.y) as f64;
+    let dz = (current.z - start.z) as f64;
+    let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+    BotResult {
+        success: false,
+        message: format!(
+            "{op} to {target} timed out after {timeout_secs}s (moved {distance:.1} blocks; bot stopped)"
+        ),
+        data: Some(serde_json::json!({
+            "reason": "timeout",
+            "timeout_secs": timeout_secs,
+            "position": [current.x, current.y, current.z],
+            "start": [start.x, start.y, start.z],
+            "target": [target.x, target.y, target.z],
+            "distance_moved": distance,
+            "distance_xyz": [dx.abs(), dy.abs(), dz.abs()],
+        })),
+    }
+}
+
+/// Serialize an [`ObstacleInfo`] into the smart-move result payload.
+fn obstacle_to_json(obstacle: ObstacleInfo) -> serde_json::Value {
+    serde_json::json!({
+        "block_type": obstacle.block_type,
+        "x": obstacle.position.x,
+        "y": obstacle.position.y,
+        "z": obstacle.position.z,
+    })
+}
+
+/// A solid block reported as the obstacle that blocked movement.
+///
+/// Unlike the previous `Option<String>` (block type only), carrying the
+/// position lets the MCP client show *where* the bot is stuck.
+struct ObstacleInfo {
+    /// Snapshot block type (e.g. `"stone"`).
+    block_type: String,
+    /// World position of the blocking block.
+    position: BlockPos,
+}
+
+/// Case-insensitive prefix match against the server's known command-rejection
+/// messages (vanilla and common plugin servers).
+fn is_command_rejection(feedback: &str) -> bool {
+    const PATTERNS: &[&str] = &[
+        "incorrect argument for command",
+        "unknown or incomplete command",
+        "unknown command",
+        "you do not have permission to use this command",
+        "you are not allowed to use this command",
+        "cannot execute",
+    ];
+    let lower = feedback.to_lowercase();
+    PATTERNS.iter().any(|p| lower.contains(p))
+}
+
 /// Find the first solid block between `current` and `target` to report as
-/// the obstacle that blocked movement. Returns the block type as a string,
-/// or `None` if no candidate is found in the snapshot.
+/// the obstacle that blocked movement.
+///
+/// Scans the interpolated XZ line (proportional in both axes so the scan
+/// follows the real path instead of a 45° diagonal) across three Y layers
+/// (current Y, Y+1, Y-1 — an obstacle may sit at a different height than the
+/// bot's feet, e.g. a ledge). If the line is clear but the bot still stopped
+/// short, falls back to scanning the 3×3×3 neighbourhood around `current`.
+/// Returns `None` only if no solid block is found anywhere.
 fn find_obstacle_block(
     snapshot: &crate::types::WorldSnapshot,
     current: BlockPos,
     target: BlockPos,
-) -> Option<String> {
-    // Walk the integer line from current toward target (XZ plane) and
-    // return the first non-air block found in the snapshot. Interpolate both
-    // axes proportionally so the scan follows the real line instead of a 45°
-    // diagonal (which overshot one axis and skipped intermediate cells).
+) -> Option<ObstacleInfo> {
     let total_dx = target.x - current.x;
     let total_dz = target.z - current.z;
     let steps = total_dx.abs().max(total_dz.abs());
-    if steps == 0 {
-        return None;
-    }
-    for i in 1..=steps {
-        let pos = BlockPos::new(
-            current.x + total_dx * i / steps,
-            current.y,
-            current.z + total_dz * i / steps,
-        );
-        if let Some(&idx) = snapshot.block_index.get(&pos)
-            && !snapshot.blocks[idx].block_type.is_empty()
-            && snapshot.blocks[idx].block_type != "air"
-        {
-            return Some(snapshot.blocks[idx].block_type.clone());
+
+    // Obstacles usually sit at the bot's feet level (y), at head level (y+1),
+    // or a step below (y-1). Checking all three covers ledges and low walls.
+    for dy in [0i32, 1, -1] {
+        let y = current.y + dy;
+        if steps > 0 {
+            for i in 1..=steps {
+                let pos = BlockPos::new(
+                    current.x + total_dx * i / steps,
+                    y,
+                    current.z + total_dz * i / steps,
+                );
+                if let Some(obstacle) = solid_block_at(snapshot, pos) {
+                    return Some(obstacle);
+                }
+            }
         }
     }
+
+    // Line scan found nothing (or the bot never left `current`) — look at the
+    // surrounding blocks so the client still learns what surrounds the bot.
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                if dx == 0 && dy == 0 && dz == 0 {
+                    continue;
+                }
+                let pos = BlockPos::new(current.x + dx, current.y + dy, current.z + dz);
+                if let Some(obstacle) = solid_block_at(snapshot, pos) {
+                    return Some(obstacle);
+                }
+            }
+        }
+    }
+
     None
+}
+
+/// Return an [`ObstacleInfo`] for `pos` if the snapshot records a solid
+/// (non-air, non-empty) block there.
+fn solid_block_at(snapshot: &crate::types::WorldSnapshot, pos: BlockPos) -> Option<ObstacleInfo> {
+    let idx = snapshot.block_index.get(&pos)?;
+    let block = &snapshot.blocks[*idx];
+    if block.block_type.is_empty() || block.block_type == "air" {
+        return None;
+    }
+    Some(ObstacleInfo {
+        block_type: block.block_type.clone(),
+        position: pos,
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1512,6 +1961,10 @@ mod tests {
         /// `false` so the existing tests still see "arrived on first
         /// 50ms tick".
         goto_target_unreached: AtomicBool,
+        /// When `true`, `goto` never completes (simulates an unreachable
+        /// target / stalled pathfinder). Used to exercise the
+        /// `goto_with_margin` timeout path. Default `false`.
+        goto_hangs: AtomicBool,
         jump_calls: AtomicUsize,
         teleport_calls: Mutex<Vec<BlockPos>>,
         hotbar_switch_calls: Mutex<Vec<u8>>,
@@ -1530,6 +1983,8 @@ mod tests {
         /// Default 0 (inventory has free slots).
         player_inventory_occupied: AtomicUsize,
         position: Mutex<BlockPos>,
+        stop_pathfinding_calls: AtomicUsize,
+        swap_hotbar_calls: Mutex<Vec<(u16, u8)>>,
     }
 
     impl MockCallLog {
@@ -1538,6 +1993,7 @@ mod tests {
                 goto_calls: Mutex::new(Vec::new()),
                 goto_succeeds: AtomicBool::new(true),
                 goto_target_unreached: AtomicBool::new(false),
+                goto_hangs: AtomicBool::new(false),
                 jump_calls: AtomicUsize::new(0),
                 teleport_calls: Mutex::new(Vec::new()),
                 hotbar_switch_calls: Mutex::new(Vec::new()),
@@ -1554,6 +2010,8 @@ mod tests {
                 inventory: Mutex::new(Vec::new()),
                 player_inventory_occupied: AtomicUsize::new(0),
                 position: Mutex::new(BlockPos::new(0, 64, 0)),
+                stop_pathfinding_calls: AtomicUsize::new(0),
+                swap_hotbar_calls: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1588,6 +2046,14 @@ mod tests {
 
         async fn goto(&self, pos: &BlockPos) -> Result<(), BotError> {
             self.log.goto_calls.lock().unwrap().push(*pos);
+            if self.log.goto_hangs.load(Ordering::SeqCst) {
+                // Simulate an unreachable target: the pathfinder never
+                // completes. The outer `goto_with_margin` timeout (or the
+                // command envelope) is what releases the caller.
+                loop {
+                    tokio::task::yield_now().await;
+                }
+            }
             if self.log.goto_succeeds.load(Ordering::SeqCst) {
                 *self.log.position.lock().unwrap() = *pos;
                 Ok(())
@@ -1618,6 +2084,42 @@ mod tests {
 
         fn drop_item(&self, slot: u8, count: u8) {
             self.log.drop_item_calls.lock().unwrap().push((slot, count));
+            // Simulate the server applying the throw-click so drop
+            // verification sees a reduced stack (mirrors a real drop).
+            let mut inv = self.log.inventory.lock().unwrap();
+            if let Some(Some(stack)) = inv.get_mut(slot as usize) {
+                stack.count = stack.count.saturating_sub(count);
+                if stack.count == 0 {
+                    inv[slot as usize] = None;
+                }
+            }
+        }
+
+        fn stop_pathfinding(&self) {
+            self.log
+                .stop_pathfinding_calls
+                .fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn swap_hotbar(&self, source_menu_slot: u16, target_hotbar_slot: u8) {
+            self.log
+                .swap_hotbar_calls
+                .lock()
+                .unwrap()
+                .push((source_menu_slot, target_hotbar_slot));
+            // Simulate the server-side swap so `handle_move_item_to_hotbar`'s
+            // post-swap verification sees the item in the hotbar slot. Player
+            // menu layout: menu 36-44 = logical hotbar 0-8, menu 9-35 =
+            // logical 9-35 (identity).
+            let source_idx = if source_menu_slot >= 36 {
+                (source_menu_slot - 36) as usize
+            } else {
+                source_menu_slot as usize
+            };
+            let mut inv = self.log.inventory.lock().unwrap();
+            if source_idx < inv.len() && (target_hotbar_slot as usize) < inv.len() {
+                inv.swap(source_idx, target_hotbar_slot as usize);
+            }
         }
 
         fn start_use_item(&self) {
@@ -1847,6 +2349,76 @@ mod tests {
         // goto should still have been called.
         let goto_calls = log.goto_calls.lock().unwrap();
         assert_eq!(goto_calls.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_move_to_timeout_returns_structured_partial_result() {
+        // A stalled pathfinder must NOT surface a bare CommandTimeout — the
+        // executor returns a structured partial result (current position +
+        // distance) so the MCP client can decide whether to retry/cancel.
+        let config = AppConfig {
+            command_timeout_secs: 1,
+            ..AppConfig::default()
+        };
+        let state = Arc::new(SharedState::new(config));
+        let (sender, receiver) = create_command_channel(16, Arc::clone(&state));
+        state.set_online(true);
+        let mock = MockBotClient::new();
+        mock.log.goto_hangs.store(true, Ordering::SeqCst);
+        let log = mock.log().clone();
+        let executor = CommandExecutor::new(mock, Arc::clone(&state), receiver, None);
+        let handle = spawn_executor(executor);
+
+        let pos = BlockPos::new(100, 64, 200);
+        let result = send_and_await(&sender, BotCommand::MoveTo(pos)).await;
+
+        let br = result.expect("timed-out movement returns a BotResult, not an error");
+        assert!(!br.success, "timeout must report success=false");
+        let data = br.data.expect("timeout result must carry structured data");
+        assert_eq!(data["reason"], "timeout");
+        assert_eq!(data["target"], serde_json::json!([100, 64, 200]));
+        assert!(data["distance_moved"].is_number());
+        assert!(br.message.contains("timed out"), "message: {}", br.message);
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        // The pathfinder must have been stopped after the timeout.
+        assert_eq!(
+            log.stop_pathfinding_calls.load(Ordering::SeqCst),
+            1,
+            "stop_pathfinding must be called once on timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_smart_move_timeout_returns_structured_partial_result() {
+        let config = AppConfig {
+            command_timeout_secs: 1,
+            ..AppConfig::default()
+        };
+        let state = Arc::new(SharedState::new(config));
+        let (sender, receiver) = create_command_channel(16, Arc::clone(&state));
+        state.set_online(true);
+        let mock = MockBotClient::new();
+        mock.log.goto_hangs.store(true, Ordering::SeqCst);
+        let log = mock.log().clone();
+        let executor = CommandExecutor::new(mock, Arc::clone(&state), receiver, None);
+        let handle = spawn_executor(executor);
+
+        let pos = BlockPos::new(50, 64, 50);
+        let result = send_and_await(&sender, BotCommand::SmartMove(pos)).await;
+
+        let br = result.expect("timed-out smart_move returns a BotResult");
+        assert!(!br.success);
+        let data = br.data.expect("timeout result must carry structured data");
+        assert_eq!(data["reason"], "timeout");
+        assert_eq!(data["target"], serde_json::json!([50, 64, 50]));
+        assert!(data["position"].is_array());
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+        assert_eq!(log.stop_pathfinding_calls.load(Ordering::SeqCst), 1);
     }
 
     /// Goto's 50ms fallback loop must re-check `is_goto_target_reached`
@@ -2227,6 +2799,100 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_drop_item_verified_removes_from_slot() {
+        let (executor, sender, _state, log) = make_executor();
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            inv.resize(9, None);
+            inv[2] = Some(ItemStack {
+                item_id: "dirt".into(),
+                count: 10,
+            });
+        }
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::DropItem(2, 5)).await;
+        let br = result.expect("drop should succeed");
+        assert!(br.success, "verified drop must report success");
+        let data = br.data.expect("drop result must carry verification data");
+        assert_eq!(data["verified"], true);
+        assert_eq!(data["removed"], 5);
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_drop_item_empty_slot_reports_failure() {
+        // Dropping from an already-empty slot must NOT report fake success —
+        // the executor now verifies the inventory changed.
+        let (executor, sender, _state, _log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::DropItem(2, 1)).await;
+        let br = result.expect("empty-slot drop returns a result, not an error");
+        assert!(
+            !br.success,
+            "dropping from an empty slot must report failure"
+        );
+        assert!(br.message.contains("already empty"));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_move_item_to_hotbar_success() {
+        let (executor, sender, _state, log) = make_executor();
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            inv.resize(36, None);
+            // Main inventory slot 10 holds 64 dirt.
+            inv[10] = Some(ItemStack {
+                item_id: "dirt".into(),
+                count: 64,
+            });
+        }
+        let handle = spawn_executor(executor);
+
+        let result =
+            send_and_await(&sender, BotCommand::MoveItemToHotbar(0, "dirt".into(), 1)).await;
+        let br = result.expect("move should succeed");
+        assert!(br.success, "swap must be verified");
+        let data = br.data.expect("move result must carry verification data");
+        assert_eq!(data["verified"], true);
+        assert_eq!(data["source_slot"], 10);
+        assert_eq!(data["source_menu_slot"], 10);
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        // The mock swap moved the stack into hotbar slot 0.
+        let inv = log.inventory.lock().unwrap();
+        assert_eq!(inv[0].as_ref().unwrap().item_id, "dirt");
+        assert!(inv[10].is_none(), "source slot must be emptied by the swap");
+    }
+
+    #[tokio::test]
+    async fn test_move_item_to_hotbar_not_found() {
+        let (executor, sender, _state, _log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(
+            &sender,
+            BotCommand::MoveItemToHotbar(0, "diamond".into(), 1),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("diamond")),
+            "missing item must surface InvalidParams"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // UseItem tests
     // ═══════════════════════════════════════════════════════════════
@@ -2283,6 +2949,87 @@ mod tests {
         let chats = log.chat_calls.lock().unwrap();
         assert_eq!(chats.len(), 1);
         assert_eq!(chats[0], "/time set day");
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_rejection_detected() {
+        // The server rejects the command via a chat/system message — the
+        // executor must surface `CommandRejected` instead of fake success.
+        let (executor, _sender, state, log) = make_executor();
+        // A message that arrived BEFORE the command must be excluded from the
+        // feedback diff (the baseline is taken at dispatch).
+        state.add_chat_message("System".into(), "old unrelated feedback".into());
+
+        // Simulate the server replying with a rejection shortly after the
+        // command is sent (inside the 400 ms feedback window).
+        let state2 = Arc::clone(&state);
+        let sim = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            state2.add_chat_message(
+                "System".into(),
+                "Incorrect argument for command /item replace entity @s hotbar.0 dirt 64<--[HERE]"
+                    .into(),
+            );
+        });
+
+        let result = executor
+            .handle_execute_command("/item replace entity @s hotbar.0 dirt 64".into())
+            .await;
+        assert!(
+            matches!(result, Err(BotError::CommandRejected { ref feedback, .. }) if feedback.contains("Incorrect argument")),
+            "rejected command must surface CommandRejected, got: {result:?}"
+        );
+        sim.await.expect("simulation task should finish");
+        let chats = log.chat_calls.lock().unwrap();
+        assert_eq!(chats.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_success_attaches_server_feedback() {
+        // An accepted command still produces system feedback ("Teleported
+        // ...") — the executor reports success and attaches the feedback.
+        let (executor, _sender, state, _log) = make_executor();
+        let state2 = Arc::clone(&state);
+        let sim = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            state2.add_chat_message("System".into(), "Teleported AI_Bot to 5.5, -58, 5.5".into());
+        });
+
+        let result = executor
+            .handle_execute_command("/tp @s 5 -58 5".into())
+            .await;
+        let br = result.expect("accepted command reports success");
+        assert!(br.success);
+        assert!(
+            br.message.contains("server: Teleported"),
+            "server feedback must be attached, got: {}",
+            br.message
+        );
+        sim.await.expect("simulation task should finish");
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_ignores_player_chat_as_feedback() {
+        // Only a *player* message arrives — it must not be treated as server
+        // feedback (no rejection, no attachment).
+        let (executor, _sender, state, _log) = make_executor();
+        let state2 = Arc::clone(&state);
+        let sim = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            state2.add_chat_message("Notch".into(), "hello everyone".into());
+        });
+
+        let result = executor
+            .handle_execute_command("/time set day".into())
+            .await;
+        let br = result.expect("no system feedback → success");
+        assert!(br.success);
+        assert!(
+            !br.message.contains("server:"),
+            "player chat must not be treated as server feedback, got: {}",
+            br.message
+        );
+        sim.await.expect("simulation task should finish");
     }
 
     #[tokio::test]
@@ -2935,6 +3682,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_smart_move_obstacle_carries_object_with_coordinates() {
+        // Bug #4: the obstacle field used to be null (or a bare string).
+        // It must now be an object { block_type, x, y, z } so the MCP client
+        // can see exactly what (and where) blocked the bot.
+        use std::collections::HashMap;
+        let (executor, sender, state, log) = make_executor();
+        log.goto_succeeds.store(false, Ordering::SeqCst);
+        // Player at (0,64,0), stone directly on the line to the target at
+        // (5,64,0). The literal must carry a populated block_index — the
+        // production SnapshotBuilder derives it, but test literals do not.
+        let mut block_index = HashMap::new();
+        block_index.insert(BlockPos::new(5, 64, 0), 0usize);
+        state.update_snapshot(crate::types::WorldSnapshot {
+            blocks: vec![BlockEntry {
+                position: BlockPos::new(5, 64, 0),
+                block_type: "stone".into(),
+                block_state: None,
+            }],
+            block_index,
+            self_player: SelfPlayer {
+                position: BlockPos::new(0, 64, 0),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(5, 64, 0);
+        let result = send_and_await(&sender, BotCommand::SmartMove(target)).await;
+        let br = result.expect("blocked smart_move is Ok(BotResult)");
+        assert!(!br.success);
+
+        let data = br.data.expect("data present");
+        let obstacle = data.get("obstacle").expect("obstacle must be present");
+        assert!(
+            obstacle.is_object(),
+            "obstacle must be an object, got: {obstacle}"
+        );
+        assert_eq!(obstacle["block_type"], "stone");
+        assert_eq!(obstacle["x"], 5);
+        assert_eq!(obstacle["y"], 64);
+        assert_eq!(obstacle["z"], 0);
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
     async fn test_smart_move_unreached_returns_failure() {
         // F2-6: goto returning Ok but the bot ending up far from the target
         // (obstacle) must ALSO be `success: false` with reached == false.
@@ -3153,7 +3948,57 @@ mod tests {
 
         let found =
             find_obstacle_block(&snapshot, BlockPos::new(0, 64, 0), BlockPos::new(2, 64, 10));
-        assert_eq!(found, Some("stone".to_string()));
+        let info = found.expect("interpolated line scan must find the obstacle");
+        assert_eq!(info.block_type, "stone");
+        assert_eq!(info.position, obstacle);
+    }
+
+    #[test]
+    fn test_find_obstacle_block_three_y_layers() {
+        use std::collections::HashMap;
+        // Obstacle at head height (y+1) on the direct line — the old scan
+        // (current Y only) would miss it.
+        let mut block_index = HashMap::new();
+        block_index.insert(BlockPos::new(2, 65, 0), 0usize);
+        let snapshot = crate::types::WorldSnapshot {
+            blocks: vec![BlockEntry {
+                position: BlockPos::new(2, 65, 0),
+                block_type: "dirt".into(),
+                block_state: None,
+            }],
+            block_index,
+            ..Default::default()
+        };
+
+        let found =
+            find_obstacle_block(&snapshot, BlockPos::new(0, 64, 0), BlockPos::new(4, 64, 0));
+        let info = found.expect("y+1 layer scan must find the obstacle");
+        assert_eq!(info.block_type, "dirt");
+        assert_eq!(info.position, BlockPos::new(2, 65, 0));
+    }
+
+    #[test]
+    fn test_find_obstacle_block_neighbourhood_fallback() {
+        use std::collections::HashMap;
+        // No solid block on the line, but one adjacent to `current` — the
+        // 3×3×3 neighbourhood fallback must report it.
+        let mut block_index = HashMap::new();
+        block_index.insert(BlockPos::new(1, 64, 0), 0usize);
+        let snapshot = crate::types::WorldSnapshot {
+            blocks: vec![BlockEntry {
+                position: BlockPos::new(1, 64, 0),
+                block_type: "cobblestone".into(),
+                block_state: None,
+            }],
+            block_index,
+            ..Default::default()
+        };
+
+        let found =
+            find_obstacle_block(&snapshot, BlockPos::new(0, 64, 0), BlockPos::new(0, 64, 0));
+        let info = found.expect("neighbourhood fallback must find an obstacle");
+        assert_eq!(info.block_type, "cobblestone");
+        assert_eq!(info.position, BlockPos::new(1, 64, 0));
     }
 
     // ═══════════════════════════════════════════════════════════════

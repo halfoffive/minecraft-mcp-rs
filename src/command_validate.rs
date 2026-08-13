@@ -141,6 +141,26 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
             Ok(())
         }
 
+        // MoveItemToHotbar: hotbar slot 0-8, non-empty item id, count 1-64.
+        BotCommand::MoveItemToHotbar(hotbar_slot, item_id, count) => {
+            if *hotbar_slot > 8 {
+                return Err(BotError::InvalidParams(format!(
+                    "MoveItemToHotbar hotbar_slot must be 0-8, got {hotbar_slot}"
+                )));
+            }
+            if item_id.trim().is_empty() {
+                return Err(BotError::InvalidParams(
+                    "MoveItemToHotbar item_id cannot be empty".into(),
+                ));
+            }
+            if *count == 0 || *count > 64 {
+                return Err(BotError::InvalidParams(format!(
+                    "MoveItemToHotbar count must be 1-64, got {count}"
+                )));
+            }
+            Ok(())
+        }
+
         // Container slots can go up to 53 (double chests have 54 slots, 0-53).
         BotCommand::TakeFromContainer(slot, count) => {
             if *slot > 53 {
@@ -1003,6 +1023,7 @@ mod tests {
             BotCommand::UseItemOnBlock(_, _) => 1,
             BotCommand::SwitchHotbarSlot(_) => 1,
             BotCommand::DropItem(_, _) => 1,
+            BotCommand::MoveItemToHotbar(_, _, _) => 1,
             BotCommand::UseItem => 1,
             BotCommand::UseItemWithSlot(_) => 1,
             BotCommand::EquipTool(_) => 1,
@@ -1053,6 +1074,7 @@ mod tests {
             BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None),
             BotCommand::SwitchHotbarSlot(0),
             BotCommand::DropItem(0, 1),
+            BotCommand::MoveItemToHotbar(0, "dirt".into(), 1),
             BotCommand::UseItem,
             BotCommand::UseItemWithSlot(0),
             BotCommand::EquipTool(ToolType::Pickaxe),

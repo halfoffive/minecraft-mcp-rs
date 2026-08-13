@@ -366,10 +366,12 @@ async fn build_snapshot_inner(
     builder = builder.with_entities(Some(entities));
 
     let mut snapshot = builder.build();
-    // Populate `commands_enabled` from the player's permission level.
-    // OP level > 0 means commands are enabled; == 0 means disabled;
-    // unavailable (component not yet present) means unknown.
-    snapshot.commands_enabled = read_commands_enabled(bot);
+    // Populate `commands_enabled` — a live `/seed` probe result wins over the
+    // permission-level heuristic when one exists (see
+    // `resolve_commands_enabled`). OP level > 0 means commands are enabled;
+    // == 0 means disabled; unavailable (component not yet present) means
+    // unknown.
+    snapshot.commands_enabled = resolve_commands_enabled(bot, shared_state);
     Ok(snapshot)
 }
 
@@ -490,6 +492,16 @@ fn collect_entities(bot: &Client) -> Vec<EntityEntry> {
         if *entity_instance != instance_name || entity == local_entity {
             continue;
         }
+        // Skip corpses: a dead mob lingers in the ECS (health metadata 0.0)
+        // until the server sends RemoveEntities / azalea's despawn cleanup
+        // runs, which can take a second or more. Listing it as a live entity
+        // made `get_nearby_entities` report dead mobs with `health: 0.0`.
+        // Item entities carry no Health component, so drops are unaffected.
+        if let Some(h) = health
+            && h.0 <= 0.0
+        {
+            continue;
+        }
         let minecraft_id = id_by_entity.get(&entity).copied().unwrap_or(0);
         entries.push(EntityEntry {
             id: u32::try_from(minecraft_id).unwrap_or(0),
@@ -517,6 +529,20 @@ fn collect_entities(bot: &Client) -> Vec<EntityEntry> {
 fn read_commands_enabled(bot: &Client) -> Option<bool> {
     bot.get_component::<azalea::local_player::PermissionLevel>()
         .map(|level| level.0 > 0)
+}
+
+/// Resolve `commands_enabled` for the snapshot.
+///
+/// A live `/seed` probe result (set by `get_server_info` after a round-trip)
+/// takes precedence — on vanilla servers `PermissionLevel` correlates with
+/// command ability, but cheat/plugin servers often let non-OP players run
+/// commands, so the probe (which observes the server's actual reply) is the
+/// truthful source. Falls back to the permission-level heuristic while
+/// unprobed.
+fn resolve_commands_enabled(bot: &Client, state: &SharedState) -> Option<bool> {
+    state
+        .get_commands_probe()
+        .or_else(|| read_commands_enabled(bot))
 }
 
 /// Cache of resolved block names, keyed by the raw [`BlockState`] id.
@@ -918,5 +944,84 @@ mod tests {
         assert_eq!(player.display_name, Some("Steve".to_string()));
         assert_eq!(player.health, Some(20.0));
         assert_eq!(player.id, 0, "not in entity_by_id → id falls back to 0");
+    }
+
+    /// A dead mob (health metadata 0.0) must be excluded from the entity list
+    /// (Bug #8) — a killed chicken lingered in the ECS until the server's
+    /// RemoveEntities packet was processed, so `get_nearby_entities` reported
+    /// a corpse with `health: 0.0`. Live mobs and health-less item entities
+    /// must still be listed.
+    #[test]
+    fn test_collect_entities_skips_dead_entities() {
+        let overworld = azalea::world::InstanceName(azalea::Identifier::new("minecraft:overworld"));
+
+        let mut world = bevy_ecs::world::World::new();
+        let bot_entity = world.spawn(()).id();
+        let instance = Arc::new(parking_lot::RwLock::new(azalea::world::Instance::default()));
+        world.entity_mut(bot_entity).insert((
+            azalea::local_player::InstanceHolder {
+                instance: instance.clone(),
+                partial_instance: Arc::new(parking_lot::RwLock::new(
+                    azalea::world::PartialInstance::default(),
+                )),
+            },
+            overworld.clone(),
+            azalea::entity::Position::new(azalea::core::position::Vec3::new(0.5, 64.0, 0.5)),
+            azalea::entity::EntityUuid::new(uuid::Uuid::new_v4()),
+            azalea::entity::EntityKindComponent(EntityKind::Player),
+        ));
+
+        // A live chicken — must be listed.
+        let live_entity = world
+            .spawn((
+                overworld.clone(),
+                azalea::entity::Position::new(azalea::core::position::Vec3::new(2.0, 64.0, 2.0)),
+                azalea::entity::EntityUuid::new(uuid::Uuid::new_v4()),
+                azalea::entity::EntityKindComponent(EntityKind::Chicken),
+                azalea::entity::metadata::Health(4.0),
+            ))
+            .id();
+
+        // The dead chicken (Bug #8) — health 0.0, must be skipped.
+        let _dead_entity = world.spawn((
+            overworld.clone(),
+            azalea::entity::Position::new(azalea::core::position::Vec3::new(3.0, 64.0, 3.0)),
+            azalea::entity::EntityUuid::new(uuid::Uuid::new_v4()),
+            azalea::entity::EntityKindComponent(EntityKind::Chicken),
+            azalea::entity::metadata::Health(0.0),
+        ));
+
+        // An item drop — no Health component, must still be listed.
+        let _item_entity = world.spawn((
+            overworld.clone(),
+            azalea::entity::Position::new(azalea::core::position::Vec3::new(4.0, 64.0, 4.0)),
+            azalea::entity::EntityUuid::new(uuid::Uuid::new_v4()),
+            azalea::entity::EntityKindComponent(EntityKind::Item),
+        ));
+
+        instance
+            .write()
+            .entity_by_id
+            .insert(azalea::world::MinecraftEntityId(1), live_entity);
+
+        let bot = azalea::Client::new(bot_entity, Arc::new(parking_lot::Mutex::new(world)));
+        let entities = collect_entities(&bot);
+
+        assert!(
+            entities.iter().all(|e| e.health != Some(0.0)),
+            "dead entities must be filtered out, got: {entities:?}"
+        );
+        assert_eq!(
+            entities
+                .iter()
+                .filter(|e| e.entity_type == "chicken")
+                .count(),
+            1,
+            "only the live chicken may be listed"
+        );
+        assert!(
+            entities.iter().any(|e| e.entity_type == "item"),
+            "item entities (no Health) must be unaffected by the corpse filter"
+        );
     }
 }

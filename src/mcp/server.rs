@@ -37,12 +37,16 @@ use crate::mcp::tools_container::{
     CloseContainerInput, OpenContainerInput, PutIntoContainerInput, TakeFromContainerInput,
 };
 use crate::mcp::tools_item::{
-    CollectItemsInput, DropItemInput, EquipToolInput, SwitchHotbarSlotInput, UseItemInput,
+    CollectItemsInput, DropItemInput, EquipToolInput, SetHotbarItemInput, SwitchHotbarSlotInput,
+    UseItemInput,
 };
 use crate::mcp::tools_movement::{
     FlyToInput, JumpInput, MoveToInput, SmartMoveInput, TeleportInput, WalkDirectionInput,
 };
-use crate::mcp::tools_query::{GetWorldViewInput, NearbyBlocksInput, NearbyEntitiesInput};
+use crate::mcp::tools_query::{
+    GetWorldViewInput, InventoryInput, NearbyBlocksInput, NearbyEntitiesInput, SelfInfoInput,
+    ServerInfoInput,
+};
 use crate::mcp::tools_settings::UpdateSettingsInput;
 use crate::state::{McpServerStatus, SharedState};
 
@@ -85,19 +89,25 @@ impl McpBotServer {
     // ── Query tools (read_only) ──────────────────────────────
 
     #[tool(
-        description = "Get information about the bot's own player",
+        description = "Get information about the bot's own player. force=true (default) triggers an immediate snapshot refresh so the result reflects the latest world state.",
         annotations(read_only_hint = true)
     )]
-    async fn get_self_info(&self) -> Result<String, BotError> {
-        crate::mcp::tools_query::get_self_info(&self.state)
+    async fn get_self_info(
+        &self,
+        Parameters(input): Parameters<SelfInfoInput>,
+    ) -> Result<String, BotError> {
+        crate::mcp::tools_query::get_self_info(&self.state, input).await
     }
 
     #[tool(
-        description = "Get the bot's inventory contents",
+        description = "Get the bot's inventory contents. force=true (default) triggers an immediate snapshot refresh so the result reflects the latest container-content packets.",
         annotations(read_only_hint = true)
     )]
-    async fn get_inventory(&self) -> Result<String, BotError> {
-        crate::mcp::tools_query::get_inventory(&self.state)
+    async fn get_inventory(
+        &self,
+        Parameters(input): Parameters<InventoryInput>,
+    ) -> Result<String, BotError> {
+        crate::mcp::tools_query::get_inventory(&self.state, input).await
     }
 
     #[tool(
@@ -147,11 +157,14 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Reports whether commands are enabled on the server and the current gamemode. commands_enabled is true/false/null.",
+        description = "Reports whether commands are enabled on the server and the current gamemode. commands_enabled is true/false/null, probed live via /seed (cached until refresh=true). Also reports bot_busy.",
         annotations(read_only_hint = true)
     )]
-    async fn get_server_info(&self) -> Result<String, BotError> {
-        crate::mcp::tools_query::get_server_info(&self.state)
+    async fn get_server_info(
+        &self,
+        Parameters(input): Parameters<ServerInfoInput>,
+    ) -> Result<String, BotError> {
+        crate::mcp::tools_query::get_server_info(&self.state, &self.sender, input).await
     }
 
     #[tool(
@@ -316,6 +329,17 @@ impl McpBotServer {
         Parameters(input): Parameters<UseItemInput>,
     ) -> Result<String, BotError> {
         crate::mcp::tools_item::handle_use_item(&self.state, &self.sender, input).await
+    }
+
+    #[tool(
+        description = "Move an existing inventory stack into a hotbar slot via a swap-click (reliable alternative to /item replace). Requires the item to already be in the inventory.",
+        annotations(destructive_hint = true)
+    )]
+    async fn set_hotbar_item(
+        &self,
+        Parameters(input): Parameters<SetHotbarItemInput>,
+    ) -> Result<String, BotError> {
+        crate::mcp::tools_item::handle_set_hotbar_item(&self.state, &self.sender, input).await
     }
 
     #[tool(
@@ -908,11 +932,15 @@ mod tests {
         let server = McpBotServer::new(state, sender, receiver);
 
         assert!(matches!(
-            server.get_self_info().await,
+            server
+                .get_self_info(Parameters(SelfInfoInput { force: false }))
+                .await,
             Err(BotError::Offline(_))
         ));
         assert!(matches!(
-            server.get_inventory().await,
+            server
+                .get_inventory(Parameters(InventoryInput { force: false }))
+                .await,
             Err(BotError::Offline(_))
         ));
         assert!(matches!(
@@ -1121,6 +1149,23 @@ mod tests {
 
         let result = server
             .use_item(Parameters(UseItemInput { item_slot: None }))
+            .await;
+        assert!(matches!(result, Err(BotError::Offline(_))));
+    }
+
+    #[tokio::test]
+    async fn test_set_hotbar_item_offline_via_server() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
+
+        let result = server
+            .set_hotbar_item(Parameters(SetHotbarItemInput {
+                hotbar_slot: 0,
+                item_id: "dirt".into(),
+                count: Some(1),
+            }))
             .await;
         assert!(matches!(result, Err(BotError::Offline(_))));
     }

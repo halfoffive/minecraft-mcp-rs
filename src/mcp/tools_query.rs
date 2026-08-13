@@ -3,29 +3,77 @@
 //! Each function checks `SharedState::is_online()` first: if the bot is
 //! offline, `is_connected` returns `{"connected":false}` and all other
 //! query tools return `{"error":"Bot is currently offline"}`.
+//!
+//! `get_self_info` / `get_inventory` accept `force=true` (default) to trigger
+//! an immediate snapshot rebuild before reading, so an agent that just
+//! dropped an item / moved / teleported sees the fresh state instead of a
+//! 500 ms-stale snapshot.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::channel::BotCommandSender;
 use crate::command_validate::clamp_to_i32;
 use crate::error::BotError;
 use crate::state::SharedState;
-use crate::types::GameMode;
+use crate::types::{BotCommand, GameMode};
 
 // ---------------------------------------------------------------------------
 // Public query functions — called from the #[tool] methods in server.rs
 // ---------------------------------------------------------------------------
 
+/// Input for the `get_self_info` MCP tool.
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
+pub struct SelfInfoInput {
+    /// Force an immediate snapshot refresh before reading (default true).
+    /// Set false to read the last cached snapshot without waiting.
+    #[serde(default = "default_true")]
+    pub force: bool,
+}
+
+/// Input for the `get_inventory` MCP tool.
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
+pub struct InventoryInput {
+    /// Force an immediate snapshot refresh before reading (default true).
+    /// Set false to read the last cached snapshot without waiting.
+    #[serde(default = "default_true")]
+    pub force: bool,
+}
+
+/// Input for the `get_server_info` MCP tool.
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
+pub struct ServerInfoInput {
+    /// Re-run the live `/seed` command probe (default false). The probe result
+    /// is cached until the next `refresh=true` call.
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+/// Serde default: `force` defaults to `true` so existing callers (who never
+/// passed the parameter) keep getting a fresh read after their action.
+fn default_true() -> bool {
+    true
+}
+
 /// Get information about the bot's own player (uuid, username, position,
 /// health, hunger, gamemode, held item).
 ///
-/// Returns the serialized [`crate::types::SelfPlayer`] as a JSON string,
-/// or an offline error.
-pub fn get_self_info(state: &Arc<SharedState>) -> Result<String, BotError> {
+/// When `force` is true (the default) a snapshot rebuild is requested first
+/// so the returned state reflects the most recent world changes rather than
+/// the throttled 500 ms snapshot. Returns the serialized
+/// [`crate::types::SelfPlayer`] as a JSON string, or an offline error.
+pub async fn get_self_info(
+    state: &Arc<SharedState>,
+    input: SelfInfoInput,
+) -> Result<String, BotError> {
     if !state.is_online() {
         return Err(BotError::Offline("Bot is currently offline".to_string()));
+    }
+    if input.force {
+        refresh_snapshot_and_wait(state).await;
     }
     let snapshot = state.read_snapshot();
     serde_json::to_string(&snapshot.self_player)
@@ -34,13 +82,20 @@ pub fn get_self_info(state: &Arc<SharedState>) -> Result<String, BotError> {
 
 /// Get the bot's full player inventory.
 ///
-/// Returns the 36 main slots as an array of occupied slots (empty slots are
-/// omitted), plus the currently selected hotbar slot. Data is read from the
-/// latest [`WorldSnapshot`](crate::types::WorldSnapshot) written by the
-/// snapshot updater.
-pub fn get_inventory(state: &Arc<SharedState>) -> Result<String, BotError> {
+/// When `force` is true (the default) a snapshot rebuild is requested first
+/// so the returned inventory reflects the most recent container-content
+/// packets rather than the throttled snapshot. Returns the 36 main slots as
+/// an array of occupied slots (empty slots are omitted), plus the currently
+/// selected hotbar slot.
+pub async fn get_inventory(
+    state: &Arc<SharedState>,
+    input: InventoryInput,
+) -> Result<String, BotError> {
     if !state.is_online() {
         return Err(BotError::Offline("Bot is currently offline".to_string()));
+    }
+    if input.force {
+        refresh_snapshot_and_wait(state).await;
     }
     let snapshot = state.read_snapshot();
     Ok(json!({
@@ -49,6 +104,21 @@ pub fn get_inventory(state: &Arc<SharedState>) -> Result<String, BotError> {
     })
     .to_string())
 }
+
+/// Request an immediate snapshot rebuild and wait (bounded) for it to land.
+///
+/// Best-effort: the wait is capped at [`SNAPSHOT_FORCE_WAIT`] so a dead or
+/// stalled bot event loop cannot hang a query tool. On timeout (or when the
+/// bot never processes the request) the caller reads the current snapshot
+/// anyway — a fresh read of *something* beats hanging the tool.
+pub(crate) async fn refresh_snapshot_and_wait(state: &Arc<SharedState>) {
+    let rx = state.request_snapshot_refresh();
+    let _ = tokio::time::timeout(SNAPSHOT_FORCE_WAIT, rx).await;
+}
+
+/// Bounded wait for a forced snapshot rebuild (see
+/// [`refresh_snapshot_and_wait`]).
+const SNAPSHOT_FORCE_WAIT: Duration = Duration::from_secs(3);
 
 // ---------------------------------------------------------------------------
 // Nearby query input structs
@@ -185,18 +255,51 @@ fn gamemode_to_str(mode: GameMode) -> &'static str {
 
 /// Report whether commands are enabled on the server and the current gamemode.
 ///
-/// `commands_enabled` is `true` if the player has OP level > 0, `false` if OP
-/// level is 0, and `null` if unknown (the snapshot has not yet been populated
-/// by the server-info round-trip). `gamemode` is one of
-/// `survival|creative|adventure|spectator`.
-pub fn get_server_info(state: &Arc<SharedState>) -> Result<String, BotError> {
+/// `commands_enabled` is probed live by sending `/seed` and watching the
+/// server's chat reply: accepted → `true`, rejected (`CommandRejected`) →
+/// `false`, unknown (probe timed out / not yet run) → the azalea
+/// `PermissionLevel` heuristic or `null`. The probe result is cached in
+/// [`SharedState`] until the next `refresh=true` call, and merged into every
+/// snapshot build. This reflects "commands actually work here" — on cheat /
+/// plugin servers a non-OP player can run commands, which the old
+/// OP-level-only inference got wrong. `gamemode` is one of
+/// `survival|creative|adventure|spectator`. `bot_busy` reports whether the
+/// command executor is currently processing another command.
+pub async fn get_server_info(
+    state: &Arc<SharedState>,
+    sender: &BotCommandSender,
+    input: ServerInfoInput,
+) -> Result<String, BotError> {
     if !state.is_online() {
         return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
+
+    // (Re)run the live probe when requested or when we have no cached result
+    // at all. Sending the probe through the command channel keeps it serial
+    // with other bot commands, so a busy executor simply queues it.
+    if input.refresh || state.get_commands_probe().is_none() {
+        // Probe outcome: Some(true) accepted, Some(false) rejected, None
+        // unknown (timeout / offline mid-probe / no feedback).
+        let probe = match sender
+            .send_command(BotCommand::ExecuteCommand("/seed".into()))
+            .await
+        {
+            Ok(_) => Some(true),
+            Err(BotError::CommandRejected { .. }) => Some(false),
+            // Timeout/offline/internal: keep the previous value (or None).
+            Err(_) => state.get_commands_probe(),
+        };
+        state.set_commands_probe(probe);
+    }
+
+    // Read through a forced refresh so `commands_enabled` reflects the merged
+    // probe value and `gamemode` is fresh.
+    refresh_snapshot_and_wait(state).await;
     let snapshot = state.read_snapshot();
     Ok(json!({
         "commands_enabled": snapshot.commands_enabled,
         "gamemode": gamemode_to_str(snapshot.self_player.gamemode),
+        "bot_busy": state.executor_busy(),
     })
     .to_string())
 }
@@ -353,7 +456,8 @@ mod tests {
     use super::*;
     use crate::config::AppConfig;
     use crate::types::{
-        BlockEntry, BlockPos, EntityEntry, GameMode, InventorySlot, SelfPlayer, WorldSnapshot,
+        BlockEntry, BlockPos, BotResult, EntityEntry, GameMode, InventorySlot, SelfPlayer,
+        WorldSnapshot,
     };
     use base64::Engine;
 
@@ -439,29 +543,48 @@ mod tests {
 
     // -- get_self_info ---------------------------------------------------------
 
-    #[test]
-    fn test_get_self_info_online() {
+    #[tokio::test]
+    async fn test_get_self_info_online() {
         let state = state_with_snapshot();
-        let result = get_self_info(&state).unwrap();
+        // force=false keeps the test fast — no forced rebuild is needed to
+        // exercise the serialization path (the state-level tests cover the
+        // force-refresh channel).
+        let result = get_self_info(&state, SelfInfoInput { force: false })
+            .await
+            .unwrap();
         assert!(result.contains("TestBot"));
         assert!(result.contains("player-uuid"));
         assert!(result.contains("18.0")); // health
         assert!(result.contains("15")); // hunger
     }
 
-    #[test]
-    fn test_get_self_info_offline() {
+    #[tokio::test]
+    async fn test_get_self_info_offline() {
         let state = offline_state();
-        let result = get_self_info(&state);
+        let result = get_self_info(&state, SelfInfoInput { force: false }).await;
         assert!(matches!(result, Err(BotError::Offline(_))));
+    }
+
+    #[tokio::test]
+    async fn test_get_self_info_force_true_reads_fresh_snapshot() {
+        let state = state_with_snapshot();
+        // force=true requests a rebuild then falls back to the current
+        // snapshot when no bot loop answers (3s cap). Assert the fallback
+        // still returns valid data and does not hang forever.
+        let result = get_self_info(&state, SelfInfoInput { force: true })
+            .await
+            .unwrap();
+        assert!(result.contains("TestBot"));
     }
 
     // -- get_inventory ---------------------------------------------------------
 
-    #[test]
-    fn test_get_inventory_online() {
+    #[tokio::test]
+    async fn test_get_inventory_online() {
         let state = state_with_snapshot();
-        let result = get_inventory(&state).unwrap();
+        let result = get_inventory(&state, InventoryInput { force: false })
+            .await
+            .unwrap();
         assert!(result.contains("held_item_slot"));
         assert!(result.contains('3'));
         assert!(result.contains("inventory"));
@@ -476,10 +599,10 @@ mod tests {
         assert_eq!(inventory[1]["count"], 64);
     }
 
-    #[test]
-    fn test_get_inventory_offline() {
+    #[tokio::test]
+    async fn test_get_inventory_offline() {
         let state = offline_state();
-        let result = get_inventory(&state);
+        let result = get_inventory(&state, InventoryInput { force: false }).await;
         assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
@@ -581,20 +704,106 @@ mod tests {
 
     // -- get_server_info -------------------------------------------------------
 
-    #[test]
-    fn test_get_server_info_online() {
-        let state = state_with_snapshot();
-        let result = get_server_info(&state).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
-        // The default snapshot in state_with_snapshot() does not set
-        // commands_enabled, so it should be null.
-        assert!(parsed["commands_enabled"].is_null());
-        assert_eq!(parsed["gamemode"], "survival");
+    /// Create a sender backed by a responder that replies with `reply` to
+    /// every command (used to drive the `/seed` probe).
+    fn make_sender_with_reply(
+        reply: Result<BotResult, BotError>,
+    ) -> (BotCommandSender, tokio::task::JoinHandle<()>) {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let (sender, mut receiver) = crate::channel::create_command_channel(10, state);
+        let handle = tokio::spawn(async move {
+            while let Some(wrapped) = receiver.recv().await {
+                let _ = wrapped.respond_to.send(reply.clone());
+            }
+        });
+        (sender, handle)
     }
 
-    #[test]
-    fn test_get_server_info_with_commands_enabled() {
-        let state = SharedState::new(AppConfig::default());
+    /// A `BotResult` mirroring the executor's success reply for `/seed`.
+    fn ok_result() -> BotResult {
+        BotResult {
+            success: true,
+            message: "Executed command: /seed (server: Seed: [12345])".into(),
+            data: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_server_info_probes_and_caches_true() {
+        let state = state_with_snapshot();
+        let (sender, handle) = make_sender_with_reply(Ok(ok_result()));
+        // commands_enabled is None → the probe runs; the server accepts.
+        let result = get_server_info(&state, &sender, ServerInfoInput { refresh: false })
+            .await
+            .expect("probe accepted must not error");
+        assert_eq!(
+            state.get_commands_probe(),
+            Some(true),
+            "accepted /seed probe must be cached"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+        assert_eq!(parsed["gamemode"], "survival");
+        // `bot_busy` is part of the response contract.
+        assert!(parsed["bot_busy"].is_boolean());
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_get_server_info_probes_rejected() {
+        let state = state_with_snapshot();
+        let (sender, handle) = make_sender_with_reply(Err(BotError::CommandRejected {
+            command: "/seed".into(),
+            feedback: "You do not have permission to use this command".into(),
+        }));
+        let result = get_server_info(&state, &sender, ServerInfoInput { refresh: false })
+            .await
+            .expect("rejected probe must not surface as a tool error");
+        assert_eq!(
+            state.get_commands_probe(),
+            Some(false),
+            "rejected /seed probe must be cached as false"
+        );
+        assert!(result.contains("gamemode"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_get_server_info_cached_result_skips_probe() {
+        let state = state_with_snapshot();
+        // Pre-cache a probe result — the call must NOT re-probe (no sender
+        // command would be issued; a fresh sender with a broken responder
+        // that never replies would hang otherwise).
+        state.set_commands_probe(Some(true));
+        let (sender, handle) = make_sender_with_reply(Ok(ok_result()));
+        let result = get_server_info(&state, &sender, ServerInfoInput { refresh: false })
+            .await
+            .expect("cached probe must not error");
+        assert!(result.contains("gamemode"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_get_server_info_refresh_true_reprobes() {
+        let state = state_with_snapshot();
+        // Cached true, but refresh=true forces a re-probe that the server
+        // now rejects → the cache flips to false.
+        state.set_commands_probe(Some(true));
+        let (sender, handle) = make_sender_with_reply(Err(BotError::CommandRejected {
+            command: "/seed".into(),
+            feedback: "Unknown command".into(),
+        }));
+        let _ = get_server_info(&state, &sender, ServerInfoInput { refresh: true }).await;
+        assert_eq!(
+            state.get_commands_probe(),
+            Some(false),
+            "refresh=true must re-run the probe"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_get_server_info_with_commands_enabled() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
         let snap = WorldSnapshot {
             commands_enabled: Some(true),
@@ -605,18 +814,26 @@ mod tests {
             ..Default::default()
         };
         state.update_snapshot(snap);
+        // Pre-cache the probe so no sender command is issued.
+        state.set_commands_probe(Some(true));
+        let (sender, handle) = make_sender_with_reply(Ok(ok_result()));
 
-        let result = get_server_info(&Arc::new(state)).unwrap();
+        let result = get_server_info(&state, &sender, ServerInfoInput { refresh: false })
+            .await
+            .expect("valid server info");
         let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
         assert_eq!(parsed["commands_enabled"], true);
         assert_eq!(parsed["gamemode"], "creative");
+        handle.abort();
     }
 
-    #[test]
-    fn test_get_server_info_offline() {
+    #[tokio::test]
+    async fn test_get_server_info_offline() {
         let state = offline_state();
-        let result = get_server_info(&state);
+        let (sender, handle) = make_sender_with_reply(Ok(ok_result()));
+        let result = get_server_info(&state, &sender, ServerInfoInput::default()).await;
         assert!(matches!(result, Err(BotError::Offline(_))));
+        handle.abort();
     }
 
     // -- get_world_view --------------------------------------------------------

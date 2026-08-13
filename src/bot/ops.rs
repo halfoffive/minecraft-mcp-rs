@@ -945,6 +945,10 @@ mod tests {
 
         async fn jump(&self) {}
 
+        fn stop_pathfinding(&self) {}
+
+        fn swap_hotbar(&self, _source_menu_slot: u16, _target_hotbar_slot: u8) {}
+
         fn teleport(&self, _pos: &BlockPos) {}
 
         fn switch_hotbar_slot(&self, slot: u8) {

@@ -135,7 +135,12 @@ async fn test_full_mcp_cycle_initialize_and_query() {
     );
 
     // ── Query tool via underlying public function ───────────────
-    let self_info = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state).unwrap();
+    let self_info = minecraft_mcp_rs::mcp::tools_query::get_self_info(
+        &state,
+        minecraft_mcp_rs::mcp::tools_query::SelfInfoInput { force: false },
+    )
+    .await
+    .unwrap();
     assert!(self_info.contains("TestBot"));
     assert!(self_info.contains("550e8400"));
     assert!(self_info.contains("18.5"));
@@ -180,11 +185,19 @@ async fn test_full_mcp_cycle_tool_list_and_offline_handling() {
 
     // Query tools return offline error when bot is offline
     assert!(matches!(
-        minecraft_mcp_rs::mcp::tools_query::get_self_info(&state),
+        minecraft_mcp_rs::mcp::tools_query::get_self_info(
+            &state,
+            minecraft_mcp_rs::mcp::tools_query::SelfInfoInput { force: false },
+        )
+        .await,
         Err(BotError::Offline(_))
     ));
     assert!(matches!(
-        minecraft_mcp_rs::mcp::tools_query::get_inventory(&state),
+        minecraft_mcp_rs::mcp::tools_query::get_inventory(
+            &state,
+            minecraft_mcp_rs::mcp::tools_query::InventoryInput { force: false },
+        )
+        .await,
         Err(BotError::Offline(_))
     ));
     assert_eq!(
@@ -310,10 +323,15 @@ async fn test_channel_place_block_sends_position_and_type() {
 // Test 3: get_self_info returns player data from snapshot
 // ═══════════════════════════════════════════════════════════════
 
-#[test]
-fn test_get_self_info_returns_player_data_from_snapshot() {
+#[tokio::test]
+async fn test_get_self_info_returns_player_data_from_snapshot() {
     let state = make_online_state();
-    let result = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state).unwrap();
+    let result = minecraft_mcp_rs::mcp::tools_query::get_self_info(
+        &state,
+        minecraft_mcp_rs::mcp::tools_query::SelfInfoInput { force: false },
+    )
+    .await
+    .unwrap();
 
     let parsed: serde_json::Value =
         serde_json::from_str(&result).expect("get_self_info should return valid JSON");
@@ -329,10 +347,14 @@ fn test_get_self_info_returns_player_data_from_snapshot() {
     assert_eq!(parsed["held_item_slot"], 3);
 }
 
-#[test]
-fn test_get_self_info_offline_returns_error() {
+#[tokio::test]
+async fn test_get_self_info_offline_returns_error() {
     let state = make_offline_state();
-    let result = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
+    let result = minecraft_mcp_rs::mcp::tools_query::get_self_info(
+        &state,
+        minecraft_mcp_rs::mcp::tools_query::SelfInfoInput { force: false },
+    )
+    .await;
     assert!(matches!(result, Err(BotError::Offline(_))));
 }
 
@@ -501,11 +523,19 @@ async fn test_query_tools_offline_return_error() {
     let state = make_offline_state();
 
     assert!(matches!(
-        minecraft_mcp_rs::mcp::tools_query::get_self_info(&state),
+        minecraft_mcp_rs::mcp::tools_query::get_self_info(
+            &state,
+            minecraft_mcp_rs::mcp::tools_query::SelfInfoInput { force: false },
+        )
+        .await,
         Err(BotError::Offline(_))
     ));
     assert!(matches!(
-        minecraft_mcp_rs::mcp::tools_query::get_inventory(&state),
+        minecraft_mcp_rs::mcp::tools_query::get_inventory(
+            &state,
+            minecraft_mcp_rs::mcp::tools_query::InventoryInput { force: false },
+        )
+        .await,
         Err(BotError::Offline(_))
     ));
     assert!(matches!(
@@ -697,7 +727,12 @@ async fn test_auto_reconnect_sequence_simulation() {
         minecraft_mcp_rs::mcp::tools_query::is_connected(&state).unwrap(),
         r#"{"connected":true}"#
     );
-    let response = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state).unwrap();
+    let response = minecraft_mcp_rs::mcp::tools_query::get_self_info(
+        &state,
+        minecraft_mcp_rs::mcp::tools_query::SelfInfoInput { force: false },
+    )
+    .await
+    .unwrap();
     assert!(response.contains("TestBot"));
 
     // Phase 2: Disconnect
@@ -706,7 +741,11 @@ async fn test_auto_reconnect_sequence_simulation() {
         minecraft_mcp_rs::mcp::tools_query::is_connected(&state).unwrap(),
         r#"{"connected":false}"#
     );
-    let offline_resp = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
+    let offline_resp = minecraft_mcp_rs::mcp::tools_query::get_self_info(
+        &state,
+        minecraft_mcp_rs::mcp::tools_query::SelfInfoInput { force: false },
+    )
+    .await;
     assert!(matches!(offline_resp, Err(BotError::Offline(_))));
 
     // Phase 3: Reconnect with fresh snapshot
@@ -742,7 +781,12 @@ async fn test_auto_reconnect_sequence_simulation() {
         r#"{"connected":true}"#
     );
 
-    let reconnected = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state).unwrap();
+    let reconnected = minecraft_mcp_rs::mcp::tools_query::get_self_info(
+        &state,
+        minecraft_mcp_rs::mcp::tools_query::SelfInfoInput { force: false },
+    )
+    .await
+    .unwrap();
     assert!(reconnected.contains("200"), "reconnected: x should be 200");
     assert!(
         reconnected.contains("20.0"),
@@ -784,7 +828,11 @@ async fn test_reconnect_multiple_cycles() {
             r#"{"connected":false}"#,
             "cycle {cycle}: should be offline"
         );
-        let offline_resp = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state);
+        let offline_resp = minecraft_mcp_rs::mcp::tools_query::get_self_info(
+            &state,
+            minecraft_mcp_rs::mcp::tools_query::SelfInfoInput { force: false },
+        )
+        .await;
         assert!(
             matches!(offline_resp, Err(BotError::Offline(_))),
             "cycle {cycle}: offline should return error"
@@ -796,14 +844,24 @@ async fn test_reconnect_multiple_cycles() {
 // Test 8: All MCP tool functions exist and no craft_item
 // ═══════════════════════════════════════════════════════════════
 
-#[test]
-fn test_all_query_tools_exist_and_work() {
+#[tokio::test]
+async fn test_all_query_tools_exist_and_work() {
     let state = make_online_state();
 
-    let self_info = minecraft_mcp_rs::mcp::tools_query::get_self_info(&state).unwrap();
+    let self_info = minecraft_mcp_rs::mcp::tools_query::get_self_info(
+        &state,
+        minecraft_mcp_rs::mcp::tools_query::SelfInfoInput { force: false },
+    )
+    .await
+    .unwrap();
     assert!(!self_info.is_empty());
 
-    let inventory = minecraft_mcp_rs::mcp::tools_query::get_inventory(&state).unwrap();
+    let inventory = minecraft_mcp_rs::mcp::tools_query::get_inventory(
+        &state,
+        minecraft_mcp_rs::mcp::tools_query::InventoryInput { force: false },
+    )
+    .await
+    .unwrap();
     assert!(inventory.contains("held_item_slot"));
 
     let nearby_blocks =

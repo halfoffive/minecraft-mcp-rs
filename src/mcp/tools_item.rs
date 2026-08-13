@@ -93,6 +93,68 @@ pub async fn handle_drop_item(
     }
 }
 
+// ── set_hotbar_item ─────────────────────────────────────────────────────────
+
+/// Input for the `set_hotbar_item` MCP tool.
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
+pub struct SetHotbarItemInput {
+    /// Hotbar slot to place the item into (0-8).
+    #[schemars(range(min = 0, max = 8))]
+    pub hotbar_slot: u8,
+    /// Item id to move into the hotbar (e.g. "dirt", "iron_sword").
+    ///
+    /// The item must already exist in the bot's inventory — this tool swaps
+    /// an existing stack into the hotbar and cannot conjure items (that still
+    /// requires an `/give`-style command).
+    pub item_id: String,
+    /// Minimum stack size required in the source slot (default 1).
+    #[schemars(range(min = 1, max = 64))]
+    pub count: Option<u8>,
+}
+
+/// Handle `set_hotbar_item` MCP tool.
+///
+/// Moves the first inventory slot holding at least `count` of `item_id` into
+/// hotbar slot `hotbar_slot` via a container swap-click (the in-game "press
+/// the hotbar number while clicking a slot" operation). No server-side command
+/// is involved, so it is reliable where `/item replace` syntax differs across
+/// servers. Fails with `InvalidParams` when the item is not in the inventory.
+pub async fn handle_set_hotbar_item(
+    state: &Arc<SharedState>,
+    sender: &BotCommandSender,
+    input: SetHotbarItemInput,
+) -> Result<String, BotError> {
+    if input.hotbar_slot > 8 {
+        return Err(BotError::InvalidParams(format!(
+            "hotbar_slot must be 0-8, got {}",
+            input.hotbar_slot
+        )));
+    }
+    if input.item_id.trim().is_empty() {
+        return Err(BotError::InvalidParams(
+            "item_id cannot be empty".to_string(),
+        ));
+    }
+    let count = input.count.unwrap_or(1);
+    if !(1..=64).contains(&count) {
+        return Err(BotError::InvalidParams(format!(
+            "count must be between 1 and 64, got {count}"
+        )));
+    }
+    if !state.is_online() {
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
+    }
+
+    let cmd = BotCommand::MoveItemToHotbar(input.hotbar_slot, input.item_id, count);
+    match sender.send_command(cmd).await {
+        Ok(result) => serde_json::to_string(&result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Err(e) => Err(e),
+    }
+}
+
 // ── use_item ───────────────────────────────────────────────────────────────
 
 /// Input for the `use_item` MCP tool.
@@ -262,6 +324,12 @@ pub async fn handle_collect_items(
         ));
     }
 
+    // Force a snapshot refresh first so the executor sees dropped item
+    // entities that arrived after the last 500 ms-throttled snapshot — a
+    // just-dropped item would otherwise be invisible to `collect_items`
+    // ("No items to collect" right after a drop).
+    crate::mcp::tools_query::refresh_snapshot_and_wait(state).await;
+
     let cmd = BotCommand::CollectItems(input.radius);
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
@@ -314,6 +382,73 @@ mod tests {
         let input = SwitchHotbarSlotInput { slot: 0 };
         let result = handle_switch_hotbar_slot(&state, &sender, input).await;
         assert!(matches!(result, Err(BotError::Offline(_))));
+    }
+
+    // -- set_hotbar_item -------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_set_hotbar_item_offline() {
+        let (state, sender) = setup();
+        let input = SetHotbarItemInput {
+            hotbar_slot: 0,
+            item_id: "dirt".into(),
+            count: Some(1),
+        };
+        let result = handle_set_hotbar_item(&state, &sender, input).await;
+        assert!(matches!(result, Err(BotError::Offline(_))));
+    }
+
+    #[tokio::test]
+    async fn test_set_hotbar_item_invalid_slot() {
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = SetHotbarItemInput {
+            hotbar_slot: 9,
+            item_id: "dirt".into(),
+            count: Some(1),
+        };
+        let result = handle_set_hotbar_item(&state, &sender, input).await;
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("0-8")));
+    }
+
+    #[tokio::test]
+    async fn test_set_hotbar_item_empty_item_id() {
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = SetHotbarItemInput {
+            hotbar_slot: 0,
+            item_id: "  ".into(),
+            count: Some(1),
+        };
+        let result = handle_set_hotbar_item(&state, &sender, input).await;
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("item_id")));
+    }
+
+    #[tokio::test]
+    async fn test_set_hotbar_item_invalid_count() {
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = SetHotbarItemInput {
+            hotbar_slot: 0,
+            item_id: "dirt".into(),
+            count: Some(0),
+        };
+        let result = handle_set_hotbar_item(&state, &sender, input).await;
+        assert!(matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("count")));
+    }
+
+    #[tokio::test]
+    async fn test_set_hotbar_item_sends_move_command() {
+        let (state, sender) = make_echo_channel();
+        make_online(&state);
+        let input = SetHotbarItemInput {
+            hotbar_slot: 3,
+            item_id: "iron_sword".into(),
+            count: Some(2),
+        };
+        let result = handle_set_hotbar_item(&state, &sender, input).await;
+        let value: Value = serde_json::from_str(&result.unwrap()).expect("valid JSON");
+        assert_eq!(value["success"], true);
     }
 
     #[tokio::test]

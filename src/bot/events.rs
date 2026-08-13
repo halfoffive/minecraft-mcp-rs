@@ -370,6 +370,10 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     // across reconnects.
     abort_and_clear_tick_tasks(&state.tick_tasks).await;
 
+    // The executor is gone — clear its busy flag so query tools don't report
+    // a phantom busy state after a disconnect.
+    state.shared_state.set_executor_busy(false);
+
     // Clear the injected dependencies so the next connection (or a test in
     // the same process) starts from a clean slot. With `OnceLock` the first
     // `set` would silently win forever, leaking state across reconnects and
@@ -415,11 +419,17 @@ async fn handle_tick(bot: Client, state: BotState) {
     );
     let egui_ctx = state.egui_ctx.clone();
 
+    // A pending snapshot-force request (from `get_self_info(force=true)` /
+    // `get_inventory(force=true)` / `get_server_info`) must skip the throttle
+    // gate so the next build happens immediately. The sender is moved into
+    // the build task, which signals the waiter after the store.
+    let force_requester = state.shared_state.take_snapshot_force_requester();
+
     // Throttle check BEFORE spawning the build task: azalea fires ~20 ticks
     // per second against a 500 ms snapshot interval, so a post-spawn check
     // would create (and immediately throw away) a task on every one of the
-    // ~18 throttled ticks.
-    if !updater.check_and_update_timer() {
+    // ~18 throttled ticks. A pending force request bypasses the gate.
+    if force_requester.is_none() && !updater.check_and_update_timer() {
         return;
     }
 
@@ -437,6 +447,12 @@ async fn handle_tick(bot: Client, state: BotState) {
             && let Some(ctx) = &egui_ctx
         {
             ctx.request_repaint();
+        }
+        // Resolve any pending force-refresh waiter regardless of whether the
+        // build succeeded — the waiter falls back to reading the current
+        // snapshot when its own timeout fires, so signalling early is safe.
+        if let Some(tx) = force_requester {
+            let _ = tx.send(());
         }
     });
 }

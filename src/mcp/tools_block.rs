@@ -83,6 +83,8 @@ pub struct PlaceBlockInput {
     pub x: i32,
     pub y: i32,
     pub z: i32,
+    /// Hotbar slot holding the block to place (0-8).
+    #[schemars(range(min = 0, max = 8))]
     pub item_slot: u8,
 }
 
@@ -137,6 +139,9 @@ pub struct UseItemOnBlockInput {
     pub x: i32,
     pub y: i32,
     pub z: i32,
+    /// Hotbar slot holding the item to use (0-8). `None` keeps the currently
+    /// held item.
+    #[schemars(range(min = 0, max = 8))]
     pub item_slot: Option<u8>,
 }
 

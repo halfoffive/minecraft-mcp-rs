@@ -239,6 +239,29 @@ pub struct SharedState {
     /// [`take_bot_thread_handle`](Self::take_bot_thread_handle) moves the
     /// handle out, guaranteeing exactly one owner ever joins it.
     bot_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// One-shot channel used by the MCP query tools to force an immediate
+    /// snapshot rebuild (`get_self_info(force=true)` etc.).
+    ///
+    /// The MCP layer creates the channel via [`request_snapshot_refresh`],
+    /// which swaps in a fresh sender (dropping any previous request). The bot
+    /// event loop polls [`take_snapshot_force_requester`] on every tick and,
+    /// when present, skips the throttle gate so the next snapshot build
+    /// happens immediately; the build task then signals the receiver so the
+    /// waiter can read fresh state.
+    snapshot_force: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Cached result of the live `/seed` command probe (`commands_enabled`).
+    ///
+    /// `None` = not probed yet (falls back to the azalea `PermissionLevel`
+    /// heuristic). Populated by `get_server_info` after a probe round-trip
+    /// and merged into every snapshot build so `commands_enabled` reflects
+    /// "commands actually work on this server" rather than just OP level.
+    commands_probe: Mutex<Option<bool>>,
+    /// Whether the command executor is currently processing a command.
+    ///
+    /// Set by `CommandExecutor::run_with_lease` around each dispatch; read
+    /// by `get_server_info` (and other query tools) so clients can tell that
+    /// a `force` snapshot refresh may return pre-command state.
+    executor_busy: AtomicBool,
 }
 
 impl SharedState {
@@ -287,6 +310,9 @@ impl SharedState {
             goto_notify: Arc::new(Notify::new()),
             last_world_view: Mutex::new(None),
             bot_thread: Mutex::new(None),
+            snapshot_force: Mutex::new(None),
+            commands_probe: Mutex::new(None),
+            executor_busy: AtomicBool::new(false),
         }
     }
 
@@ -595,6 +621,74 @@ impl SharedState {
     pub fn get_chat_messages(&self) -> Vec<(String, String)> {
         let guard = self.chat_messages.lock().unwrap_or_else(|e| e.into_inner());
         guard.iter().cloned().collect()
+    }
+
+    // ── Snapshot force-refresh (get_self_info/get_inventory force=true) ──
+
+    /// Request an immediate snapshot rebuild and return a receiver that
+    /// resolves once the next snapshot build completes.
+    ///
+    /// Overwrites any previous pending request (only the latest caller is
+    /// answered). The receiver resolves when the bot event loop finishes the
+    /// next forced build; if the bot is offline or no build ever happens, the
+    /// receiver stays pending and the caller's own timeout decides.
+    pub fn request_snapshot_refresh(&self) -> tokio::sync::oneshot::Receiver<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut guard = self
+            .snapshot_force
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some(tx);
+        rx
+    }
+
+    /// Take the pending snapshot-force request (if any), replacing it with
+    /// `None`. Called by `handle_tick` before the throttle gate so a forced
+    /// build skips the 500 ms interval check.
+    pub fn take_snapshot_force_requester(&self) -> Option<tokio::sync::oneshot::Sender<()>> {
+        let mut guard = self
+            .snapshot_force
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.take()
+    }
+
+    // ── Command probe (get_server_info /seed round-trip) ──
+
+    /// Store the result of the live `/seed` command probe.
+    ///
+    /// `Some(true)` = the server accepted `/seed` (commands work),
+    /// `Some(false)` = the server rejected it, `None` = not probed.
+    pub fn set_commands_probe(&self, enabled: Option<bool>) {
+        let mut guard = self
+            .commands_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = enabled;
+    }
+
+    /// Read the cached `/seed` probe result (merged into snapshot builds).
+    pub fn get_commands_probe(&self) -> Option<bool> {
+        *self
+            .commands_probe
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    // ── Executor busy flag ──
+
+    /// Mark whether the command executor is processing a command.
+    ///
+    /// Set by `CommandExecutor::run_with_lease` around each dispatch; read by
+    /// query tools so clients can tell a `force` refresh may return
+    /// pre-command state.
+    pub fn set_executor_busy(&self, busy: bool) {
+        self.executor_busy.store(busy, Ordering::Relaxed);
+    }
+
+    /// Read the command-executor busy flag.
+    pub fn executor_busy(&self) -> bool {
+        self.executor_busy.load(Ordering::Relaxed)
     }
 
     /// Store the last error message reported by the bot/MCP layer.
@@ -1360,6 +1454,66 @@ mod tests {
         // non-null and distinct clones.
         assert!(Arc::strong_count(&state.goto_notify) >= 2);
         drop(waiter);
+    }
+
+    // -- snapshot force-refresh -------------------------------------------------
+
+    #[tokio::test]
+    async fn test_request_snapshot_refresh_round_trip() {
+        let state = SharedState::new(AppConfig::default());
+        // A request produces a receiver that resolves once the requester is
+        // taken and signalled (what handle_tick's forced build does).
+        let rx = state.request_snapshot_refresh();
+        let tx = state
+            .take_snapshot_force_requester()
+            .expect("a pending force request must be tailable");
+        tx.send(()).expect("receiver should be alive");
+        rx.await.expect("receiver should resolve after send");
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_force_requester_single_slot() {
+        let state = SharedState::new(AppConfig::default());
+        // Two requests: only the latest survives (the previous sender is
+        // dropped), and the old receiver never resolves.
+        let old_rx = state.request_snapshot_refresh();
+        let new_rx = state.request_snapshot_refresh();
+        // Taking gives one sender — the newest one.
+        let tx = state
+            .take_snapshot_force_requester()
+            .expect("a request must be pending");
+        drop(tx);
+        // The new receiver is cancelled (sender dropped), the old one never
+        // had its sender dropped — but both must be terminated/dropped cleanly.
+        assert!(new_rx.await.is_err(), "dropped sender cancels receiver");
+        drop(old_rx);
+        // After taking, no further request is pending.
+        assert!(
+            state.take_snapshot_force_requester().is_none(),
+            "taking must clear the slot"
+        );
+    }
+
+    #[test]
+    fn test_executor_busy_flag() {
+        let state = SharedState::new(AppConfig::default());
+        assert!(!state.executor_busy(), "starts idle");
+        state.set_executor_busy(true);
+        assert!(state.executor_busy());
+        state.set_executor_busy(false);
+        assert!(!state.executor_busy());
+    }
+
+    #[test]
+    fn test_commands_probe_round_trip() {
+        let state = SharedState::new(AppConfig::default());
+        assert_eq!(state.get_commands_probe(), None, "starts unprobed");
+        state.set_commands_probe(Some(true));
+        assert_eq!(state.get_commands_probe(), Some(true));
+        state.set_commands_probe(Some(false));
+        assert_eq!(state.get_commands_probe(), Some(false));
+        state.set_commands_probe(None);
+        assert_eq!(state.get_commands_probe(), None);
     }
 
     // -- session_was_online ----------------------------------------------------

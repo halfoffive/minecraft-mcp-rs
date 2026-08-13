@@ -92,6 +92,20 @@ pub enum BotError {
     /// input errors from internal failures.
     InvalidParams(String),
 
+    /// The server rejected a command sent via chat (e.g. `execute_command`).
+    ///
+    /// The server reports failures like `Incorrect argument for command ...`
+    /// as a chat message rather than an error packet; the executor detects
+    /// that feedback after sending and surfaces it here so the MCP client
+    /// learns the command was actually rejected instead of seeing a fake
+    /// success. `feedback` is the server's rejection message verbatim.
+    CommandRejected {
+        /// The command that was rejected (as sent, with leading `/`).
+        command: String,
+        /// The server's rejection feedback (chat/system message).
+        feedback: String,
+    },
+
     /// An internal / unexpected error occurred.
     Internal(String),
 }
@@ -148,6 +162,12 @@ impl Display for BotError {
             BotError::ContainerTimeout => write!(f, "Container open timed out"),
             BotError::PermissionDenied(msg) => write!(f, "Permission denied: {msg}"),
             BotError::InvalidParams(msg) => write!(f, "Invalid parameter: {msg}"),
+            BotError::CommandRejected { command, feedback } => {
+                write!(
+                    f,
+                    "Command `{command}` was rejected by the server: {feedback}"
+                )
+            }
             BotError::Internal(msg) => write!(f, "Internal error: {msg}"),
         }
     }
@@ -181,6 +201,7 @@ impl Display for BotError {
 // | -32006 | `CODE_CONTAINER_ALREADY_OPEN`    | `ContainerAlreadyOpen` | `container_already_open` | false | —                                |
 // | -32007 | `CODE_CONTAINER_TIMEOUT`         | `ContainerTimeout`     | `container_timeout`  | true      | —                                    |
 // | -32008 | `CODE_PATHFINDING_FAILED`        | `PathfindingFailed`    | `pathfinding_failed` | false     | `x`, `y`, `z` (target), `detail`     |
+// | -32009 | `CODE_COMMAND_REJECTED`          | `CommandRejected`      | `command_rejected`   | true      | `command`, `feedback`                |
 // | -32600 | `ErrorCode::INVALID_REQUEST`     | `PermissionDenied`     | `permission_denied`  | false     | —                                    |
 // | -32602 | `ErrorCode::INVALID_PARAMS`      | `ToolNotFound`         | `tool_not_found`     | false     | `tool_type`, `material`, `alternatives` |
 // | -32602 | `ErrorCode::INVALID_PARAMS`      | `TooFar`               | `too_far`            | false     | `target`, `current`, `max_distance`  |
@@ -198,6 +219,7 @@ const CODE_MINING_INTERRUPTED: i32 = -32005;
 const CODE_CONTAINER_ALREADY_OPEN: i32 = -32006;
 const CODE_CONTAINER_TIMEOUT: i32 = -32007;
 const CODE_PATHFINDING_FAILED: i32 = -32008;
+const CODE_COMMAND_REJECTED: i32 = -32009;
 
 impl From<BotError> for ErrorData {
     fn from(err: BotError) -> Self {
@@ -350,6 +372,16 @@ impl From<BotError> for ErrorData {
                 serde_json::json!({
                     "reason": "invalid_params",
                     "retryable": false,
+                }),
+            ),
+
+            BotError::CommandRejected { command, feedback } => (
+                ErrorCode(CODE_COMMAND_REJECTED),
+                serde_json::json!({
+                    "reason": "command_rejected",
+                    "retryable": true,
+                    "command": command,
+                    "feedback": feedback,
                 }),
             ),
 
@@ -532,6 +564,18 @@ mod tests {
             err.to_string(),
             "Invalid parameter: hotbar slot 9 out of range"
         );
+    }
+
+    #[test]
+    fn test_display_command_rejected() {
+        let err = BotError::CommandRejected {
+            command: "/item replace entity @s hotbar.0 dirt 64".into(),
+            feedback: "Incorrect argument for command".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("rejected by the server"));
+        assert!(msg.contains("/item replace"));
+        assert!(msg.contains("Incorrect argument"));
     }
 
     // -- Clone ----------------------------------------------------------------
@@ -768,6 +812,40 @@ mod tests {
     }
 
     #[test]
+    fn test_into_mcp_error_command_rejected() {
+        let err = BotError::CommandRejected {
+            command: "/item replace entity @s hotbar.0 dirt 64".into(),
+            feedback: "Incorrect argument for command ... dirt 64<--[HERE]".into(),
+        };
+        let mcp: ErrorData = err.into();
+        // Distinct code so clients can branch on `error.code` alone —
+        // "the server rejected the command" is different from a timeout
+        // (-32001) or a generic internal error (-32603).
+        assert_eq!(mcp.code.0, -32009);
+        let data = assert_contract(&mcp, "command_rejected", true);
+        assert_eq!(data["command"], "/item replace entity @s hotbar.0 dirt 64");
+        assert!(
+            data["feedback"]
+                .as_str()
+                .unwrap()
+                .contains("Incorrect argument")
+        );
+        // The human-readable message must surface the server feedback.
+        assert!(mcp.message.as_ref().contains("rejected by the server"));
+    }
+
+    #[test]
+    fn test_into_mcp_error_command_rejected_message_contains_feedback() {
+        let err = BotError::CommandRejected {
+            command: "/give @s dirt 1".into(),
+            feedback: "Unknown command".into(),
+        };
+        let mcp: ErrorData = err.into();
+        assert_eq!(mcp.code.0, -32009);
+        assert!(mcp.message.as_ref().contains("Unknown command"));
+    }
+
+    #[test]
     fn test_custom_error_codes_are_distinct_and_in_reserved_range() {
         // Guard the contract table: every custom code is unique, lies in
         // the JSON-RPC implementation-defined range (-32000..=-32099), and
@@ -781,6 +859,7 @@ mod tests {
             CODE_CONTAINER_ALREADY_OPEN,
             CODE_CONTAINER_TIMEOUT,
             CODE_PATHFINDING_FAILED,
+            CODE_COMMAND_REJECTED,
         ];
         for (i, code) in codes.iter().enumerate() {
             assert!(

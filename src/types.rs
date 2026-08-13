@@ -153,6 +153,14 @@ pub enum BotCommand {
     SwitchHotbarSlot(u8),
     /// Drop items from a slot.
     DropItem(u8, u8),
+    /// Move a stack from the main inventory into a hotbar slot.
+    ///
+    /// Swaps the first inventory slot holding at least `count` of `item_id`
+    /// with the given hotbar slot (0-8) via a container swap-click (the
+    /// in-game "press hotbar key 1-9 while clicking a slot" operation). Only
+    /// moves items that already exist in the inventory — it cannot conjure
+    /// items out of thin air (that still requires an `/give`-style command).
+    MoveItemToHotbar(u8, String, u8),
     /// Use the currently held item.
     UseItem,
     /// Atomically switch to a hotbar slot (0-8) and use the held item.
@@ -505,6 +513,7 @@ mod tests {
             BotCommand::UseItemOnBlock(_, _) => 1,
             BotCommand::SwitchHotbarSlot(_) => 1,
             BotCommand::DropItem(_, _) => 1,
+            BotCommand::MoveItemToHotbar(_, _, _) => 1,
             BotCommand::UseItem => 1,
             BotCommand::UseItemWithSlot(_) => 1,
             BotCommand::EquipTool(_) => 1,
@@ -528,13 +537,14 @@ mod tests {
 
     #[test]
     fn test_bot_command_variant_count() {
-        // 27 variants (removed the 7 never-dispatched Query* variants in 1.1.0).
+        // 28 variants (removed the 7 never-dispatched Query* variants in 1.1.0;
+        // added MoveItemToHotbar in 1.1.5).
         let cmds = all_bot_commands();
         // Verify each variant returns 1 from the exhaustive match
         for cmd in &cmds {
             assert_eq!(require_all_variants(cmd), 1);
         }
-        assert_eq!(cmds.len(), 27);
+        assert_eq!(cmds.len(), 28);
     }
 
     #[test]
@@ -805,6 +815,7 @@ mod tests {
             BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None),
             BotCommand::SwitchHotbarSlot(0),
             BotCommand::DropItem(0, 1),
+            BotCommand::MoveItemToHotbar(0, "dirt".into(), 1),
             BotCommand::UseItem,
             BotCommand::UseItemWithSlot(0),
             BotCommand::EquipTool(ToolType::Pickaxe),
