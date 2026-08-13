@@ -14,7 +14,7 @@ Minecraft bot controlled via the Model Context Protocol (MCP).
 
 | Minecraft server version | minecraft-mcp-rs version |
 |--------------------------|--------------------------|
-| 1.21.11                  | 1.1.4                    |
+| 1.21.11                  | 1.2.0                    |
 
 ## Build
 
