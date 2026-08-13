@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`execute_command` no longer reports fake success:** the server rejects
+  commands (e.g. `Incorrect argument for command ...`) via a chat message that
+  was never correlated with the command. The executor now reads the server's
+  system-message feedback after sending and surfaces a rejection as a new
+  `CommandRejected` error (JSON-RPC -32009) carrying the verbatim feedback;
+  accepted commands attach the server's reply (e.g. "Teleported X to ...") to
+  the result. `get_server_info` uses the same mechanism to probe
+  `commands_enabled` live via `/seed` (cached until `refresh=true`), so the
+  field reflects whether commands *actually* work on cheat/plugin servers
+  instead of the OP-level heuristic alone.
+- **Stale-snapshot reads after actions:** `get_self_info` / `get_inventory`
+  now accept `force=true` (default) and trigger an immediate snapshot rebuild
+  before reading (3 s bounded), so a bot that just dropped an item / moved /
+  teleported sees fresh state instead of the 500 ms-throttled snapshot.
+  `collect_items` force-refreshes before scanning for dropped items.
+- **`drop_item` verifies the drop actually landed:** the executor now reads
+  the inventory before and after the click and reports `success: false` with a
+  reason when the slot did not change (empty slot, or a container window
+  making azalea drop the click packet).
+- **Movement timeouts return structured partial results:** a stalled
+  `move_to` / `smart_move` / `fly_to` no longer surfaces a bare
+  `CommandTimeout` from the envelope — the executor stops the pathfinder and
+  returns `{reason: "timeout", position, start, target, distance_moved}` so
+  the MCP client can decide whether to retry or cancel.
+- **`smart_move` obstacle field now carries coordinates:** the `obstacle`
+  payload is `{block_type, x, y, z}` (or `null`), and the scan checks three Y
+  layers plus a 3×3×3 neighbourhood fallback, so clients see what (and where)
+  blocked the bot instead of `null`.
+- **Dead mobs no longer linger in the entity list:** `collect_entities`
+  skips entities whose health metadata is `<= 0`, so a killed chicken no
+  longer shows up with `health: 0.0` until despawn. Item entities (no Health)
+  are unaffected.
+
+### Added
+
+- **`set_hotbar_item(hotbar_slot, item_id, count)` MCP tool:** moves an
+  existing inventory stack into a hotbar slot via a container swap-click — a
+  reliable alternative to `/item replace`, whose syntax varies across
+  servers. The item must already be in the inventory; it cannot conjure items.
+- **`get_server_info` probe caching and `bot_busy` field.**
+- **New `BotError::CommandRejected` variant with dedicated error code -32009**
+  (`reason: command_rejected`, `retryable: true`, carries `command` +
+  `feedback`).
+
+### Changed
+
+- **`smart_move` `obstacle` wire shape:** now an object `{block_type, x, y,
+  z}` instead of a bare string (breaking change for clients reading the old
+  shape).
+- **`get_self_info` / `get_inventory` take a `force` parameter** (default
+  `true`) — existing callers see identical output.
+
 ## [1.1.4] - 2026-08-12
 
 ### Fixed

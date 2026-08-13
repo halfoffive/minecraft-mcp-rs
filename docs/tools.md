@@ -12,7 +12,7 @@ function, and tool parameters are annotated with
 | **Query** | `get_self_info`, `get_inventory`, `get_nearby_blocks`, `get_nearby_entities`, `get_chunk_summary`, `is_connected`, `get_chat_history`, `get_server_info`, `get_world_view` |
 | **Movement** | `move_to`, `walk_direction`, `jump`, `teleport`, `smart_move`, `fly_to` |
 | **Block** | `break_block`, `place_block`, `use_item_on_block` |
-| **Item** | `drop_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items` |
+| **Item** | `drop_item`, `set_hotbar_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items` |
 | **Container** | `open_container`, `take_from_container`, `put_into_container`, `close_container` |
 | **Combat** | `attack_entity`, `shield_block` |
 | **Chat** | `send_chat`, `execute_command`, `set_game_mode` |
@@ -47,6 +47,7 @@ machine-readable `reason`, a `retryable` bool, and variant-specific fields:
 | -32006 | `ContainerAlreadyOpen` | `container_already_open` | false |
 | -32007 | `ContainerTimeout` | `container_timeout` | true |
 | -32008 | `PathfindingFailed` | `pathfinding_failed` | false |
+| -32009 | `CommandRejected` | `command_rejected` | true |
 | -32600 | `PermissionDenied` | `permission_denied` | false |
 | -32602 | `ToolNotFound` / `TooFar` / `InvalidParams` | `tool_not_found` / `too_far` / `invalid_params` | false |
 | -32603 | `Internal` | `internal_error` | false |
@@ -56,6 +57,20 @@ machine-readable `reason`, a `retryable` bool, and variant-specific fields:
 - **Honest error reporting** — `BotError::InvalidParams` maps to MCP
   `INVALID_PARAMS`; unbreakable blocks return `MiningInterrupted` instead of
   panicking; `set_game_mode` flags the OP requirement.
+- **Command feedback verification** — `execute_command` reads the server's
+  chat reply after sending: a rejected command returns a `CommandRejected`
+  error (-32009) with the server's verbatim feedback, and successful commands
+  attach the server's reply (e.g. "Teleported X to ...") to the result.
+  `drop_item` verifies the inventory slot actually changed after the click
+  and reports `success: false` when it did not.
+- **Fresh state on demand** — `get_self_info` / `get_inventory` accept
+  `force=true` (default) and trigger an immediate snapshot rebuild before
+  reading. `get_server_info` probes `commands_enabled` live via `/seed`
+  (cached until `refresh=true`) and reports `bot_busy`.
+- **`set_hotbar_item`** — moves an existing inventory stack into a hotbar
+  slot (0-8) via a container swap-click, a reliable alternative to `/item
+  replace` whose syntax varies across servers. The item must already be in
+  the inventory; it cannot conjure items.
 - **AI vision** — `get_world_view` renders a top-down PNG of nearby blocks
   (`mcp/render.rs`) and returns it as base64 for multimodal models.
 - **Compound operations** — higher-level state machines (e.g. mine-and-collect)

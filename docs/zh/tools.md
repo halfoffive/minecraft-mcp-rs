@@ -11,7 +11,7 @@
 | **查询（Query）** | `get_self_info`, `get_inventory`, `get_nearby_blocks`, `get_nearby_entities`, `get_chunk_summary`, `is_connected`, `get_chat_history`, `get_server_info`, `get_world_view` |
 | **移动（Movement）** | `move_to`, `walk_direction`, `jump`, `teleport`, `smart_move`, `fly_to` |
 | **方块（Block）** | `break_block`, `place_block`, `use_item_on_block` |
-| **物品（Item）** | `drop_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items` |
+| **物品（Item）** | `drop_item`, `set_hotbar_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items` |
 | **容器（Container）** | `open_container`, `take_from_container`, `put_into_container`, `close_container` |
 | **战斗（Combat）** | `attack_entity`, `shield_block` |
 | **聊天（Chat）** | `send_chat`, `execute_command`, `set_game_mode` |
@@ -44,6 +44,7 @@
 | -32006 | `ContainerAlreadyOpen` | `container_already_open` | false |
 | -32007 | `ContainerTimeout` | `container_timeout` | true |
 | -32008 | `PathfindingFailed` | `pathfinding_failed` | false |
+| -32009 | `CommandRejected` | `command_rejected` | true |
 | -32600 | `PermissionDenied` | `permission_denied` | false |
 | -32602 | `ToolNotFound` / `TooFar` / `InvalidParams` | `tool_not_found` / `too_far` / `invalid_params` | false |
 | -32603 | `Internal` | `internal_error` | false |
@@ -53,6 +54,16 @@
 - **诚实的错误报告** —— `BotError::InvalidParams` 映射到 MCP
   `INVALID_PARAMS`；不可破坏的方块返回 `MiningInterrupted` 而非 panic；
   `set_game_mode` 会提示需要 OP 权限。
+- **命令反馈校验** —— `execute_command` 在发送后会读取服务器的聊天回复：被拒绝
+  的命令返回 `CommandRejected` 错误（-32009）并附上服务器的原始反馈，成功命令会
+  附带服务器回复（如 "Teleported X to ..."）。`drop_item` 会在点击后校验背包槽位
+  是否真的变化，未变化时报 `success: false`。
+- **按需获取最新状态** —— `get_self_info` / `get_inventory` 接受 `force=true`
+  （默认），读取前会立即触发快照重建。`get_server_info` 通过 `/seed` 实时探测
+  `commands_enabled`（缓存至 `refresh=true`）并报告 `bot_busy`。
+- **`set_hotbar_item`** —— 通过容器 swap-click 将背包中已有的物品移入快捷栏槽位
+  （0-8），是 `/item replace`（语法因服务器而异）的可靠替代方案。物品必须已在
+  背包中；不能凭空生成物品。
 - **AI 视觉** —— `get_world_view` 渲染附近方块的俯视 PNG 图
   （`mcp/render.rs`）并以 base64 返回，供多模态模型使用。
 - **复合操作** —— 在 `compound_ops.rs` 中基于基本命令构建更高层的状态机

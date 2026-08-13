@@ -108,6 +108,22 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 
   **诚实的错误报告** —— `BotError::InvalidParams` 会映射为 MCP 的 `INVALID_PARAMS`；无法破坏的方块返回 `MiningInterrupted` 而非 panic；`set_game_mode` 会提示需要 OP 权限。
 
+- **Command feedback verification** — `execute_command` reads the server's
+  chat reply after sending: a rejected command (e.g. `Incorrect argument for
+  command ...`) returns a `CommandRejected` error (-32009) with the server's
+  verbatim feedback instead of a fake "Executed command" success. `drop_item`
+  verifies the inventory actually changed after the click.
+
+  **命令反馈校验** —— `execute_command` 在发送后会读取服务器的聊天回复：被拒绝的命令（如 `Incorrect argument for command ...`）会返回 `CommandRejected` 错误（-32009）并附上服务器的原始反馈，而不是伪造的"已执行"。`drop_item` 会在点击后校验背包确实发生了变化。
+
+- **Fresh state on demand** — `get_self_info` / `get_inventory` accept
+  `force=true` (default) to trigger an immediate snapshot rebuild before
+  reading, so an agent that just dropped an item / moved / teleported sees the
+  fresh state instead of a 500 ms-stale snapshot. `get_server_info` probes
+  `commands_enabled` live via `/seed` and caches the result.
+
+  **按需获取最新状态** —— `get_self_info` / `get_inventory` 接受 `force=true`（默认）参数，读取前会立即触发快照重建，因此刚丢弃物品 / 移动 / 传送后的代理能读到最新状态，而非 500ms 前的旧快照。`get_server_info` 通过 `/seed` 实时探测 `commands_enabled` 并缓存结果。
+
 ## Tool Categories
 
 | Category / 类别 | Tools / 工具 |
@@ -115,7 +131,7 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 | **Query / 查询** | `get_self_info`, `get_inventory`, `get_nearby_blocks`, `get_nearby_entities`, `get_chunk_summary`, `is_connected`, `get_chat_history`, `get_server_info`, `get_world_view` |
 | **Movement / 移动** | `move_to`, `walk_direction`, `jump`, `teleport`, `smart_move`, `fly_to` |
 | **Block / 方块** | `break_block`, `place_block`, `use_item_on_block` |
-| **Item / 物品** | `drop_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items` |
+| **Item / 物品** | `drop_item`, `set_hotbar_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items` |
 | **Container / 容器** | `open_container`, `take_from_container`, `put_into_container`, `close_container` |
 | **Combat / 战斗** | `attack_entity`, `shield_block` |
 | **Chat / 聊天** | `send_chat`, `execute_command`, `set_game_mode` |
@@ -410,6 +426,7 @@ AI agents can distinguish "bot is gone, retry later" from "input is invalid":
 | -32006 | `ContainerAlreadyOpen` | `container_already_open` | false |
 | -32007 | `ContainerTimeout` | `container_timeout` | true |
 | -32008 | `PathfindingFailed` | `pathfinding_failed` | false |
+| -32009 | `CommandRejected` | `command_rejected` | true |
 | -32600 | `PermissionDenied` | `permission_denied` | false |
 | -32602 | `ToolNotFound` / `TooFar` / `InvalidParams` | `tool_not_found` / `too_far` / `invalid_params` | false |
 | -32603 | `Internal` | `internal_error` | false |
