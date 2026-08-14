@@ -392,29 +392,12 @@ impl BotActions for RealBotClient {
     }
 
     fn inventory_entries(&self) -> Vec<Option<ItemStack>> {
-        // The player inventory is the 36-slot `inventory` field of
-        // `Menu::Player`. When a container is open the menu is no longer
-        // `Player`, so fall back to an empty snapshot.
-        let menu = self.client.menu();
-        let player = match menu.try_as_player() {
-            Some(p) => p,
-            None => return Vec::new(),
-        };
-        // `player.inventory` is a `SlotList<36>` deref'ing to `[ItemStack; 36]`.
-        player
-            .inventory
-            .iter()
-            .map(|stack| {
-                if stack.is_empty() {
-                    None
-                } else {
-                    Some(ItemStack {
-                        item_id: item_kind_to_id(stack.kind()),
-                        count: stack.count().clamp(0, 255) as u8,
-                    })
-                }
-            })
-            .collect()
+        // Read the player's 36 slots in canonical order (hotbar 0-8 first,
+        // main inventory 9-35), via the shared helper. This also works while
+        // a container menu is open — the trailing 36 player slots are read
+        // through `Menu::player_slots_range()` — unlike the previous
+        // `try_as_player()` fallback which returned an empty list.
+        canonical_player_inventory(&self.client.menu())
     }
 
     fn player_inventory_occupied_slots(&self) -> usize {
@@ -441,6 +424,58 @@ impl BotActions for RealBotClient {
 /// the snake_case item id used by the block/tool tables (`iron_pickaxe`).
 pub(crate) fn item_kind_to_id(kind: azalea::registry::builtin::ItemKind) -> String {
     to_snake_case(&format!("{kind:?}"))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Player inventory slot canonicalization
+// ═══════════════════════════════════════════════════════════════
+//
+// azalea's `Menu::Player.inventory` (and the trailing 36 player slots of
+// every other menu) is laid out in *protocol* order: **main inventory first**
+// (27 slots) then **hotbar last** (9 slots). The rest of the crate — the
+// snapshot's `InventorySlot.slot_index`, `equip_tool`, `drop_item`,
+// `MoveItemToHotbar`, and `select_tool_for_block` — assumes the
+// canonical **hotbar-first** order (index 0..=8 = hotbar, 9..=35 = main
+// inventory). These two helpers are the single place that reconciles the
+// two orderings.
+
+/// Map an azalea player-inventory slot index (0-35, main-inventory-first) to
+/// the canonical index used across the crate (hotbar 0-8 first, then main
+/// inventory 9-35).
+///
+/// azalea stores 27 main-inventory slots at indices 0..=26 and 9 hotbar
+/// slots at 27..=35; canonical order is the reverse. The 27/9 split is
+/// guaranteed by `Menu::hotbar_slots_range()` ("hotbar is always last 9
+/// slots in the player's inventory").
+pub(crate) fn canonical_inventory_slot(azalea_slot: usize) -> usize {
+    if azalea_slot < 27 {
+        azalea_slot + 9
+    } else {
+        azalea_slot - 27
+    }
+}
+
+/// Read the player's 36 inventory slots in canonical order (hotbar 0-8 first,
+/// then main inventory 9-35), regardless of whether a container menu is open.
+///
+/// Uses `Menu::player_slots_range()` — the trailing 36 player slots present
+/// in **every** menu — rather than `try_as_player()`, so a chest/furnace
+/// window no longer hides the inventory. Each slot is then re-ordered through
+/// `canonical_inventory_slot` so hotbar items land at indices 0-8.
+pub(crate) fn canonical_player_inventory(menu: &azalea_inventory::Menu) -> Vec<Option<ItemStack>> {
+    let slots = menu.slots();
+    let player_range = menu.player_slots_range();
+    let mut out: Vec<Option<ItemStack>> = vec![None; 36];
+    for (az_idx, stack) in slots[player_range].iter().enumerate() {
+        if stack.is_empty() {
+            continue;
+        }
+        out[canonical_inventory_slot(az_idx)] = Some(ItemStack {
+            item_id: item_kind_to_id(stack.kind()),
+            count: stack.count().clamp(0, 255) as u8,
+        });
+    }
+    out
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -697,9 +732,9 @@ impl<B: BotActions> CommandExecutor<B> {
             }
             BotCommand::UseItem => self.handle_use_item(),
             BotCommand::UseItemWithSlot(slot) => self.handle_use_item_with_slot(slot),
-            BotCommand::EquipTool(tool) => self.handle_equip_tool(tool, None),
+            BotCommand::EquipTool(tool) => self.handle_equip_tool(tool, None).await,
             BotCommand::EquipToolWithMaterial(tool, material) => {
-                self.handle_equip_tool(tool, Some(material))
+                self.handle_equip_tool(tool, Some(material)).await
             }
 
             // ── Container ─────────────────────────────────────────
@@ -1023,9 +1058,11 @@ impl<B: BotActions> CommandExecutor<B> {
                 .unwrap_or(0),
         );
 
-        // The inventory read comes back empty when a non-player menu (e.g. a
-        // chest) is open — the click then targeted the wrong window and was
-        // never sent by azalea. Report honestly instead of faking success.
+        // Defensive branch (now unreachable via the real client, which always
+        // returns 36 slots through 'canonical_player_inventory'): a non-player
+        // menu open during the drop makes the click target the wrong window.
+        // Report honestly instead of faking success if the read ever comes
+        // back empty.
         if after.is_empty() && !before.is_empty() {
             return Ok(BotResult {
                 success: true,
@@ -1154,7 +1191,7 @@ impl<B: BotActions> CommandExecutor<B> {
         self.handle_use_item()
     }
 
-    fn handle_equip_tool(
+    async fn handle_equip_tool(
         &self,
         tool: crate::types::ToolType,
         material: Option<crate::types::MaterialTier>,
@@ -1185,16 +1222,39 @@ impl<B: BotActions> CommandExecutor<B> {
                     data: None,
                 })
             }
-            Some((_material, _slot)) => {
-                // Tool exists but is in the main inventory (slot 9-35).
-                // azalea's `set_selected_hotbar_slot` only accepts 0-8, so we
-                // can't hotbar-select it directly. Moving items between the
-                // main inventory and hotbar requires a container click flow
-                // (deferred to a future version).
-                Err(BotError::InvalidParams(format!(
-                    "{tool:?} found in main inventory but not in hotbar; \
-                     move it to a hotbar slot first"
-                )))
+            Some((_material, slot)) => {
+                // Tool is in the main inventory (slot 9-35). Auto-move it into
+                // the first free hotbar slot via a container swap-click, then
+                // switch to it — instead of erroring out. This is the
+                // "degrade equip_tool" path: the tool exists, so equip it
+                // rather than asking the caller to rearrange the hotbar.
+                let item_id = entries
+                    .get(slot as usize)
+                    .and_then(|opt| opt.as_ref())
+                    .map(|stack| stack.item_id.clone())
+                    .ok_or_else(|| {
+                        BotError::Internal(format!(
+                            "tool slot {slot} disappeared from inventory during equip"
+                        ))
+                    })?;
+                // Prefer an empty hotbar slot; when the hotbar is full, fall
+                // back to slot 0 (the swap trades places, so the displaced
+                // hotbar item lands in the tool's old main-inventory slot).
+                let target = (0..=8u8)
+                    .find(|&i| entries[i as usize].is_none())
+                    .unwrap_or(0);
+                let moved = self.handle_move_item_to_hotbar(target, item_id, 1).await?;
+                if !moved.success {
+                    return Ok(moved);
+                }
+                self.bot.switch_hotbar_slot(target);
+                Ok(BotResult {
+                    success: true,
+                    message: format!(
+                        "Equipped {tool:?} from main inventory (moved to hotbar slot {target})"
+                    ),
+                    data: None,
+                })
             }
             None => Err(BotError::ToolNotFound {
                 tool_type: tool,
@@ -1548,8 +1608,16 @@ impl<B: BotActions> CommandExecutor<B> {
     }
 
     /// Creative-mode flight to a position. If the bot is not in creative mode,
-    /// returns `not_creative`. Otherwise delegates to [`BotActions::goto`]
-    /// (azalea's pathfinder can navigate 3D in creative flight).
+    /// returns `not_creative`.
+    ///
+    /// azalea's pathfinder is ground-based (walk/jump/fall) and cannot change
+    /// the player's Y beyond a 1-block jump, so the flight is split in two:
+    /// (1) path horizontally to the target XZ at the current Y via
+    /// [`BotActions::goto`], then (2) complete the vertical delta (and any
+    /// residual horizontal offset) by directly updating the player's position
+    /// through [`BotActions::teleport`]. Creative flight has no fall damage
+    /// and no collision concern for the bot's own body, so the direct position
+    /// update is safe and deterministic.
     async fn handle_fly_to(&self, target: BlockPos) -> Result<BotResult, BotError> {
         trace!(?target, "FlyTo");
         let snapshot = self.state.read_snapshot();
@@ -1568,7 +1636,10 @@ impl<B: BotActions> CommandExecutor<B> {
             });
         }
 
-        match self.goto_with_margin(target).await {
+        // Horizontal leg: path to the target XZ at the current Y. Keeping Y
+        // unchanged makes the goal reachable by azalea's ground pathfinder.
+        let horizontal_target = BlockPos::new(target.x, current_pos.y, target.z);
+        match self.goto_with_margin(horizontal_target).await {
             GotoOutcome::TimedOut {
                 start,
                 current,
@@ -1580,26 +1651,36 @@ impl<B: BotActions> CommandExecutor<B> {
                 current,
                 timeout_secs,
             )),
-            GotoOutcome::Completed(goto_result) => {
-                // In creative mode the pathfinder can fly. Fall back to goto.
-                let final_pos = self.state.read_snapshot().self_player.position;
-
-                let reached = (final_pos.x - target.x).abs() <= 1
-                    && (final_pos.y - target.y).abs() <= 1
-                    && (final_pos.z - target.z).abs() <= 1;
-                let reason = if reached { "reached" } else { "obstacle" };
-
-                let success = goto_result.is_ok() || reached;
-                Ok(BotResult {
-                    success,
-                    message: format!("FlyTo {target}: {reason}"),
-                    data: Some(serde_json::json!({
-                        "reached": reached,
-                        "reason": reason,
-                        "position": [final_pos.x, final_pos.y, final_pos.z],
-                    })),
-                })
-            }
+            GotoOutcome::Completed(goto_result) => match goto_result {
+                // Horizontal pathfinding failed (obstacle): report it
+                // honestly and do NOT teleport past the blockage.
+                Err(e) => {
+                    let pos = self.state.read_snapshot().self_player.position;
+                    Ok(BotResult {
+                        success: false,
+                        message: format!("FlyTo {target} blocked: {e}"),
+                        data: Some(serde_json::json!({
+                            "reached": false,
+                            "reason": "obstacle",
+                            "position": [pos.x, pos.y, pos.z],
+                        })),
+                    })
+                }
+                // Horizontal leg reached: complete the vertical delta by
+                // moving straight to the exact target.
+                Ok(()) => {
+                    self.bot.teleport(&target);
+                    Ok(BotResult {
+                        success: true,
+                        message: format!("FlyTo {target}: reached"),
+                        data: Some(serde_json::json!({
+                            "reached": true,
+                            "reason": "reached",
+                            "position": [target.x, target.y, target.z],
+                        })),
+                    })
+                }
+            },
         }
     }
 
@@ -3583,6 +3664,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_equip_tool_moves_from_main_inventory() {
+        // A tool that lives only in the main inventory (slot 9-35) must be
+        // auto-moved into the first free hotbar slot, then switched to — not
+        // rejected with "move it to a hotbar slot first".
+        let (executor, sender, _state, log) = make_executor();
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            inv.resize(36, None);
+            // Main inventory slot 12 holds an iron pickaxe.
+            inv[12] = Some(ItemStack {
+                item_id: "iron_pickaxe".into(),
+                count: 1,
+            });
+        }
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::EquipTool(ToolType::Pickaxe)).await;
+        let br = result.expect("equip from main inventory should succeed");
+        assert!(br.success, "message: {}", br.message);
+        assert!(br.message.contains("moved to hotbar slot 0"));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        // The tool must have been swapped into hotbar slot 0 and switched to.
+        let inv = log.inventory.lock().unwrap();
+        assert_eq!(inv[0].as_ref().unwrap().item_id, "iron_pickaxe");
+        let slots = log.hotbar_switch_calls.lock().unwrap();
+        assert_eq!(slots.as_slice(), &[0u8]);
+    }
+
+    #[tokio::test]
     async fn test_equip_tool_hand_is_noop() {
         let (executor, sender, _state, _log) = make_executor();
         let handle = spawn_executor(executor);
@@ -3772,6 +3885,90 @@ mod tests {
 
         drop(sender);
         handle.await.expect("executor should finish");
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Canonical inventory slot ordering tests
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_canonical_inventory_slot_reorders_hotbar_first() {
+        // azalea order: main inventory 0-26, hotbar 27-35.
+        // canonical order: hotbar 0-8, main inventory 9-35.
+        assert_eq!(canonical_inventory_slot(0), 9);
+        assert_eq!(canonical_inventory_slot(26), 35);
+        assert_eq!(canonical_inventory_slot(27), 0);
+        assert_eq!(canonical_inventory_slot(35), 8);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // FlyTo tests
+    // ═══════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_fly_to_vertical_reaches_target() {
+        // fly_to must handle a target whose Y differs from the current Y:
+        // horizontal goto first (same Y), then a direct position update.
+        let (executor, sender, state, log) = make_executor();
+        state.update_snapshot(crate::types::WorldSnapshot {
+            self_player: SelfPlayer {
+                position: BlockPos::new(0, 64, 0),
+                gamemode: GameMode::Creative,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(10, 70, 0);
+        let result = send_and_await(&sender, BotCommand::FlyTo(target)).await;
+        let br = result.expect("fly_to should succeed");
+        assert!(br.success, "message: {}", br.message);
+        let data = br.data.expect("data present");
+        assert_eq!(data.get("reached"), Some(&serde_json::json!(true)));
+        assert_eq!(data.get("reason"), Some(&serde_json::json!("reached")));
+        assert_eq!(data.get("position"), Some(&serde_json::json!([10, 70, 0])));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        // Horizontal leg keeps Y at 64; the vertical leg teleports to the
+        // exact target.
+        let gotos = log.goto_calls.lock().unwrap();
+        assert_eq!(gotos.as_slice(), &[BlockPos::new(10, 64, 0)]);
+        let teles = log.teleport_calls.lock().unwrap();
+        assert_eq!(teles.as_slice(), &[target]);
+    }
+
+    #[tokio::test]
+    async fn test_fly_to_blocked_horizontally_does_not_teleport() {
+        // When the horizontal leg fails (obstacle), fly_to must NOT teleport
+        // past the blockage.
+        let (executor, sender, state, log) = make_executor();
+        log.goto_succeeds.store(false, Ordering::SeqCst);
+        state.update_snapshot(crate::types::WorldSnapshot {
+            self_player: SelfPlayer {
+                position: BlockPos::new(0, 64, 0),
+                gamemode: GameMode::Creative,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(10, 70, 0);
+        let result = send_and_await(&sender, BotCommand::FlyTo(target)).await;
+        let br = result.expect("blocked fly_to is Ok(BotResult)");
+        assert!(!br.success);
+        let data = br.data.expect("data present");
+        assert_eq!(data.get("reached"), Some(&serde_json::json!(false)));
+        assert_eq!(data.get("reason"), Some(&serde_json::json!("obstacle")));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        // No teleport must have been issued past the obstacle.
+        assert!(log.teleport_calls.lock().unwrap().is_empty());
     }
 
     // ═══════════════════════════════════════════════════════════════
