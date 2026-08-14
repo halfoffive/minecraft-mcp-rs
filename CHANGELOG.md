@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Inventory slot ordering (hotbar) — root cause of 4 broken tools:** azalea's
+  `Menu::Player.inventory` (and the trailing 36 player slots of every other
+  menu) is laid out in *protocol* order — **main inventory first (0-26),
+  hotbar last (27-35)** — while the whole crate assumed hotbar-first (0-8).
+  A new shared `canonical_player_inventory` / `canonical_inventory_slot`
+  helper re-orders the 36 slots into the canonical hotbar-first order and
+  reads them through `Menu::player_slots_range()`, so `get_inventory` /
+  `get_self_info` now report hotbar slots at indices 0-8 and no longer
+  return an empty list while a container is open. This one fix restores
+  `set_hotbar_item`, `equip_tool`, and `drop_item` verification, which
+  had all mis-mapped their slot indices.
+- **`equip_tool` auto-moves tools from the main inventory:** a tool found
+  only in the main inventory (slots 9-35) is now swapped into the first free
+  hotbar slot and then selected, instead of failing with "move it to a hotbar
+  slot first".
+- **`fly_to` vertical movement:** azalea's pathfinder is ground-based and
+  cannot change the player's Y beyond a 1-block jump. `fly_to` now splits
+  the flight into a horizontal `goto` leg (target XZ at the current Y)
+  followed by a direct position update for the vertical delta, so a target
+  with a different Y is actually reached instead of timing out at 0
+  displacement.
+
 ## [1.2.0] - 2026-08-13
 
 ### Fixed
