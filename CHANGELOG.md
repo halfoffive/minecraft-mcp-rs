@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1-rc.3] - 2026-08-15
+
+### Added
+
+- **Headless idle watchdog for stdio sessions:** a `--headless --stdio`
+  process now shuts itself down after 10 minutes with no bot command
+  dispatched (measured via the existing command-activity timestamp). This
+  covers the lingering-process failure on Windows where stdin EOF never
+  arrives (inherited console handles have no EOF; a pipe EOF requires every
+  write end to be closed) and the client host abandons the session without
+  closing the pipe.
+- **Stdio Ctrl+C shutdown:** `serve_stdio` now races `tokio::signal::ctrl_c()`
+  against the transport/shutdown-token futures (the HTTP path already had
+  this), so a terminal Ctrl+C exits the process cleanly in every mode.
+- **`get_world_view` / `get_bot_status` report a normalized `yaw`:** the
+  raw look angle could grow unboundedly as the bot keeps turning (observed
+  `-767.1°` in the annotation); it is now folded into Minecraft's
+  `[-180, 180)` range at the snapshot write point.
+
+### Fixed
+
+- **`execute_command` rejection detection now scans every reply message:**
+  Minecraft reports a rejected command as TWO System chat messages (the
+  error title, e.g. `Unknown or incomplete command. See below for error`,
+  plus the command echo with a `<--[HERE]` marker). The old newest-only
+  selection returned fake `success:true` whenever the echo landed last.
+  `rejection_feedback_after` now checks every System message in the
+  feedback window and returns the newest one matching a rejection pattern.
+- **`give_item` no longer misfires "Permission denied":** the gate trusted
+  the cached snapshot's `commands_enabled`, which can be a stale
+  `PermissionLevel` heuristic right after a reconnect. `give_item` now
+  re-probes command availability live via `/seed` (the same single source
+  of truth `get_server_info` uses) and rejects only when the probe itself
+  confirms commands are unavailable; the probe is also cleared on
+  disconnect so it never crosses sessions.
+- **`act` results report the bot's live position:** `self_info.position`
+  previously came from the throttled snapshot, which can lag a just-finished
+  move by up to one interval (5 s when idle) — an LLM client misread a
+  successful move as "did not arrive". The result now prefers a zero-wait
+  live read of the player's position and falls back to the snapshot only
+  when unavailable.
+- **Fluid bucket placement fails with a targeted error:** azalea 0.15.1's
+  fabricated interaction hit (block centre, fixed Up face) is rejected by
+  the vanilla server for bucket `UseItemOn`, so water/lava buckets cannot
+  be placed through `use_item_on_block`. The verification timeout now
+  returns `success:false` with `reason: "bucket_placement_unsupported"`
+  and the working `/setblock` / `/fill` alternative instead of a generic
+  "interaction was likely rejected".
+- **Stdio server exits when the client's pipe breaks:** a failed response
+  write (EPIPE) previously only logged and the process kept waiting for an
+  input EOF that may never arrive. The patched rmcp serve loop now treats a
+  transport write failure as a shutdown reason (`QuitReason::TransportWriteError`),
+  so a headless stdio process dies the moment its MCP client disappears.
+
 ## [1.3.1-rc.2] - 2026-08-15
 
 ### Added

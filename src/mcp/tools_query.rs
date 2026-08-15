@@ -340,18 +340,7 @@ pub async fn get_server_info(
     // at all. Sending the probe through the command channel keeps it serial
     // with other bot commands, so a busy executor simply queues it.
     if input.refresh || state.get_commands_probe().is_none() {
-        // Probe outcome: Some(true) accepted, Some(false) rejected, None
-        // unknown (timeout / offline mid-probe / no feedback).
-        let probe = match sender
-            .send_command(BotCommand::ExecuteCommand("/seed".into()))
-            .await
-        {
-            Ok(_) => Some(true),
-            Err(BotError::CommandRejected { .. }) => Some(false),
-            // Timeout/offline/internal: keep the previous value (or None).
-            Err(_) => state.get_commands_probe(),
-        };
-        state.set_commands_probe(probe);
+        probe_commands_enabled(state, sender).await;
     }
 
     // Read through a forced refresh so `commands_enabled` reflects the merged
@@ -364,6 +353,36 @@ pub async fn get_server_info(
         "bot_busy": state.executor_busy(),
     })
     .to_string())
+}
+
+/// Run a live `/seed` command-availability probe and cache the result.
+///
+/// The single source of truth for "can this bot run commands": every tool
+/// that gates on command availability (e.g. `give_item`) must call this and
+/// trust the probe, not the `PermissionLevel` heuristic in the cached
+/// snapshot — after a reconnect the permission component can lag behind the
+/// real server state, and a stale `Some(false)` would otherwise reject
+/// commands that actually work.
+///
+/// Probe outcome: `Some(true)` accepted, `Some(false)` rejected, `None`
+/// unknown (timeout / offline mid-probe / no feedback — the previous cached
+/// value is preserved). The result is cached in [`SharedState`] via
+/// `set_commands_probe` and merged into every snapshot build.
+pub(crate) async fn probe_commands_enabled(
+    state: &Arc<SharedState>,
+    sender: &BotCommandSender,
+) -> Option<bool> {
+    let probe = match sender
+        .send_command(BotCommand::ExecuteCommand("/seed".into()))
+        .await
+    {
+        Ok(_) => Some(true),
+        Err(BotError::CommandRejected { .. }) => Some(false),
+        // Timeout/offline/internal: keep the previous value (or None).
+        Err(_) => state.get_commands_probe(),
+    };
+    state.set_commands_probe(probe);
+    probe
 }
 
 // ---------------------------------------------------------------------------

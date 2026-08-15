@@ -848,6 +848,14 @@ pub enum QuitReason {
     Cancelled,
     Closed,
     JoinError(tokio::task::JoinError),
+    /// A response (or notification) could not be written to the transport —
+    /// the peer is gone (e.g. the MCP client closed the pipe, EPIPE on
+    /// stdout) even though the input stream has not reported EOF. Quitting
+    /// on this signal lets a stdio server exit when the client disappears
+    /// without waiting for an EOF that may never arrive (inherited console
+    /// handles never produce EOF; a pipe EOF requires every write end to be
+    /// closed).
+    TransportWriteError,
 }
 
 /// Request execution context
@@ -992,7 +1000,11 @@ where
         let mut transport = transport.into_transport();
         let mut batch_messages = VecDeque::<RxJsonRpcMessage<R>>::new();
         let mut send_task_set = tokio::task::JoinSet::<SendTaskResult>::new();
-        let mut response_send_tasks = tokio::task::JoinSet::<()>::new();
+        // Response sends carry their write result (not `()`) so the serve
+        // loop can break `QuitReason::TransportWriteError` when writing a
+        // response fails — the peer is gone and waiting for input EOF may
+        // never end. See the `response_send_tasks.join_next()` select arm.
+        let mut response_send_tasks = tokio::task::JoinSet::<Result<(), T::Error>>::new();
         #[derive(Debug)]
         enum SendTaskResult {
             Request {
@@ -1056,6 +1068,24 @@ where
                             }
                         }
                     }
+                    m = response_send_tasks.join_next(), if !response_send_tasks.is_empty() => {
+                        // A failed response write means the peer is gone —
+                        // quit instead of only logging (previously the error
+                        // was dropped here and the loop kept waiting for an
+                        // input EOF that may never arrive).
+                        match m {
+                            Some(Ok(Err(error))) => {
+                                tracing::error!(%error, "fail to response message, transport write failed — shutting down");
+                                break QuitReason::TransportWriteError
+                            }
+                            Some(Ok(Ok(()))) => continue,
+                            Some(Err(e)) => {
+                                tracing::error!(%e, "response send task encounter a tokio join error");
+                                break QuitReason::JoinError(e)
+                            }
+                            None => continue,
+                        }
+                    }
                     _ = serve_loop_ct.cancelled() => {
                         tracing::info!("task cancelled");
                         break QuitReason::Cancelled
@@ -1105,10 +1135,13 @@ where
                         let send = transport.send(m);
                         let current_span = tracing::Span::current();
                         response_send_tasks.spawn(async move {
-                            let send_result = send.await;
-                            if let Err(error) = send_result {
-                                tracing::error!(%error, "fail to response message");
-                            }
+                            // The result is inspected by the serve loop's
+                            // `response_send_tasks.join_next()` arm, which
+                            // breaks `QuitReason::TransportWriteError` on
+                            // failure (peer gone) — so a stdio server exits
+                            // when the client disappears instead of waiting
+                            // for an input EOF that may never come.
+                            send.await
                         }.instrument(current_span));
                     }
                 }
@@ -1270,7 +1303,9 @@ where
         let drain_timeout = match &quit_reason {
             QuitReason::Closed => Some(Duration::from_secs(5)),
             QuitReason::Cancelled => Some(Duration::from_secs(2)),
-            _ => None,
+            // TransportWriteError already means the peer cannot receive
+            // anything — draining in-flight responses is pointless.
+            QuitReason::TransportWriteError | QuitReason::JoinError(_) => None,
         };
         if let Some(timeout_duration) = drain_timeout {
             // Drop our sender so the channel closes once all handler task
@@ -1280,8 +1315,14 @@ where
                 // First, wait for any response sends already dispatched by the
                 // main loop (these hold transport write futures).
                 while let Some(result) = response_send_tasks.join_next().await {
-                    if let Err(error) = result {
-                        tracing::error!(%error, "response send task failed during drain");
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            tracing::error!(%error, "response send task failed during drain");
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "response send task join failed during drain");
+                        }
                     }
                 }
                 // Then drain any handler responses still in the channel

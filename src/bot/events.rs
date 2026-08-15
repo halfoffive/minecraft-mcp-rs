@@ -374,6 +374,12 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     // a phantom busy state after a disconnect.
     state.shared_state.set_executor_busy(false);
 
+    // Drop the cached `/seed` command-availability probe: the next connection
+    // may land on a different server (or a permission that changed while
+    // offline), and a stale probe would keep `commands_enabled` frozen at the
+    // old value through `resolve_commands_enabled` until someone re-probes.
+    state.shared_state.set_commands_probe(None);
+
     // Clear the injected dependencies so the next connection (or a test in
     // the same process) starts from a clean slot. With `OnceLock` the first
     // `set` would silently win forever, leaking state across reconnects and
