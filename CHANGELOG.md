@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   combat → container → command → chat) with the chat-report protocol
   (`send_chat("[SMOKE] ...")` per category, `get_chat_history` as the
   assertion log).
+- **Pre-release channel on the `release` branch:** pushing to `release`
+  now automatically builds all platforms and publishes a **pre-release**
+  (GitHub Release marked `prerelease`, never "Latest", + npm dist-tag
+  `next`); the tag is derived from `Cargo.toml` (`v` + version, which
+  carries an `-rc.N` suffix). Re-pushes with an unchanged version are
+  idempotent (existing release / published npm versions are skipped).
 
 ### Changed
 
@@ -46,6 +52,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`use_item_on_block` reports the item actually used:** the result message
   now names the held item (e.g. `water_bucket`), so a wrong-slot
   interaction is visible instead of silently pouring nothing.
+- **Branch model — `develop` / `release` / `master`:** feature PRs now
+  target `develop`; `release` is the pre-release channel; `master` is
+  stable-only — a `vX.Y.Z` tag on `master` publishes the stable release
+  (GitHub "Latest Release" + npm `latest`). Documented in the new
+  bilingual `CONTRIBUTING.md` and AGENTS.md. The old `release/1.2.0`
+  branch was deleted (git forbids `release` and `release/<X.Y.Z>` to
+  coexist) — version-specific prep branches must use another prefix.
+
+### Removed
+
+- **AtomGit `.gitcode/workflows/` mirror:** the three AtomGit pipeline
+  files and all AtomGit references (README CI section, AGENTS notes) were
+  removed — CI/CD runs exclusively on GitHub Actions. Historical changelog
+  entries about AtomGit remain as records of past releases.
 
 ### Fixed
 
