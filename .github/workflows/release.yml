@@ -1,4 +1,8 @@
-# Two-channel release pipeline (see CONTRIBUTING.md for the branch model):
+# Two-channel release pipeline (see CONTRIBUTING.md for the branch model).
+#
+# This workflow performs ONLY `--release` builds + publish — the run-once
+# checks (fmt / clippy / test) live in build.yml on the develop branch, so
+# the release path does not re-compile the whole test target matrix.
 #
 #   - push to the `release` branch → PRE-RELEASE: GitHub Release marked
 #     prerelease (never "Latest") + npm dist-tag `next`. The tag name is
@@ -155,35 +159,9 @@ jobs:
           path: minecraft-mcp-rs-${{ matrix.label }}.*
           if-no-files-found: error
 
-  lint:
-    name: fmt → clippy → test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: release-lint-ubuntu
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Run clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Run tests
-        run: cargo test --locked --all-targets
-
   release:
     name: Create GitHub Release
-    needs: [build, lint, mode]
+    needs: [build, mode]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -305,7 +283,7 @@ jobs:
   #   version the checked-out tree holds — acceptable for re-runs.
   npm-publish:
     name: Publish to npm
-    needs: [build, lint, mode]
+    needs: [build, mode]
     runs-on: ubuntu-latest
     permissions:
       contents: read

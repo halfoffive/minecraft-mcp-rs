@@ -1,8 +1,13 @@
-# Builds the dev binary for Windows/macOS/Linux on both x86_64 and aarch64
-# using native ARM runners where available.
+# CI split (branch model — reduces compile time):
 #
-# Runs on the `develop` branch only (branch model: master is stable-only
-# and covered by the release pipeline; feature PRs target develop).
+# - develop PUSH: the full gate — lint (fmt → clippy → test) plus the
+#   multi-platform dev-profile matrix build. Runs once per merged change.
+# - PULL REQUEST to develop: lint ONLY (fast gate; the expensive matrix
+#   build is skipped).
+# - release / pre-release channels: release.yml performs ONLY `--release`
+#   builds + publish (the run-once checks already ran on develop).
+#
+# master is stable-only and covered by the release pipeline.
 name: Build (multi-platform, multi-arch)
 
 concurrency:
@@ -40,6 +45,9 @@ env:
 jobs:
   build:
     name: ${{ matrix.label }}
+    # The multi-platform matrix build runs once per change — on the develop
+    # push. PRs get the fast lint gate only.
+    if: github.event_name != 'pull_request'
     needs: lint
     runs-on: ${{ matrix.runner }}
     strategy:

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **CI split (compile-time budget):** the run-once checks (fmt → clippy →
+  test) live on `develop` — a PR targeting develop runs lint ONLY (the
+  multi-platform matrix build is skipped), and the develop push runs lint +
+  the full dev matrix once per merged change. `release.yml` now performs
+  ONLY `--release` builds + publish (the duplicate lint job was removed;
+  `release`/npm-publish depend on `[build, mode]`), so the release and
+  pre-release paths never re-compile the test target matrix.
 - **`build.yml` runs on `develop` only:** the push trigger moved from
   `master` to `develop`, and the `pull_request` trigger is now scoped to
   PRs targeting `develop` — master is stable-only and covered by the
