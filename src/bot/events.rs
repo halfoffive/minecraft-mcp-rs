@@ -401,6 +401,33 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     trace!("bot disconnected, set online=false");
 }
 
+/// The snapshot rebuild interval to use right now.
+///
+/// The configured interval applies while the bot processed a command within
+/// the last [`ACTIVITY_WINDOW_MS`] — an active agent wants fresh world
+/// state. Otherwise the bot is idle (no MCP tools being called), so the
+/// interval relaxes to at least [`IDLE_INTERVAL_MS`], cutting the snapshot
+/// cost of a parked bot by an order of magnitude. Force-refresh requests
+/// bypass the throttle gate entirely and are unaffected.
+fn effective_snapshot_interval_ms(state: &SharedState, configured: u64) -> u64 {
+    /// Commands within this window keep the fast configured interval.
+    const ACTIVITY_WINDOW_MS: u64 = 3_000;
+    /// Relaxed interval once the bot has been idle for a while.
+    const IDLE_INTERVAL_MS: u64 = 5_000;
+
+    let last = state.last_command_at_ms();
+    if last != 0 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if now.saturating_sub(last) <= ACTIVITY_WINDOW_MS {
+            return configured;
+        }
+    }
+    configured.max(IDLE_INTERVAL_MS)
+}
+
 async fn handle_tick(bot: Client, state: BotState) {
     // Wake any waiter in `RealBotClient::goto` when the pathfinder has
     // reached its target. `notify_waiters` is cheap when no one is waiting.
@@ -415,7 +442,7 @@ async fn handle_tick(bot: Client, state: BotState) {
         Arc::clone(&state.shared_state),
         Arc::clone(&state.dirty_tracker),
         Arc::clone(&state.last_snapshot_time),
-        state.snapshot_interval_ms,
+        effective_snapshot_interval_ms(&state.shared_state, state.snapshot_interval_ms),
     );
     let egui_ctx = state.egui_ctx.clone();
 

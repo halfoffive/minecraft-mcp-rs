@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Environment-variable configuration (config file removed):** settings are
+  now read exclusively from `MINECRAFT_MCP_*` environment variables
+  (12-factor style, like cargo); the `config.json` file, `--config <path>`
+  flag and the `dirs` dependency were removed. Malformed values warn and
+  keep the default. `MINECRAFT_MCP_TOKEN` is the only way to pin the MCP
+  bearer token. `update_settings` / the UI panel now apply to the running
+  process only.
+- **`fly_timeout_secs` (default 60):** long `fly_to` flights no longer
+  share the 30 s `command_timeout_secs`; the command envelope and the
+  executor's goto margin honour the fly timeout for `FlyTo`.
+- **Idle snapshot relaxation:** the snapshot rebuild interval relaxes to at
+  least 5000 ms while no bot command has been dispatched for 3 s, cutting
+  the snapshot cost of a parked bot by an order of magnitude (force-refresh
+  paths are unaffected).
+- **Coloured terminal output (cargo-style):** the `ansi` feature is now
+  enabled, so ERROR lines render red, WARN yellow, INFO green, DEBUG blue —
+  including when stderr is piped through `bunx`. The standard
+  `NO_COLOR` environment variable disables colours.
+
+### Changed
+
+- **`break_block` defaults to the compound mine flow:** `use_best_tool`
+  now defaults to `true`, so a bare `break_block` call approaches the
+  block, picks the right tool (clear error when missing, e.g. shovel for
+  grass), mines and verifies — the same behaviour as `act(Mine)`. The
+  result carries `action_result` / `reason` / `self_info` (position).
+  Set `use_best_tool=false` for the raw single-packet break.
+- **`use_item_on_block` no longer fakes success:** new optional `face`
+  argument (up/down/north/south/east/west, default up) selects the cell the
+  placement lands in. The executor pre-checks the target cell is empty,
+  auto-approaches when out of interaction range (4.5 blocks), and after the
+  click polls the snapshot until the effect cell turns non-air (server-side
+  confirmation). A rejected interaction returns an explicit
+  `success:false` result instead of "success with no world change".
+- **`get_nearby_blocks` response is now an object** (breaking wire
+  change): `{blocks, count, total_matched, truncated, top_only}`. New
+  `top_only` (highest block per column) and `max_blocks` (default 500)
+  parameters cap the payload — the historical ~340 KB response for a flat
+  radius-16 world collapses to a single surface layer.
+- **Movement results carry the bot's position:** `collect_items` and
+  `attack_entity` now include `position` in `data` so callers can detect
+  the drift caused by auto-approach / item-walking without a separate
+  `get_self_info` round-trip.
+- **Help mode never claims to start the MCP server:** the "Minecraft MCP
+  server starting" log line moved after mode resolution; a bare
+  `minecraft-mcp-rs` invocation prints help and exits without starting the
+  server.
+- **`get_settings` no longer reports `config_path`** (breaking wire
+  change) and `update_settings` no longer persists to disk.
+- **MCP `instructions` advertise the supported Minecraft version:** Java
+  Edition 1.21.11 (the only version supported by azalea 0.15.1).
+
+### Removed
+
+- **`--config <path>` CLI flag** (configuration is environment-variable
+  based now).
+- **Config-file persistence** (`config.json` read/write, `config_path`,
+  the `dirs` dependency).
+
 ### Changed
 
 - **CLI migrated to clap:** `src/cli.rs` now parses `--headless` /

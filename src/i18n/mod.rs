@@ -161,6 +161,7 @@ pub enum TextKey {
     ReconnectMaxDelay,
     /// "Command Timeout (s):" field label.
     CommandTimeout,
+    FlyTimeout,
 
     // ── Connect / Disconnect buttons ───────────────────────────────
     /// "Connect" button label.
@@ -357,6 +358,7 @@ pub fn key_name(key: TextKey) -> &'static str {
         TextKey::ReconnectInitialDelay => "ReconnectInitialDelay",
         TextKey::ReconnectMaxDelay => "ReconnectMaxDelay",
         TextKey::CommandTimeout => "CommandTimeout",
+        TextKey::FlyTimeout => "FlyTimeout",
         TextKey::Connect => "Connect",
         TextKey::Disconnect => "Disconnect",
         TextKey::Connected => "Connected",

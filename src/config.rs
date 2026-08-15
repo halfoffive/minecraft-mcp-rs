@@ -3,23 +3,21 @@
 //! Provides [`AppConfig`] for UI-facing settings and [`RunStats`] for
 //! thread-safe command tracking counters.
 //!
-//! # Persistence
+//! # Configuration source: environment variables
 //!
-//! Settings survive restarts via a JSON config file:
+//! Configuration is read **exclusively from environment variables**
+//! (12-factor style, cargo-style) — there is no config file anymore:
 //!
-//! - [`config_path`] resolves the default location —
-//!   `minecraft-mcp-rs/config.json` under the OS config directory
-//!   (e.g. `%APPDATA%` on Windows, `~/.config` on Linux,
-//!   `~/Library/Application Support` on macOS).
-//! - [`AppConfig::load_from_disk`] reads a config file (explicit path, or
-//!   [`config_path`] when `None`). A missing file yields
-//!   [`AppConfig::default()`]; malformed JSON logs a warning and falls back
-//!   to defaults; a partial file keeps its present fields and fills the rest
-//!   from the serde field defaults.
-//! - [`AppConfig::save_to_disk`] writes pretty-printed JSON atomically —
-//!   temp file in the same directory, then [`std::fs::rename`] — creating
-//!   parent directories as needed. On Unix the temp file is created with
-//!   mode `0600` because the file contains the MCP bearer token.
+//! - [`AppConfig::from_env`] starts from [`AppConfig::default()`] and
+//!   overrides each field from its `MINECRAFT_MCP_*` environment variable
+//!   when present (see the method docs for the full mapping).
+//! - Malformed variable values log a warning and keep the default — startup
+//!   never fails because of a typo in an environment variable.
+//! - `MINECRAFT_MCP_TOKEN` is the ONLY way to pin the MCP bearer token;
+//!   without it a fresh random UUID is generated per process start.
+//! - Settings changed at runtime (UI panel, `update_settings` MCP tool)
+//!   affect only the running process; restart with the environment variables
+//!   to persist them.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -99,6 +97,12 @@ pub struct AppConfig {
     /// Timeout for bot commands in seconds (default: 30).
     #[serde(default = "default_command_timeout_secs")]
     pub command_timeout_secs: u64,
+    /// Timeout for `fly_to` long-distance flights in seconds (default: 60).
+    ///
+    /// `command_timeout_secs` is too tight for long flights; this knob lets
+    /// fly_to breathe without loosening every other command's timeout.
+    #[serde(default = "default_fly_timeout_secs")]
+    pub fly_timeout_secs: u64,
     /// Authentication token presented by MCP clients over HTTP
     /// (default: a random UUID v4 generated per fresh [`AppConfig::default()`]
     /// / missing-field deserialization; override via the settings panel).
@@ -195,6 +199,11 @@ fn default_command_timeout_secs() -> u64 {
     30
 }
 
+/// Serde default for [`AppConfig::fly_timeout_secs`].
+fn default_fly_timeout_secs() -> u64 {
+    60
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -210,6 +219,7 @@ impl Default for AppConfig {
             reconnect_initial_delay_ms: default_reconnect_initial_delay_ms(),
             reconnect_max_delay_ms: default_reconnect_max_delay_ms(),
             command_timeout_secs: default_command_timeout_secs(),
+            fly_timeout_secs: default_fly_timeout_secs(),
             mcp_token: default_mcp_token(),
             mcp_auth_enabled: false,
             mcp_transport: McpTransport::default(),
@@ -266,152 +276,137 @@ impl AppConfig {
         if self.command_timeout_secs == 0 {
             return Err("command_timeout_secs must be greater than 0".into());
         }
+        if self.fly_timeout_secs == 0 {
+            return Err("fly_timeout_secs must be greater than 0".into());
+        }
         if self.mcp_auth_enabled && self.mcp_token.is_empty() {
             return Err("mcp_token must not be empty when auth is enabled".into());
         }
         Ok(())
     }
 
-    /// Load configuration from disk.
+    /// Load configuration from environment variables (12-factor, cargo-style).
     ///
-    /// Reads `path` when given, otherwise the default [`config_path`].
+    /// Starts from [`AppConfig::default()`] and overrides each field from
+    /// its `MINECRAFT_MCP_*` environment variable when present:
+    ///
+    /// | Field | Environment variable |
+    /// |-------|----------------------|
+    /// | `mc_address` | `MINECRAFT_MCP_MC_ADDRESS` |
+    /// | `mc_port` | `MINECRAFT_MCP_MC_PORT` |
+    /// | `ai_username` | `MINECRAFT_MCP_AI_USERNAME` |
+    /// | `mcp_address` | `MINECRAFT_MCP_MCP_ADDRESS` |
+    /// | `mcp_port` | `MINECRAFT_MCP_MCP_PORT` |
+    /// | `task_name` | `MINECRAFT_MCP_TASK_NAME` |
+    /// | `chunk_scan_radius` | `MINECRAFT_MCP_CHUNK_SCAN_RADIUS` |
+    /// | `block_perception_radius` | `MINECRAFT_MCP_BLOCK_PERCEPTION_RADIUS` |
+    /// | `snapshot_interval_ms` | `MINECRAFT_MCP_SNAPSHOT_INTERVAL_MS` |
+    /// | `reconnect_initial_delay_ms` | `MINECRAFT_MCP_RECONNECT_INITIAL_DELAY_MS` |
+    /// | `reconnect_max_delay_ms` | `MINECRAFT_MCP_RECONNECT_MAX_DELAY_MS` |
+    /// | `command_timeout_secs` | `MINECRAFT_MCP_COMMAND_TIMEOUT_SECS` |
+    /// | `fly_timeout_secs` | `MINECRAFT_MCP_FLY_TIMEOUT_SECS` |
+    /// | `mcp_token` | `MINECRAFT_MCP_TOKEN` |
+    /// | `mcp_auth_enabled` | `MINECRAFT_MCP_AUTH_ENABLED` (`true`/`false`) |
+    /// | `mcp_transport` | `MINECRAFT_MCP_TRANSPORT` (`stdio`/`http`) |
+    /// | `language` | `MINECRAFT_MCP_LANGUAGE` (`en`/`zh_cn`) |
+    ///
     /// Fallbacks (never panics):
+    /// - variable unset → default value
+    /// - variable unparsable → `tracing::warn!` + default value
     ///
-    /// - no path available (no OS config directory) → [`AppConfig::default()`]
-    /// - file does not exist → [`AppConfig::default()`] (normal first run)
-    /// - file is not valid JSON → `tracing::warn!` + [`AppConfig::default()`]
-    /// - file is partial JSON → present fields win, missing fields are filled
-    ///   by their serde defaults
-    ///
-    /// This function deliberately does NOT call [`AppConfig::validate`] —
-    /// loading a stale or hand-edited file must not prevent the app from
-    /// starting; validation happens where settings are applied.
-    pub fn load_from_disk(path: Option<&std::path::Path>) -> AppConfig {
-        let default_path = path.is_none().then(config_path).flatten();
-        let path = match path.or(default_path.as_deref()) {
-            Some(p) => p,
-            None => {
-                tracing::debug!("no OS config directory available; using in-memory defaults");
-                return AppConfig::default();
-            }
-        };
-
-        match std::fs::read_to_string(path) {
-            Ok(contents) => match serde_json::from_str::<AppConfig>(&contents) {
-                Ok(config) => {
-                    tracing::debug!(path = %path.display(), "loaded config from disk");
-                    config
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %err,
-                        "config file contains malformed JSON; falling back to defaults"
-                    );
-                    AppConfig::default()
-                }
-            },
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                // First run — no config file yet. Normal, not a warning.
-                tracing::debug!(path = %path.display(), "no config file found; using defaults");
-                AppConfig::default()
-            }
-            Err(err) => {
+    /// Like the old file loader this deliberately does NOT call
+    /// [`AppConfig::validate`] — a stale environment must not prevent the
+    /// app from starting; validation happens where settings are applied.
+    pub fn from_env() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.mc_address = env_var_or("MINECRAFT_MCP_MC_ADDRESS", config.mc_address);
+        config.mc_port = env_parse_or("MINECRAFT_MCP_MC_PORT", config.mc_port);
+        config.ai_username = env_var_or("MINECRAFT_MCP_AI_USERNAME", config.ai_username);
+        config.mcp_address = env_var_or("MINECRAFT_MCP_MCP_ADDRESS", config.mcp_address);
+        config.mcp_port = env_parse_or("MINECRAFT_MCP_MCP_PORT", config.mcp_port);
+        config.task_name = env_var_or("MINECRAFT_MCP_TASK_NAME", config.task_name);
+        config.chunk_scan_radius =
+            env_parse_or("MINECRAFT_MCP_CHUNK_SCAN_RADIUS", config.chunk_scan_radius);
+        config.block_perception_radius = env_parse_or(
+            "MINECRAFT_MCP_BLOCK_PERCEPTION_RADIUS",
+            config.block_perception_radius,
+        );
+        config.snapshot_interval_ms = env_parse_or(
+            "MINECRAFT_MCP_SNAPSHOT_INTERVAL_MS",
+            config.snapshot_interval_ms,
+        );
+        config.reconnect_initial_delay_ms = env_parse_or(
+            "MINECRAFT_MCP_RECONNECT_INITIAL_DELAY_MS",
+            config.reconnect_initial_delay_ms,
+        );
+        config.reconnect_max_delay_ms = env_parse_or(
+            "MINECRAFT_MCP_RECONNECT_MAX_DELAY_MS",
+            config.reconnect_max_delay_ms,
+        );
+        config.command_timeout_secs = env_parse_or(
+            "MINECRAFT_MCP_COMMAND_TIMEOUT_SECS",
+            config.command_timeout_secs,
+        );
+        config.fly_timeout_secs =
+            env_parse_or("MINECRAFT_MCP_FLY_TIMEOUT_SECS", config.fly_timeout_secs);
+        config.mcp_token = env_var_or("MINECRAFT_MCP_TOKEN", config.mcp_token);
+        config.mcp_auth_enabled =
+            env_parse_or("MINECRAFT_MCP_AUTH_ENABLED", config.mcp_auth_enabled);
+        if let Ok(v) = std::env::var("MINECRAFT_MCP_TRANSPORT") {
+            if v.eq_ignore_ascii_case("stdio") {
+                config.mcp_transport = McpTransport::Stdio;
+            } else if v.eq_ignore_ascii_case("http") {
+                config.mcp_transport = McpTransport::Http;
+            } else {
                 tracing::warn!(
-                    path = %path.display(),
-                    error = %err,
-                    "failed to read config file; falling back to defaults"
+                    name = "MINECRAFT_MCP_TRANSPORT",
+                    value = %v,
+                    "invalid transport, using default"
                 );
-                AppConfig::default()
             }
         }
-    }
-
-    /// Persist this configuration to disk as pretty-printed JSON.
-    ///
-    /// Writes to `path` when given, otherwise the default [`config_path`].
-    /// The write is atomic: the JSON goes to a temp file in the SAME
-    /// directory first, then [`std::fs::rename`] swaps it into place
-    /// (rename is atomic within one filesystem). Parent directories are
-    /// created as needed. On Unix the temp file is created with mode
-    /// `0600` because the file contains the MCP bearer token.
-    ///
-    /// Returns `Err(message)` on any IO failure (the temp file is removed
-    /// on a best-effort basis in that case).
-    pub fn save_to_disk(&self, path: Option<&std::path::Path>) -> Result<(), String> {
-        let default_path = path.is_none().then(config_path).flatten();
-        let path = path
-            .or(default_path.as_deref())
-            .ok_or_else(|| "no config path available: OS config directory not found".to_string())?;
-
-        // Create parent directories. `parent()` is `Some("")` for a bare
-        // relative file name — skip the empty path.
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                format!(
-                    "failed to create config directory {}: {err}",
-                    parent.display()
-                )
-            })?;
+        if let Ok(v) = std::env::var("MINECRAFT_MCP_LANGUAGE") {
+            if v.eq_ignore_ascii_case("en") {
+                config.language = Language::En;
+            } else if v.eq_ignore_ascii_case("zh_cn") {
+                config.language = Language::ZhCn;
+            } else {
+                tracing::warn!(
+                    name = "MINECRAFT_MCP_LANGUAGE",
+                    value = %v,
+                    "invalid language, using default"
+                );
+            }
         }
-
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|err| format!("failed to serialize config to JSON: {err}"))?;
-
-        // Temp file in the same directory so the final rename stays atomic.
-        let file_name = path
-            .file_name()
-            .ok_or_else(|| format!("invalid config path (no file name): {}", path.display()))?;
-        let mut tmp_file_name = file_name.to_os_string();
-        tmp_file_name.push(format!(".tmp-{}", std::process::id()));
-        let tmp_path = path.with_file_name(tmp_file_name);
-
-        // Write the temp file; 0600 on Unix since it holds the bearer token.
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).write(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let write_result = options.open(&tmp_path).and_then(|mut file| {
-            std::io::Write::write_all(&mut file, json.as_bytes())?;
-            file.sync_all()
-        });
-        if let Err(err) = write_result {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(format!(
-                "failed to write temp config file {}: {err}",
-                tmp_path.display()
-            ));
-        }
-
-        std::fs::rename(&tmp_path, path).map_err(|err| {
-            let _ = std::fs::remove_file(&tmp_path);
-            format!(
-                "failed to move temp config file into place {}: {err}",
-                path.display()
-            )
-        })?;
-
-        tracing::debug!(path = %path.display(), "saved config to disk");
-        Ok(())
+        config
     }
 }
 
 // ---------------------------------------------------------------------------
-// config_path — default config file location in the OS config dir
+// Environment-variable helpers
 // ---------------------------------------------------------------------------
 
-/// Default config file location: `minecraft-mcp-rs/config.json` under the
-/// OS config directory (e.g. `%APPDATA%` on Windows, `~/.config` on Linux,
-/// `~/Library/Application Support` on macOS).
-///
-/// Returns `None` when the platform does not expose a config directory.
-pub fn config_path() -> Option<std::path::PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("minecraft-mcp-rs").join("config.json"))
+/// Read a `String`-typed env var, falling back to `fallback` when unset.
+fn env_var_or(name: &str, fallback: String) -> String {
+    std::env::var(name).unwrap_or(fallback)
+}
+
+/// Parse a numeric/bool env var, warning + falling back on parse failure.
+fn env_parse_or<T: std::str::FromStr>(name: &str, fallback: T) -> T {
+    match std::env::var(name) {
+        Ok(v) => match v.parse::<T>() {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                tracing::warn!(
+                    name,
+                    value = %v,
+                    "invalid value for environment variable; using default"
+                );
+                fallback
+            }
+        },
+        Err(_) => fallback,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -476,6 +471,7 @@ mod tests {
         assert_eq!(config.reconnect_initial_delay_ms, 5000);
         assert_eq!(config.reconnect_max_delay_ms, 60_000);
         assert_eq!(config.command_timeout_secs, 30);
+        assert_eq!(config.fly_timeout_secs, 60);
     }
 
     // -- McpTransport / mcp_token defaults ----------------------------------
@@ -809,35 +805,47 @@ mod tests {
         assert!(stats.connected_since.is_some());
     }
 
-    // -- Persistence: helpers ------------------------------------------------
+    // -- Environment loading ------------------------------------------------
 
-    /// RAII guard that removes the test directory on drop, so temp files
-    /// are cleaned up even when a test panics mid-assertion.
-    struct TempTestDir(std::path::PathBuf);
+    /// Serialises tests that mutate process environment variables: cargo runs
+    /// tests in parallel threads, and `std::env::set_var` races between them.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    impl Drop for TempTestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+    /// RAII guard: saves the previous value of every touched variable and
+    /// restores it on drop, so env tests never leak state into each other.
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let saved = vec![(name, std::env::var(name).ok())];
+            // `std::env::set_var` is `unsafe` since the Rust 2024 edition.
+            unsafe { std::env::set_var(name, value) };
+            EnvGuard { saved }
+        }
+
+        fn remove(name: &'static str) -> Self {
+            let saved = vec![(name, std::env::var(name).ok())];
+            unsafe { std::env::remove_var(name) };
+            EnvGuard { saved }
         }
     }
 
-    /// Create a unique temp directory for one test.
-    ///
-    /// Uniqueness comes from the process id plus a per-test `label`, so
-    /// parallel tests (same process, different threads) never share a
-    /// directory and never touch the real user config dir.
-    fn test_dir(label: &str) -> TempTestDir {
-        let dir = std::env::temp_dir().join(format!(
-            "minecraft-mcp-rs-test-{}-{label}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("failed to create test dir");
-        TempTestDir(dir)
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, prev) in &self.saved {
+                match prev {
+                    Some(v) => unsafe { std::env::set_var(name, v) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+        }
     }
 
-    /// A config with deterministic, `validate()`-passing values in every
-    /// field, used for roundtrip equality checks.
-    fn sample_config() -> AppConfig {
+    /// A config with deterministic, `validate()`-passing values, used to
+    /// assert that `from_env` maps every variable to its field.
+    fn env_sample() -> AppConfig {
         let mut config = AppConfig::default();
         config.mc_address = "10.0.0.5".into();
         config.mc_port = 25566;
@@ -851,168 +859,162 @@ mod tests {
         config.reconnect_initial_delay_ms = 1000;
         config.reconnect_max_delay_ms = 30_000;
         config.command_timeout_secs = 10;
-        config.mcp_token = "roundtrip-token-123".into();
+        config.fly_timeout_secs = 90;
+        config.mcp_token = "env-token-123".into();
         config.mcp_auth_enabled = true;
         config.mcp_transport = McpTransport::Stdio;
         config.language = Language::ZhCn;
         config
     }
 
-    // -- Persistence: config_path ---------------------------------------------
-
-    #[test]
-    fn test_config_path_ends_with_expected_suffix_or_none() {
-        // Either the OS exposes a config dir (path must end with
-        // `minecraft-mcp-rs/config.json`) or it does not (None). Both are
-        // acceptable; a Some with a wrong suffix is a bug.
-        if let Some(path) = config_path() {
-            let suffix = std::path::Path::new("minecraft-mcp-rs").join("config.json");
-            assert!(
-                path.ends_with(suffix),
-                "config path must end with minecraft-mcp-rs/config.json, got: {}",
-                path.display()
-            );
-        }
+    /// Set every `MINECRAFT_MCP_*` variable to the [`env_sample`] values.
+    fn set_all_env_vars() -> Vec<EnvGuard> {
+        vec![
+            EnvGuard::set("MINECRAFT_MCP_MC_ADDRESS", "10.0.0.5"),
+            EnvGuard::set("MINECRAFT_MCP_MC_PORT", "25566"),
+            EnvGuard::set("MINECRAFT_MCP_AI_USERNAME", "TestBot"),
+            EnvGuard::set("MINECRAFT_MCP_MCP_ADDRESS", "127.0.0.1"),
+            EnvGuard::set("MINECRAFT_MCP_MCP_PORT", "3001"),
+            EnvGuard::set("MINECRAFT_MCP_TASK_NAME", "testing"),
+            EnvGuard::set("MINECRAFT_MCP_CHUNK_SCAN_RADIUS", "4"),
+            EnvGuard::set("MINECRAFT_MCP_BLOCK_PERCEPTION_RADIUS", "16"),
+            EnvGuard::set("MINECRAFT_MCP_SNAPSHOT_INTERVAL_MS", "250"),
+            EnvGuard::set("MINECRAFT_MCP_RECONNECT_INITIAL_DELAY_MS", "1000"),
+            EnvGuard::set("MINECRAFT_MCP_RECONNECT_MAX_DELAY_MS", "30000"),
+            EnvGuard::set("MINECRAFT_MCP_COMMAND_TIMEOUT_SECS", "10"),
+            EnvGuard::set("MINECRAFT_MCP_FLY_TIMEOUT_SECS", "90"),
+            EnvGuard::set("MINECRAFT_MCP_TOKEN", "env-token-123"),
+            EnvGuard::set("MINECRAFT_MCP_AUTH_ENABLED", "true"),
+            EnvGuard::set("MINECRAFT_MCP_TRANSPORT", "stdio"),
+            EnvGuard::set("MINECRAFT_MCP_LANGUAGE", "zh_cn"),
+        ]
     }
 
-    // -- Persistence: save_to_disk / load_from_disk roundtrip ------------------
-
-    #[test]
-    fn test_save_load_roundtrip_preserves_all_fields_including_token() {
-        let dir = test_dir("roundtrip");
-        // Nested path also proves save_to_disk creates missing parent dirs.
-        let path = dir.0.join("nested").join("deep").join("config.json");
-        let original = sample_config();
-
-        original
-            .save_to_disk(Some(&path))
-            .expect("save must succeed");
-        assert!(path.exists(), "config file must exist after save");
-
-        let loaded = AppConfig::load_from_disk(Some(&path));
-        assert_eq!(loaded.mc_address, original.mc_address);
-        assert_eq!(loaded.mc_port, original.mc_port);
-        assert_eq!(loaded.ai_username, original.ai_username);
-        assert_eq!(loaded.mcp_address, original.mcp_address);
-        assert_eq!(loaded.mcp_port, original.mcp_port);
-        assert_eq!(loaded.task_name, original.task_name);
-        assert_eq!(loaded.chunk_scan_radius, original.chunk_scan_radius);
-        assert_eq!(
-            loaded.block_perception_radius,
-            original.block_perception_radius
-        );
-        assert_eq!(loaded.snapshot_interval_ms, original.snapshot_interval_ms);
-        assert_eq!(
-            loaded.reconnect_initial_delay_ms,
-            original.reconnect_initial_delay_ms
-        );
-        assert_eq!(
-            loaded.reconnect_max_delay_ms,
-            original.reconnect_max_delay_ms
-        );
-        assert_eq!(loaded.command_timeout_secs, original.command_timeout_secs);
-        // The token MUST roundtrip — persistence is the whole point of
-        // removing `skip_serializing`.
-        assert_eq!(loaded.mcp_token, original.mcp_token);
-        assert_eq!(loaded.mcp_auth_enabled, original.mcp_auth_enabled);
-        assert_eq!(loaded.mcp_transport, original.mcp_transport);
-        assert_eq!(loaded.language, original.language);
+    /// Remove every `MINECRAFT_MCP_*` variable.
+    fn clear_all_env_vars() -> Vec<EnvGuard> {
+        [
+            "MINECRAFT_MCP_MC_ADDRESS",
+            "MINECRAFT_MCP_MC_PORT",
+            "MINECRAFT_MCP_AI_USERNAME",
+            "MINECRAFT_MCP_MCP_ADDRESS",
+            "MINECRAFT_MCP_MCP_PORT",
+            "MINECRAFT_MCP_TASK_NAME",
+            "MINECRAFT_MCP_CHUNK_SCAN_RADIUS",
+            "MINECRAFT_MCP_BLOCK_PERCEPTION_RADIUS",
+            "MINECRAFT_MCP_SNAPSHOT_INTERVAL_MS",
+            "MINECRAFT_MCP_RECONNECT_INITIAL_DELAY_MS",
+            "MINECRAFT_MCP_RECONNECT_MAX_DELAY_MS",
+            "MINECRAFT_MCP_COMMAND_TIMEOUT_SECS",
+            "MINECRAFT_MCP_FLY_TIMEOUT_SECS",
+            "MINECRAFT_MCP_TOKEN",
+            "MINECRAFT_MCP_AUTH_ENABLED",
+            "MINECRAFT_MCP_TRANSPORT",
+            "MINECRAFT_MCP_LANGUAGE",
+        ]
+        .into_iter()
+        .map(EnvGuard::remove)
+        .collect()
     }
 
-    // -- Persistence: load_from_disk fallbacks ---------------------------------
-
     #[test]
-    fn test_load_missing_file_returns_defaults() {
-        let dir = test_dir("missing");
-        let path = dir.0.join("does-not-exist.json");
-        let loaded = AppConfig::load_from_disk(Some(&path));
+    fn test_from_env_without_vars_returns_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = clear_all_env_vars();
+        let config = AppConfig::from_env();
         let defaults = AppConfig::default();
-
-        assert_eq!(loaded.mc_address, defaults.mc_address);
-        assert_eq!(loaded.mc_port, defaults.mc_port);
-        assert_eq!(loaded.ai_username, defaults.ai_username);
-        assert_eq!(loaded.mcp_address, defaults.mcp_address);
-        assert_eq!(loaded.mcp_port, defaults.mcp_port);
-        assert_eq!(loaded.task_name, defaults.task_name);
-        assert_eq!(loaded.chunk_scan_radius, defaults.chunk_scan_radius);
+        assert_eq!(config.mc_address, defaults.mc_address);
+        assert_eq!(config.mc_port, defaults.mc_port);
+        assert_eq!(config.ai_username, defaults.ai_username);
+        assert_eq!(config.mcp_address, defaults.mcp_address);
+        assert_eq!(config.mcp_port, defaults.mcp_port);
+        assert_eq!(config.task_name, defaults.task_name);
+        assert_eq!(config.chunk_scan_radius, defaults.chunk_scan_radius);
         assert_eq!(
-            loaded.block_perception_radius,
+            config.block_perception_radius,
             defaults.block_perception_radius
         );
-        assert_eq!(loaded.snapshot_interval_ms, defaults.snapshot_interval_ms);
+        assert_eq!(config.snapshot_interval_ms, defaults.snapshot_interval_ms);
         assert_eq!(
-            loaded.reconnect_initial_delay_ms,
+            config.reconnect_initial_delay_ms,
             defaults.reconnect_initial_delay_ms
         );
         assert_eq!(
-            loaded.reconnect_max_delay_ms,
+            config.reconnect_max_delay_ms,
             defaults.reconnect_max_delay_ms
         );
-        assert_eq!(loaded.command_timeout_secs, defaults.command_timeout_secs);
-        // Token is random per default; only assert presence.
-        assert!(!loaded.mcp_token.is_empty());
-        assert_eq!(loaded.mcp_transport, defaults.mcp_transport);
+        assert_eq!(config.command_timeout_secs, defaults.command_timeout_secs);
+        assert_eq!(config.fly_timeout_secs, defaults.fly_timeout_secs);
+        assert!(!config.mcp_token.is_empty());
+        assert_eq!(config.mcp_transport, defaults.mcp_transport);
+        assert_eq!(config.language, defaults.language);
     }
 
     #[test]
-    fn test_load_partial_json_merges_defaults() {
-        // A file containing only `mc_address` must keep that value and fill
-        // every other field from serde defaults.
-        let dir = test_dir("partial");
-        let path = dir.0.join("config.json");
-        std::fs::write(&path, r#"{ "mc_address": "10.0.0.99" }"#)
-            .expect("failed to write partial config");
-
-        let loaded = AppConfig::load_from_disk(Some(&path));
-        assert_eq!(loaded.mc_address, "10.0.0.99");
-        assert_eq!(loaded.mc_port, 25565);
-        assert_eq!(loaded.ai_username, "AI_Bot");
-        assert_eq!(loaded.mcp_address, "127.0.0.1");
-        assert_eq!(loaded.mcp_port, 3000);
-        assert_eq!(loaded.task_name, "mining");
-        assert_eq!(loaded.chunk_scan_radius, 8);
-        assert_eq!(loaded.block_perception_radius, 32);
-        assert_eq!(loaded.snapshot_interval_ms, 500);
-        assert_eq!(loaded.reconnect_initial_delay_ms, 5000);
-        assert_eq!(loaded.reconnect_max_delay_ms, 60_000);
-        assert_eq!(loaded.command_timeout_secs, 30);
-        // `default_mcp_token` fills a missing token with a fresh UUID.
-        assert!(!loaded.mcp_token.is_empty());
-        assert_eq!(loaded.mcp_transport, McpTransport::Http);
-        // serde `#[serde(default)]` uses `Language::default()` (= En),
-        // independent of the host locale.
-        assert_eq!(loaded.language, Language::En);
-    }
-
-    #[test]
-    fn test_load_malformed_json_returns_defaults_without_panic() {
-        let dir = test_dir("malformed");
-        let path = dir.0.join("config.json");
-        std::fs::write(&path, "{ not json").expect("failed to write malformed config");
-
-        let loaded = AppConfig::load_from_disk(Some(&path));
-        assert_eq!(loaded.mc_address, "127.0.0.1");
-        assert_eq!(loaded.mc_port, 25565);
-        assert_eq!(loaded.ai_username, "AI_Bot");
-        assert!(!loaded.mcp_token.is_empty());
-        assert_eq!(loaded.mcp_transport, McpTransport::Http);
-    }
-
-    // -- Persistence: save_to_disk error path ----------------------------------
-
-    #[test]
-    fn test_save_to_impossible_dir_returns_err() {
-        let dir = test_dir("impossible");
-        // Create a regular FILE where a parent directory would need to be —
-        // `create_dir_all` cannot succeed through a file on any platform.
-        let blocker = dir.0.join("blocker");
-        std::fs::write(&blocker, "not a directory").expect("failed to write blocker file");
-        let target = blocker.join("config.json");
-
-        let result = sample_config().save_to_disk(Some(&target));
-        assert!(
-            result.is_err(),
-            "saving into a file-as-parent-directory must fail, got Ok"
+    fn test_from_env_overrides_every_field() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = set_all_env_vars();
+        let config = AppConfig::from_env();
+        let expected = env_sample();
+        assert_eq!(config.mc_address, expected.mc_address);
+        assert_eq!(config.mc_port, expected.mc_port);
+        assert_eq!(config.ai_username, expected.ai_username);
+        assert_eq!(config.mcp_address, expected.mcp_address);
+        assert_eq!(config.mcp_port, expected.mcp_port);
+        assert_eq!(config.task_name, expected.task_name);
+        assert_eq!(config.chunk_scan_radius, expected.chunk_scan_radius);
+        assert_eq!(
+            config.block_perception_radius,
+            expected.block_perception_radius
         );
+        assert_eq!(config.snapshot_interval_ms, expected.snapshot_interval_ms);
+        assert_eq!(
+            config.reconnect_initial_delay_ms,
+            expected.reconnect_initial_delay_ms
+        );
+        assert_eq!(
+            config.reconnect_max_delay_ms,
+            expected.reconnect_max_delay_ms
+        );
+        assert_eq!(config.command_timeout_secs, expected.command_timeout_secs);
+        assert_eq!(config.fly_timeout_secs, expected.fly_timeout_secs);
+        assert_eq!(config.mcp_token, expected.mcp_token);
+        assert_eq!(config.mcp_auth_enabled, expected.mcp_auth_enabled);
+        assert_eq!(config.mcp_transport, expected.mcp_transport);
+        assert_eq!(config.language, expected.language);
+    }
+
+    #[test]
+    fn test_from_env_invalid_values_fall_back_without_panic() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = [
+            EnvGuard::set("MINECRAFT_MCP_MC_PORT", "not-a-port"),
+            EnvGuard::set("MINECRAFT_MCP_CHUNK_SCAN_RADIUS", "99999"),
+            EnvGuard::set("MINECRAFT_MCP_AUTH_ENABLED", "maybe"),
+            EnvGuard::set("MINECRAFT_MCP_TRANSPORT", "carrier-pigeon"),
+            EnvGuard::set("MINECRAFT_MCP_LANGUAGE", "klingon"),
+        ];
+        let config = AppConfig::from_env();
+        let defaults = AppConfig::default();
+        assert_eq!(config.mc_port, defaults.mc_port);
+        assert_eq!(config.chunk_scan_radius, defaults.chunk_scan_radius);
+        assert_eq!(config.mcp_auth_enabled, defaults.mcp_auth_enabled);
+        assert_eq!(config.mcp_transport, defaults.mcp_transport);
+        assert_eq!(config.language, defaults.language);
+    }
+
+    #[test]
+    fn test_from_env_transport_case_insensitive() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = [EnvGuard::set("MINECRAFT_MCP_TRANSPORT", "STDIO")];
+        let config = AppConfig::from_env();
+        assert_eq!(config.mcp_transport, McpTransport::Stdio);
+    }
+
+    #[test]
+    fn test_validate_fly_timeout_zero() {
+        let mut config = AppConfig::default();
+        config.fly_timeout_secs = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.contains("fly_timeout_secs"), "got: {err}");
     }
 }

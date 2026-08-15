@@ -133,14 +133,20 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Get blocks near the bot's position. Optional filter_type does a case-insensitive substring match on block_type.",
+        description = "Get blocks near the bot's position. Optional filter_type does a case-insensitive substring match on block_type. Pass top_only=true to get just the highest block of each column (drastically smaller responses — recommended), and max_blocks caps the result (default 500, truncated flag reports when the cap is hit).",
         annotations(read_only_hint = true)
     )]
     async fn get_nearby_blocks(
         &self,
         Parameters(input): Parameters<NearbyBlocksInput>,
     ) -> Result<String, BotError> {
-        crate::mcp::tools_query::get_nearby_blocks(&self.state, input.radius, input.filter_type)
+        crate::mcp::tools_query::get_nearby_blocks(
+            &self.state,
+            input.radius,
+            input.filter_type,
+            input.top_only,
+            input.max_blocks,
+        )
     }
 
     #[tool(
@@ -286,7 +292,7 @@ impl McpBotServer {
     // ── Block tools (destructive) ────────────────────────────
 
     #[tool(
-        description = "Break a block at the given position",
+        description = "Break a block at the given position. By default runs the full compound mine flow: approaches the block, picks the best tool (errors with a clear reason when the right tool is missing, e.g. a shovel for grass), mines, and verifies the break. Returns the action result plus the bot's final position. Set use_best_tool=false for the raw single-packet break.",
         annotations(destructive_hint = true)
     )]
     async fn break_block(
@@ -308,7 +314,7 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Use the held item on a block. Always pass item_slot (0-8) so the correct item is held — e.g. the hotbar slot holding water_bucket when pouring water.",
+        description = "Use the held item on a block. Always pass item_slot (0-8) so the correct item is held — e.g. the hotbar slot holding water_bucket when pouring water. The optional face (up/down/north/south/east/west, default up) picks the cell the placement lands in: face up pours water into the cell ABOVE the target block. Placement items (buckets, blocks) are verified against the world after the click — a rejected interaction returns an explicit failure instead of a fake success.",
         annotations(destructive_hint = true)
     )]
     async fn use_item_on_block(
@@ -525,7 +531,9 @@ impl ServerHandler for McpBotServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
             "Minecraft bot control via MCP. Use query tools to inspect world state, \
-             action tools to control the bot. All destructive operations are annotated."
+             action tools to control the bot. All destructive operations are annotated. \
+             Supported Minecraft version: Java Edition 1.21.11 (the only version \
+             supported by the azalea 0.15.1 bot library)."
                 .into(),
         );
         info
@@ -981,6 +989,8 @@ mod tests {
                 .get_nearby_blocks(Parameters(NearbyBlocksInput {
                     radius: 10,
                     filter_type: None,
+                    top_only: false,
+                    max_blocks: 500,
                 }))
                 .await,
             Err(BotError::Offline(_))
@@ -1077,6 +1087,7 @@ mod tests {
                 y: 64,
                 z: 0,
                 item_slot: None,
+                face: None,
             }))
             .await;
         assert!(matches!(result, Err(BotError::Offline(_))));
@@ -1136,6 +1147,7 @@ mod tests {
                 y: 64,
                 z: 0,
                 item_slot: Some(10),
+                face: None,
             }))
             .await;
         assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
