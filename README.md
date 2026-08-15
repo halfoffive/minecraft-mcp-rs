@@ -158,6 +158,17 @@ npm run docs:build    # production build into docs/.vitepress/dist
 
 本地运行方式与上述命令相同；安装依赖后，`npm run docs:dev` 启动开发服务器，`npm run docs:build` 生成生产构建。
 
+## Contributing / 参与贡献
+
+See `CONTRIBUTING.md` for the branch model and release pipeline: `develop`
+(integration) → `release` (auto pre-release, npm `next`) → `master`
+(stable tag `vX.Y.Z`, npm `latest`). All changes go through PRs with user
+review — never commit to `master` or `release` directly.
+
+详见 `CONTRIBUTING.md`：分支模型为 `develop`（集成）→ `release`（自动预发布，npm
+`next`）→ `master`（稳定 tag `vX.Y.Z`，npm `latest`）。所有改动走 PR 并经用户审阅，
+禁止直接提交 `master` / `release`。
+
 ## Language / 语言切换
 
 The desktop UI supports **English** and **简体中文**. Pick a language from the

@@ -23,14 +23,15 @@ Requires Rust nightly (edition 2024; `rust-toolchain.toml` pins nightly — azal
 
 ## Development workflow
 
-**默认流程：任何修改都在新分支上进行，提交 Pull Request，经用户审阅通过并合并后才能推送 `master` 与打 `v*` tag。**
+**默认流程：任何修改都在新分支上进行，提交 Pull Request，经用户审阅通过后合并。分支模型（详见 `CONTRIBUTING.md`）：`develop`（集成）→ `release`（预发布通道，push 即自动预发布）→ `master`（稳定版，tag 即稳定发布）。**
 
-1. **建分支** — 从最新的 `master` 创建功能/修复/发布分支，命名建议：`fix/<slug>`、`feat/<slug>`、`docs/<slug>`、`release/<X.Y.Z>`。禁止直接向 `master` 提交。
+1. **建分支** — 功能/修复/文档分支从 `develop`（或已同步的 `master`）创建，命名建议：`feat/<slug>`、`fix/<slug>`、`docs/<slug>`。禁止直接向 `master` / `release` 提交；**禁止使用 `release/<X.Y.Z>` 分支名**（git refs 命名空间与 `release` 分支冲突，按版本准备分支改用 `hotfix/<X.Y.Z>` 等前缀）。
 2. **开发** — 遵循下方「Conventions」与「规范」：`cargo fmt` → `cargo test`（全过）→ `cargo clippy --all-targets`（零警告）→ 更新 `README.md` / `CHANGELOG.md` / `AGENTS.md`。
 3. **提交** — 按 S-16 的原子提交拆分（CI → AGENTS.md → Cargo+npm → markdown 引脚/表 → CHANGELOG），每条提交只做一件事。
-4. **PR** — `git push -u origin <branch>` 后用 `gh pr create` 提交 PR，PR 描述写明改动内容、验证结果（`cargo test` / `clippy` 输出）、影响面（含 wire 破坏性变更）。**必须等待用户审阅。**
-5. **合并** — 用户审阅（可能要求修改）通过后合入 `master`。
-6. **发布**（仅 release 分支）— 合并后从 `master` 打 `vX.Y.Z` tag 并推送（`release.yml` 仅监听 tag push），GitHub Release + npm publish 自动运行。
+4. **PR** — `git push -u origin <branch>` 后用 `gh pr create` 提交 PR（默认目标 `develop`），PR 描述写明改动内容、验证结果（`cargo test` / `clippy` 输出）、影响面（含 wire 破坏性变更）。**必须等待用户审阅。**
+5. **合并** — 用户审阅（可能要求修改）通过后合入 `develop`。
+6. **预发布**（`release` 分支）— `develop` → `release` 的 PR 合并后，在 `release` 上把版本改为 `X.Y.Z-rc.N`、跑 `node npm/scripts/sync-versions.mjs`、补 CHANGELOG `[X.Y.Z-rc.N]` 节并 push：`release.yml` 自动发布**预发布版**（GitHub prerelease + npm `next`）。
+7. **稳定发布**（`master`）— `release` → `master` 的发布 PR（版本定稿 `X.Y.Z`、更新 markdown 引脚/兼容表、CHANGELOG 定稿）合并后，在 `master` 打 `vX.Y.Z` tag：自动发布**稳定版**（GitHub Latest Release + npm `latest`）。随后 `master` 快进合并回 `develop`。
 
 例外：用户在本会话中**明确指示**直接提交/直接发布时，可跳过分支+PR（例如一键发布指令）；否则一律走分支+PR。
 
@@ -191,4 +192,5 @@ tests/
 - **`attack_entity` auto-approach (moving targets):** `handle_attack_entity` is async: when the target is farther than `MAX_ATTACK_REACH` (6.0), it `goto_with_margin`s to the entity's last known position (timeouts also fall through), then re-reads the snapshot and attacks only if the entity is within reach NOW — a moving target that got away yields an honest `TooFar` (caller should re-run get_nearby_entities → move_to → attack); a despawned target yields `InvalidParams` ("no longer in the world snapshot"). Reach math goes through the free helper `distance_between(BlockPos, BlockPos) -> f64`. Tests: `test_attack_entity_auto_approaches_when_too_far`, `test_attack_entity_too_far_reports_too_far_after_approach` in `bot/commands.rs::tests`.
 - **`use_item_on_block` reports the item actually used:** the result message is `"Used {item} on block at {pos} (slot {n})"` where the item comes from the snapshot inventory at `item_slot` (or `held_item_slot` when `None`); empty slot → "empty". This makes a wrong-slot interaction (the smoke test's water-bucket failure) visible. Test: `test_use_item_on_block_reports_item_used` in `bot/commands.rs::tests`.
 - **New MCP tools (smoke-report round):** `get_hotbar` (9 slots, empty = null, + `held_item_slot`), `get_bot_status` (cheap polling: connected/bot_busy/position/position_precise/yaw/vitals/snapshot age; offline → `connected:false` without error), and `give_item` (`/give` then `/item replace` for hotbar targets, falling back to `MoveItemToHotbar` swap-click on `CommandRejected`; gated on `commands_enabled == Some(false)` → `PermissionDenied`) — handlers in `tools_query.rs` / `tools_item.rs`, registered in `server.rs` (29 tools now). Tests per handler plus offline-via-server tests in `server.rs::tests`.
+- **Prerelease pipeline (release branch):** `.github/workflows/release.yml` has two channels — push to `release` → **pre-release** (GitHub Release `prerelease: true` + npm dist-tag `next`); tag `vX.Y.Z` on `master` → **stable** (GitHub "Latest Release" + npm `latest`). A `mode` job decides the channel: prerelease iff branch push / tag name contains `-` / tag `base_ref` is `release` / `workflow_dispatch` input `prerelease=true`; `npm_tag` = `next` : `latest`. On branch pushes the `release` job derives the tag from `Cargo.toml` (`v` + version) and skips when the release already exists (`gh release view` guard); `npm-publish` uses `--tag` from the mode output and keeps the skip-if-published loop — re-pushing `release` with an unchanged version is therefore idempotent. Branch-model docs live in `CONTRIBUTING.md`; `release/<X.Y.Z>` branch names are FORBIDDEN (refs namespace conflict — the old `release/1.2.0` branch was deleted when this model was adopted).
 - **Smoke-test skill:** `skills/minecraft-mcp-smoke-test/SKILL.md` codifies the regression chain (connect → query → move → mine/place/use → combat → container → command → chat). The **chat-report protocol** is part of the contract: after every functional category the agent sends `send_chat("[SMOKE] <category>: OK/FAIL ...")` and the final assertion reads `get_chat_history` — chat history doubles as the test log. Keep the skill in sync whenever a tool's contract or the test chain changes.
