@@ -299,6 +299,14 @@ pub struct WorldSnapshot {
     /// Not serialized — rebuilt on each snapshot update.
     #[serde(skip)]
     pub block_index: HashMap<BlockPos, usize>,
+    /// Monotonic snapshot revision set by [`SharedState`](crate::state::SharedState)
+    /// every time the snapshot is stored. Used as the `get_world_view` cache
+    /// key instead of the seconds-granularity `timestamp`, which can repeat
+    /// for two consecutive 500 ms snapshot builds within the same second.
+    /// Not serialized — it is an internal cache-invalidation token, not part
+    /// of the MCP JSON contract.
+    #[serde(skip)]
+    pub snapshot_seq: u64,
 }
 
 impl Default for WorldSnapshot {
@@ -322,6 +330,7 @@ impl Default for WorldSnapshot {
             chunk_summary: Vec::new(),
             commands_enabled: None,
             block_index: HashMap::new(),
+            snapshot_seq: 0,
         }
     }
 }

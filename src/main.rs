@@ -87,6 +87,18 @@ fn main() {
     if args.force_stdio {
         config.mcp_transport = McpTransport::Stdio;
     }
+    // Final safety net: env parsing already falls back per-field for
+    // malformed / semantically invalid values, so this should never fail.
+    // If it somehow does (e.g. a future field), fall back to defaults rather
+    // than starting with a configuration that would wedge the runtime
+    // (snapshot_interval_ms=0, command_timeout_secs=0, etc.).
+    if let Err(e) = config.validate() {
+        tracing::warn!(
+            error = %e,
+            "loaded configuration is invalid after env/CLI merge; falling back to defaults"
+        );
+        config = AppConfig::default();
+    }
     // Set the active i18n language from the persisted/default config BEFORE
     // constructing any UI strings (notably the window title passed to
     // `eframe::run_native` below).  This ensures the title and all UI text

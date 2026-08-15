@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn test_should_rebuild_first_render() {
         let cache = Some(crate::state::WorldViewCache {
-            snapshot_timestamp: 1,
+            snapshot_seq: 1,
             radius: 8,
             scale: 2,
             png_base64: "x".into(),
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn test_should_rebuild_unchanged_annotation_skips() {
         let cache = Some(crate::state::WorldViewCache {
-            snapshot_timestamp: 1,
+            snapshot_seq: 1,
             radius: 8,
             scale: 2,
             png_base64: "x".into(),
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn test_should_rebuild_changed_annotation_rebuilds() {
         let cache = Some(crate::state::WorldViewCache {
-            snapshot_timestamp: 1,
+            snapshot_seq: 1,
             radius: 8,
             scale: 2,
             png_base64: "x".into(),

@@ -184,6 +184,11 @@ pub fn get_nearby_blocks(
             "radius must be in range 1..=100, got {radius}"
         )));
     }
+    if !(1..=10000).contains(&max_blocks) {
+        return Err(BotError::InvalidParams(format!(
+            "max_blocks must be in range 1..=10000, got {max_blocks}"
+        )));
+    }
     if !state.is_online() {
         return Err(BotError::Offline("Bot is currently offline".to_string()));
     }
@@ -537,14 +542,18 @@ pub fn get_world_view(
 
     let snapshot = state.read_snapshot();
     let snapshot_ts = snapshot.timestamp;
+    let snapshot_seq = snapshot.snapshot_seq;
 
-    // Cache hit: same timestamp + radius + scale → return cached bytes.
+    // Cache hit: same snapshot revision + radius + scale → return cached
+    // bytes. `timestamp` alone is seconds-granularity and can repeat for two
+    // consecutive 500 ms snapshot builds; `snapshot_seq` is monotonic.
     if let Some(cache) = state.get_world_view_cache()
-        && cache.snapshot_timestamp == snapshot_ts
+        && cache.snapshot_seq == snapshot_seq
         && cache.radius == radius
         && cache.scale == scale
     {
         tracing::trace!(
+            snapshot_seq,
             snapshot_ts,
             radius,
             scale,
@@ -558,6 +567,7 @@ pub fn get_world_view(
 
     // Cache miss: re-render.
     tracing::debug!(
+        snapshot_seq,
         snapshot_ts,
         radius,
         scale,
@@ -592,7 +602,7 @@ pub fn get_world_view(
 
     // Store in cache for the next call.
     state.set_world_view_cache(crate::state::WorldViewCache {
-        snapshot_timestamp: snapshot_ts,
+        snapshot_seq,
         radius,
         scale,
         png_base64: encoded.clone(),
@@ -882,6 +892,21 @@ mod tests {
             v["total_matched"],
             json!(3),
             "all 3 blocks matched before the cap"
+        );
+    }
+
+    #[test]
+    fn test_get_nearby_blocks_invalid_max_blocks_rejected() {
+        let state = state_with_snapshot();
+        let result = get_nearby_blocks(&state, 5, None, false, 0);
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("max_blocks")),
+            "expected InvalidParams for max_blocks=0, got: {result:?}"
+        );
+        let result = get_nearby_blocks(&state, 5, None, false, 10001);
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("max_blocks")),
+            "expected InvalidParams for max_blocks=10001, got: {result:?}"
         );
     }
 
@@ -1251,6 +1276,38 @@ mod tests {
             first_ts, second_ts,
             "cache hit should return same timestamp"
         );
+    }
+
+    /// A new snapshot revision with the SAME seconds-granularity timestamp
+    /// must also invalidate the cache. This is the regression test for the
+    /// 500 ms-snapshot / 1 s-timestamp collision: two consecutive builds can
+    /// share a timestamp, but `snapshot_seq` is monotonic and must be the
+    /// cache key.
+    #[test]
+    fn test_get_world_view_cache_invalidates_on_snapshot_seq_change() {
+        let state = state_with_snapshot();
+        let first = get_world_view(&state, 4, 1).unwrap();
+        let first_ts = match &first[1].raw {
+            rmcp::model::RawContent::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t.text).unwrap();
+                v["snapshot_timestamp"].as_u64().unwrap()
+            }
+            _ => panic!("expected text"),
+        };
+        let first_seq = state.get_world_view_cache().unwrap().snapshot_seq;
+
+        // Update the snapshot but keep the SAME timestamp.
+        let mut snap = state.read_snapshot().as_ref().clone();
+        snap.timestamp = first_ts;
+        state.update_snapshot(snap);
+
+        let second = get_world_view(&state, 4, 1).unwrap();
+        let second_seq = state.get_world_view_cache().unwrap().snapshot_seq;
+        assert_ne!(
+            first_seq, second_seq,
+            "same-timestamp snapshot update must invalidate the cache"
+        );
+        assert_eq!(second.len(), 2);
     }
 
     /// A snapshot update (new timestamp) should invalidate the cache —

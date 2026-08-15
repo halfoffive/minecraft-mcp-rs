@@ -123,6 +123,11 @@ impl SnapshotUpdater {
 // Inner snapshot builder (free function — testable in isolation)
 // ═══════════════════════════════════════════════════════════════
 
+fn block_within_chunk_radius(pos: BlockPos, player_chunk: (i32, i32), radius: i32) -> bool {
+    let chunk = (pos.x >> 4, pos.z >> 4);
+    ((chunk.0 - player_chunk.0).abs()).max((chunk.1 - player_chunk.1).abs()) <= radius
+}
+
 async fn build_snapshot_inner(
     bot: &Client,
     shared_state: &SharedState,
@@ -191,6 +196,14 @@ async fn build_snapshot_inner(
     // chunks around the player are fully scanned on each snapshot tick.
     let player_chunk = (self_player.position.x >> 4, self_player.position.z >> 4);
     let chunk_scan_radius = shared_state.read_config().chunk_scan_radius as i32;
+    // Snapshot retention bound. `chunk_scan_radius` controls how far freshly
+    // loaded chunks are scanned, but the snapshot also serves `get_nearby_blocks`
+    // (max radius 100 blocks ≈ 7 chunks), so at least 8 chunks around the
+    // player are always retained. Old blocks outside this radius are pruned
+    // on every build — without this, every chunk the bot ever walked through
+    // stayed in `blocks` forever and the per-tick clone + block_index rebuild
+    // grew without bound.
+    let retention_chunks = chunk_scan_radius.max(8);
 
     // ── Read world for changed blocks ────────────────────────
     let mut new_blocks = Vec::new();
@@ -208,6 +221,12 @@ async fn build_snapshot_inner(
         // only chance to refresh their state in the snapshot.
         for pos in &dirty_blocks {
             let chunk = (pos.x >> 4, pos.z >> 4);
+            // Prune dirty block updates that fall outside the retention
+            // radius too — they would be dropped by the old-block filter
+            // below, so reading them here would be wasted work.
+            if !block_within_chunk_radius(*pos, player_chunk, retention_chunks) {
+                continue;
+            }
             if dirty_chunks.contains(&chunk) {
                 let dist = ((chunk.0 - player_chunk.0).abs()).max((chunk.1 - player_chunk.1).abs());
                 if dist <= chunk_scan_radius {
@@ -325,7 +344,18 @@ async fn build_snapshot_inner(
     // Only the old snapshot's blocks are carried into the builder — the
     // production path replaces every other field via `with_*` below, so the
     // old snapshot (incl. its `block_index` HashMap) is not deep-cloned.
-    let mut builder = SnapshotBuilder::new(old_snapshot.blocks.clone())
+    // Before carrying them over, prune blocks outside `retention_chunks` so
+    // the snapshot (and its O(1) block_index) stays bounded no matter how
+    // far the bot travels.
+    let retained_old_blocks: Vec<BlockEntry> = old_snapshot
+        .blocks
+        .iter()
+        .filter(|b| block_within_chunk_radius(b.position, player_chunk, retention_chunks))
+        .cloned()
+        .collect();
+    new_blocks.retain(|b| block_within_chunk_radius(b.position, player_chunk, retention_chunks));
+
+    let mut builder = SnapshotBuilder::new(retained_old_blocks)
         .with_dirty_tracker(&mut builder_tracker)
         .with_self_player(self_player);
 
@@ -604,6 +634,35 @@ mod tests {
             Arc::new(Mutex::new(Instant::now())),
             500,
         )
+    }
+
+    // ── Retention pruning ────────────────────────────────────
+
+    #[test]
+    fn test_block_within_chunk_radius_prunes_far_chunks() {
+        let player_chunk = (0, 0);
+        // Inside the retention radius.
+        assert!(block_within_chunk_radius(
+            BlockPos::new(0, 64, 0),
+            player_chunk,
+            8
+        ));
+        assert!(block_within_chunk_radius(
+            BlockPos::new(8 * 16, 64, 8 * 16),
+            player_chunk,
+            8
+        ));
+        // One chunk beyond the retention radius on either axis.
+        assert!(!block_within_chunk_radius(
+            BlockPos::new(9 * 16, 64, 0),
+            player_chunk,
+            8
+        ));
+        assert!(!block_within_chunk_radius(
+            BlockPos::new(0, 64, 9 * 16),
+            player_chunk,
+            8
+        ));
     }
 
     // ── Construction ────────────────────────────────────────

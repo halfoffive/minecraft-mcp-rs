@@ -99,7 +99,7 @@ pub enum McpServerStatus {
 ///
 /// Stored in [`SharedState::last_world_view`] behind a `Mutex`. The MCP
 /// `get_world_view` tool checks this before re-rendering: if
-/// `snapshot_timestamp`, `radius`, and `scale` all match the current
+/// `snapshot_seq`, `radius`, and `scale` all match the current
 /// request, the cached PNG bytes are returned without invoking
 /// [`render_topdown`](crate::mcp::render::render_topdown) again.
 ///
@@ -108,10 +108,11 @@ pub enum McpServerStatus {
 /// (520×520) the cache never exceeds a few hundred KB.
 #[derive(Debug, Clone)]
 pub struct WorldViewCache {
-    /// `WorldSnapshot::timestamp` of the snapshot the PNG was rendered from.
-    /// If the snapshot's timestamp changes (a new tick updated the world),
-    /// the cache is invalidated.
-    pub snapshot_timestamp: u64,
+    /// `WorldSnapshot::snapshot_seq` of the snapshot the PNG was rendered
+    /// from. The seconds-granularity `timestamp` is not unique enough for
+    /// cache invalidation (two 500 ms snapshot builds can share the same
+    /// second), so the monotonic sequence is the cache key.
+    pub snapshot_seq: u64,
     /// Half-extent of the cached render. Must match the request's `radius`.
     pub radius: u8,
     /// Pixel-per-block scale of the cached render (1/2/4/8). Must match the
@@ -266,6 +267,12 @@ pub struct SharedState {
     /// (0 = never). The snapshot updater reads this to relax its rebuild
     /// interval while the bot is idle.
     last_command_at: AtomicU64,
+    /// Monotonic snapshot revision counter. Incremented every time a new
+    /// snapshot is stored via [`update_snapshot`](Self::update_snapshot) or
+    /// [`modify_snapshot`](Self::modify_snapshot), and written into
+    /// [`WorldSnapshot::snapshot_seq`] so `get_world_view` can invalidate its
+    /// cache with sub-second precision.
+    next_snapshot_seq: AtomicU64,
 }
 
 impl SharedState {
@@ -318,6 +325,7 @@ impl SharedState {
             commands_probe: Mutex::new(None),
             executor_busy: AtomicBool::new(false),
             last_command_at: AtomicU64::new(0),
+            next_snapshot_seq: AtomicU64::new(0),
         }
     }
 
@@ -325,7 +333,9 @@ impl SharedState {
     ///
     /// Writers (bot engine) call this; readers (MCP, UI) see the new
     /// snapshot on their next [`load`](ArcSwap::load) without blocking.
-    pub fn update_snapshot(&self, new: WorldSnapshot) {
+    pub fn update_snapshot(&self, mut new: WorldSnapshot) {
+        let seq = self.next_snapshot_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        new.snapshot_seq = seq;
         self.world_snapshot.store(Arc::new(new));
     }
 
@@ -357,6 +367,12 @@ impl SharedState {
         self.world_snapshot.rcu(|curr| {
             let mut snap = (**curr).clone();
             f(&mut snap);
+            // The snapshot content changed, so bump the revision even though
+            // the mutation may only touch a field that is not rendered. The
+            // extra render-invalidation is negligible (modify_snapshot is
+            // rare in production — e.g. death events).
+            let seq = self.next_snapshot_seq.fetch_add(1, Ordering::Relaxed) + 1;
+            snap.snapshot_seq = seq;
             Arc::new(snap)
         });
     }
@@ -816,7 +832,7 @@ impl SharedState {
     /// Read the cached `get_world_view` response (if any).
     ///
     /// Returns a clone of the cached [`WorldViewCache`]. Callers compare
-    /// `snapshot_timestamp`, `radius`, and `scale` against the current
+    /// `snapshot_seq`, `radius`, and `scale` against the current
     /// request to decide whether the cache is still valid.
     ///
     /// Returns `None` when no render has been cached yet (e.g. before the
