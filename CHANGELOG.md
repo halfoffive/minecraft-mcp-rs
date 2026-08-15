@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`build.yml` runs on `develop` only:** the push trigger moved from
+  `master` to `develop`, and the `pull_request` trigger is now scoped to
+  PRs targeting `develop` — master is stable-only and covered by the
+  release pipeline.
+
 ## [1.3.0] - 2026-08-15
 
 ### Added

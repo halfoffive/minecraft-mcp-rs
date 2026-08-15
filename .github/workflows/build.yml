@@ -1,5 +1,8 @@
-# Builds the release binary for Windows/macOS/Linux on both x86_64 and aarch64
+# Builds the dev binary for Windows/macOS/Linux on both x86_64 and aarch64
 # using native ARM runners where available.
+#
+# Runs on the `develop` branch only (branch model: master is stable-only
+# and covered by the release pipeline; feature PRs target develop).
 name: Build (multi-platform, multi-arch)
 
 concurrency:
@@ -9,7 +12,7 @@ concurrency:
 on:
   push:
     branches:
-      - master
+      - develop
     paths:
       - '.github/workflows/build.yml'
       - 'src/**'
@@ -19,6 +22,8 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
   pull_request:
+    branches:
+      - develop
     paths:
       - '.github/workflows/build.yml'
       - 'src/**'
