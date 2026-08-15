@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Router,
@@ -551,16 +552,26 @@ impl ServerHandler for McpBotServer {
 ///
 /// The `receiver` slot is handed to the server so the `connect_bot` tool can
 /// spawn a bot connection using the same receiver the UI path uses.
+///
+/// `headless` enables the idle watchdog: a headless `--stdio` session whose
+/// MCP client has gone away (stdin EOF never arrives on Windows, and the
+/// client may hold both pipe ends open) would otherwise linger forever.
+/// With the watchdog the process exits once no bot command has been
+/// dispatched for [`HEADLESS_IDLE_TIMEOUT`] — see [`is_headless_idle`].
 pub async fn serve_stdio(
     state: Arc<SharedState>,
     sender: BotCommandSender,
     receiver: ReceiverSlot,
+    headless: bool,
 ) {
     // Capture the shutdown token before `state` is moved into the server.
     let shutdown_token = state.shutdown_token();
     // Keep a clone for status updates after `state` is moved into the server.
     let state_for_status = Arc::clone(&state);
     state_for_status.set_mcp_server_status(McpServerStatus::Stdio);
+    // Anchor for the idle watchdog: a fresh process gets a full grace period
+    // even if the client never dispatches a command.
+    let started_at_ms = now_epoch_ms();
     let server = McpBotServer::new(state, sender, receiver);
     let (stdin, stdout) = stdio();
 
@@ -569,14 +580,24 @@ pub async fn serve_stdio(
     match server.serve((stdin, stdout)).await {
         Ok(running) => {
             info!("MCP server initialized, waiting for transport to close or shutdown");
-            // Race the transport-close future against the shutdown token so
-            // closing the window exits promptly instead of hanging on stdin EOF.
+            // Race the transport-close future against the shutdown token,
+            // an OS Ctrl+C, and (headless only) the idle watchdog — so the
+            // process exits cleanly instead of hanging on stdin EOF, which
+            // on Windows may never arrive (inherited console handles have no
+            // EOF; a pipe EOF needs every write end closed, and the client
+            // host keeps them open).
             tokio::select! {
                 _ = running.waiting() => {
                     info!("MCP server transport closed cleanly");
                 }
                 _ = shutdown_token.cancelled() => {
                     info!("MCP server shutting down (shutdown token triggered)");
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Ctrl+C received — shutting down MCP stdio server");
+                }
+                _ = headless_idle_watchdog(Arc::clone(&state_for_status), started_at_ms), if headless => {
+                    info!("headless idle watchdog fired — no bot command for {:?}, shutting down", HEADLESS_IDLE_TIMEOUT);
                 }
             }
         }
@@ -589,6 +610,61 @@ pub async fn serve_stdio(
     }
 
     state_for_status.set_mcp_server_status(McpServerStatus::Stopped);
+}
+
+/// How long a headless `--stdio` MCP session may go without any bot command
+/// before the process shuts itself down.
+///
+/// Covers the lingering-process failure seen on Windows: a client host that
+/// spawns one process per session and abandons the session without closing
+/// the pipe leaves the process alive forever, because stdin EOF never
+/// arrives and stdout writes may never fail. Ten minutes with zero command
+/// activity is a strong signal the session is abandoned.
+const HEADLESS_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Poll period for the headless idle watchdog.
+const HEADLESS_IDLE_POLL: Duration = Duration::from_secs(5);
+
+/// Current wall-clock time in epoch milliseconds.
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Pure headless-idle decision, unit-testable without a running server.
+///
+/// Idle means BOTH the session has been alive for at least `timeout` (a
+/// fresh process gets the full grace period before its first command) AND
+/// no bot command has been dispatched within `timeout`.
+fn is_headless_idle(
+    now_ms: u64,
+    last_command_ms: u64,
+    started_at_ms: u64,
+    timeout: Duration,
+) -> bool {
+    let timeout_ms = timeout.as_millis() as u64;
+    now_ms.saturating_sub(started_at_ms) >= timeout_ms
+        && now_ms.saturating_sub(last_command_ms) >= timeout_ms
+}
+
+/// Resolve once the headless stdio session has been idle (no bot command
+/// dispatched) for [`HEADLESS_IDLE_TIMEOUT`]. Polls [`SharedState`] at a
+/// coarse cadence; command activity is recorded by
+/// [`SharedState::mark_command_activity`] on every executor dispatch.
+async fn headless_idle_watchdog(state: Arc<SharedState>, started_at_ms: u64) {
+    loop {
+        tokio::time::sleep(HEADLESS_IDLE_POLL).await;
+        if is_headless_idle(
+            now_epoch_ms(),
+            state.last_command_at_ms(),
+            started_at_ms,
+            HEADLESS_IDLE_TIMEOUT,
+        ) {
+            return;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -822,6 +898,49 @@ mod tests {
         });
         // Must resolve (not hang) once the token fires.
         shutdown_signal(token).await;
+    }
+
+    /// The headless idle watchdog must NOT fire while the session is younger
+    /// than the timeout (a fresh process gets a full grace period even
+    /// before its first command).
+    #[test]
+    fn test_is_headless_idle_grace_period_before_first_command() {
+        let timeout = Duration::from_secs(600);
+        let started = 1_000_000;
+        // No command ever dispatched (last_command_ms = 0) but only 10
+        // minutes... 60 seconds after start: not idle yet.
+        assert!(!is_headless_idle(started + 60_000, 0, started, timeout));
+        // 10 minutes elapsed with zero commands: abandoned — idle.
+        assert!(is_headless_idle(started + 600_000, 0, started, timeout));
+    }
+
+    /// Recent command activity resets the idle clock.
+    #[test]
+    fn test_is_headless_idle_recent_command_resets() {
+        let timeout = Duration::from_secs(600);
+        let started = 1_000_000;
+        // 30 minutes after start, but a command arrived 5 minutes ago.
+        assert!(!is_headless_idle(
+            started + 1_800_000,
+            started + 1_500_000,
+            started,
+            timeout
+        ));
+        // Same session, last command 11 minutes ago: idle.
+        assert!(is_headless_idle(
+            started + 1_800_000,
+            started + 1_140_000,
+            started,
+            timeout
+        ));
+    }
+
+    /// A clock anomaly (now before the anchor) must never report idle.
+    #[test]
+    fn test_is_headless_idle_clock_anomaly_safe() {
+        let timeout = Duration::from_secs(600);
+        let started = 1_000_000;
+        assert!(!is_headless_idle(999_000, 0, started, timeout));
     }
 
     /// Verify get_info() returns the expected server name.

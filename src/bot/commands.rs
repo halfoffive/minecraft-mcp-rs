@@ -56,6 +56,19 @@ pub(crate) trait BotActions {
     /// return `true` once the pathfinder has been told to start.
     fn is_goto_target_reached(&self) -> bool;
 
+    /// The bot's current precise position, read live from the client.
+    ///
+    /// Unlike the world snapshot (throttled to `snapshot_interval_ms`, or
+    /// up to 5 s when the bot is idle), this is the position at the moment
+    /// of the call. Used by `handle_act` to report a `self_info.position`
+    /// that reflects where the bot actually ended up after a movement —
+    /// the throttled snapshot can lag a just-completed move by one whole
+    /// interval, which LLM clients misread as "did not arrive".
+    ///
+    /// Returns `None` when the client position component is unavailable
+    /// (offline or before the first sync); callers fall back to the snapshot.
+    fn position(&self) -> Option<[f64; 3]>;
+
     /// Perform a single jump.
     async fn jump(&self);
 
@@ -213,6 +226,12 @@ impl BotActions for RealBotClient {
         // call in a `bool::from(...)` conversion rather than re-raising
         // the error so the `goto` fallback loop keeps its 50ms cadence.
         self.client.is_goto_target_reached()
+    }
+
+    fn position(&self) -> Option<[f64; 3]> {
+        self.client
+            .get_component::<azalea::entity::Position>()
+            .map(|pos| [pos.x, pos.y, pos.z])
     }
 
     async fn goto(&self, pos: &BlockPos) -> Result<(), BotError> {
@@ -1121,6 +1140,39 @@ impl<B: BotActions> CommandExecutor<B> {
                 %used_item,
                 "use_item_on_block: no effect observed at target cell"
             );
+            // Fluid buckets get a targeted explanation: azalea 0.15.1's
+            // `block_interact` fabricates the hit result (block centre,
+            // fixed Up face — see the interact plugin), which vanilla
+            // rejects for bucket `UseItemOn` while accepting block
+            // placements and flint-and-steel on the same path. There is no
+            // upstream API to send a real raycast hit, so the honest answer
+            // is a specific "unsupported" error plus a working alternative
+            // rather than a generic "interaction was likely rejected".
+            if is_fluid_bucket_item(&used_item) {
+                return Ok(BotResult {
+                    success: false,
+                    message: format!(
+                        "use_item_on_block: {used_item} placement failed at {effect} (clicked {pos}) — azalea 0.15.1's block interaction layer cannot place fluid buckets (the fabricated hit is rejected by the server); use execute_command '/setblock {} {} {} {}' or '/fill' instead",
+                        effect.x,
+                        effect.y,
+                        effect.z,
+                        used_item
+                            .strip_prefix("minecraft:")
+                            .unwrap_or(&used_item)
+                            .trim_end_matches("_bucket"),
+                    ),
+                    data: Some(serde_json::json!({
+                        "verified": false,
+                        "reason": "bucket_placement_unsupported",
+                        "effect_position": effect,
+                        "item": used_item,
+                        "alternatives": [
+                            format!("/setblock {} {} {} <fluid>", effect.x, effect.y, effect.z),
+                            "/fill <x1> <y1> <z1> <x2> <y2> <z2> water",
+                        ],
+                    })),
+                });
+            }
             return Ok(BotResult {
                 success: false,
                 message: format!(
@@ -1613,8 +1665,8 @@ impl<B: BotActions> CommandExecutor<B> {
     /// The server reports command failures (e.g. `Incorrect argument for
     /// command ...`, `Unknown command`) as a chat/system message rather than
     /// an error packet. We record the chat baseline, send the command, wait a
-    /// short window for feedback, and diff the new system messages: a match
-    /// against a known rejection pattern is returned as
+    /// short window for feedback, and diff the new system messages: any one
+    /// matching a known rejection pattern is returned as
     /// [`BotError::CommandRejected`] so the MCP client learns the truth
     /// instead of seeing a fake success (previously `execute_command` always
     /// returned "Executed command: ..."). When no rejection is detected the
@@ -1631,23 +1683,22 @@ impl<B: BotActions> CommandExecutor<B> {
 
         // Give the server a short window to reply with rejection feedback.
         sleep(Duration::from_millis(COMMAND_FEEDBACK_WAIT_MS)).await;
-        let feedback = self.server_feedback_after(baseline_len);
 
-        // Borrow-check friendly: search a reference so `feedback` can be used
-        // again below when building the success message.
-        let rejection = feedback
-            .as_ref()
-            .and_then(|fb| is_command_rejection(fb).then_some(fb));
-        if let Some(rejection) = rejection {
+        // Scan every System message that arrived in the window — Minecraft
+        // reports a rejection as TWO messages (the error title plus the
+        // command echo with a `<--[HERE]` marker), so checking only the
+        // newest one would miss the rejection whenever the echo lands last.
+        if let Some(rejection) = self.rejection_feedback_after(baseline_len) {
             return Err(BotError::CommandRejected {
                 command: cmd.clone(),
-                feedback: rejection.clone(),
+                feedback: rejection,
             });
         }
 
         // No rejection detected — report success, attaching the newest system
         // feedback (if any) so clients can still see e.g. the result of the
         // command ("Teleported X to ...", "Seed: [...]").
+        let feedback = self.server_feedback_after(baseline_len);
         let message = match &feedback {
             Some(fb) => format!("Executed command: {} (server: {fb})", cmd),
             None => format!("Executed command: {}", cmd),
@@ -1667,6 +1718,28 @@ impl<B: BotActions> CommandExecutor<B> {
             .iter()
             .skip(baseline_len)
             .filter(|(sender, _)| sender.eq_ignore_ascii_case("System"))
+            .map(|(_, message)| message.clone())
+            .next_back()
+    }
+
+    /// Return the newest System message after `baseline_len` that matches a
+    /// known command-rejection pattern, if any.
+    ///
+    /// The rejection scan checks **every** message in the window, not just
+    /// the newest: Minecraft's command errors arrive as two System messages
+    /// (the error title carrying the keyword, e.g. "Unknown or incomplete
+    /// command. See below for error", followed by the command echo with a
+    /// `<--[HERE]` marker). `server_feedback_after`'s newest-only selection
+    /// is correct for success feedback but misses rejections whose echo
+    /// lands last.
+    fn rejection_feedback_after(&self, baseline_len: usize) -> Option<String> {
+        self.state
+            .get_chat_messages()
+            .iter()
+            .skip(baseline_len)
+            .filter(|(sender, message)| {
+                sender.eq_ignore_ascii_case("System") && is_command_rejection(message)
+            })
             .map(|(_, message)| message.clone())
             .next_back()
     }
@@ -2006,9 +2079,24 @@ impl<B: BotActions> CommandExecutor<B> {
             },
         };
 
-        // Build the enriched result from the current snapshot.
-        let snapshot = self.state.read_snapshot();
-        let player_pos = snapshot.self_player.position;
+        // Build the enriched result from the current snapshot, but prefer the
+        // bot's LIVE position for the nearby-filter centre and `self_info`:
+        // the snapshot is throttled (up to `snapshot_interval_ms`, or 5 s
+        // when idle), so right after a movement it can still report the
+        // pre-move position and an LLM client would misread a successful
+        // move as "did not arrive". `BotActions::position` is a zero-wait
+        // live read; when it is unavailable (offline / before first sync)
+        // the snapshot value is kept.
+        let mut snapshot = self.state.read_snapshot();
+        let live_position = self.bot.position();
+        let player_pos = live_position
+            .map(|[x, y, z]| BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32))
+            .unwrap_or(snapshot.self_player.position);
+        if let Some(live) = live_position {
+            let self_player = &mut Arc::make_mut(&mut snapshot).self_player;
+            self_player.position = player_pos;
+            self_player.position_precise = Some(live);
+        }
         // Per-call override (0..=32, validated upstream) or the configured
         // default. Small radii keep the ActResult payload tiny — the default
         // radius-32 result serialises to over 1 MB of nearby-block JSON.
@@ -2074,10 +2162,16 @@ fn distance_between(a: BlockPos, b: BlockPos) -> f64 {
 /// not. Placeable blocks are detected via the block-to-tool table, which
 /// carries an entry for every mined/placed block.
 fn item_has_placement_effect(item_id: &str) -> bool {
-    if item_id.ends_with("_bucket") && !item_id.contains("milk") {
+    if is_fluid_bucket_item(item_id) {
         return true;
     }
     crate::block_data::BLOCK_TO_TOOL_TYPE.contains_key(item_id)
+}
+
+/// Whether the item id is a fluid bucket (water/lava/powder snow), excluding
+/// milk which is a consumable rather than a placement item.
+fn is_fluid_bucket_item(item_id: &str) -> bool {
+    item_id.ends_with("_bucket") && !item_id.contains("milk")
 }
 
 /// Whether an entity type string is a dropped-item entity that can be picked
@@ -2326,6 +2420,12 @@ mod tests {
         /// Default 0 (inventory has free slots).
         player_inventory_occupied: AtomicUsize,
         position: Mutex<BlockPos>,
+        /// Precise position reported by `BotActions::position`. `None`
+        /// (default) mirrors a client whose position component is missing,
+        /// so handlers fall back to the snapshot — existing tests keep their
+        /// behaviour. Tests that exercise the live-position override set
+        /// this explicitly.
+        live_position: Mutex<Option<[f64; 3]>>,
         stop_pathfinding_calls: AtomicUsize,
         swap_hotbar_calls: Mutex<Vec<(u16, u8)>>,
     }
@@ -2356,6 +2456,7 @@ mod tests {
                 inventory: Mutex::new(Vec::new()),
                 player_inventory_occupied: AtomicUsize::new(0),
                 position: Mutex::new(BlockPos::new(0, 64, 0)),
+                live_position: Mutex::new(None),
                 stop_pathfinding_calls: AtomicUsize::new(0),
                 swap_hotbar_calls: Mutex::new(Vec::new()),
             }
@@ -2395,6 +2496,10 @@ mod tests {
             // check stay false for the whole `command_timeout_secs`
             // window.
             !self.log.goto_target_unreached.load(Ordering::SeqCst)
+        }
+
+        fn position(&self) -> Option<[f64; 3]> {
+            *self.log.live_position.lock().unwrap()
         }
 
         async fn goto(&self, pos: &BlockPos) -> Result<(), BotError> {
@@ -3381,6 +3486,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execute_command_rejection_detected_two_line_feedback() {
+        // Minecraft reports a rejection as TWO System messages: the error
+        // title ("Unknown or incomplete command. See below for error") and
+        // the command echo ("gamemode<--[HERE]"), which arrives LAST and
+        // carries no rejection keyword. The rejection scan must check every
+        // message in the window, not just the newest one — the old
+        // newest-only selection reported success for a rejected command.
+        let (executor, _sender, state, log) = make_executor();
+        let state2 = Arc::clone(&state);
+        let sim = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            state2.add_chat_message(
+                "System".into(),
+                "Unknown or incomplete command. See below for error".into(),
+            );
+            state2.add_chat_message("System".into(), "gamemode<--[HERE]".into());
+        });
+
+        let result = executor.handle_execute_command("/gamemode".into()).await;
+        assert!(
+            matches!(result, Err(BotError::CommandRejected { ref feedback, .. }) if feedback.contains("Unknown or incomplete command")),
+            "two-line rejection must surface CommandRejected with the error title, got: {result:?}"
+        );
+        sim.await.expect("simulation task should finish");
+        let chats = log.chat_calls.lock().unwrap();
+        assert_eq!(chats.len(), 1);
+    }
+
+    #[tokio::test]
     async fn test_execute_command_success_attaches_server_feedback() {
         // An accepted command still produces system feedback ("Teleported
         // ...") — the executor reports success and attaches the feedback.
@@ -3932,6 +4066,66 @@ mod tests {
 
         assert!(log.interact_calls.lock().unwrap().is_empty());
         assert!(log.hotbar_switch_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_use_item_on_block_bucket_unsupported_error() {
+        // Fluid bucket placement is not supported by azalea 0.15.1's
+        // fabricated interaction hit — the verification budget expires and
+        // the handler must return the targeted "bucket_placement_unsupported"
+        // failure (with the /setblock alternative) instead of the generic
+        // "interaction was likely rejected" message.
+        let (executor, sender, state, _log) = make_executor();
+        let mut snapshot = make_populated_snapshot_defaults();
+        snapshot.self_player.held_item_slot = 0;
+        // Stand next to the interaction target so the auto-approach is
+        // skipped — the empty test world has no standable neighbour for the
+        // pathfinder, which would otherwise abort the handler early.
+        snapshot.self_player.position = BlockPos::new(4, 64, 0);
+        snapshot.self_player.inventory = vec![InventorySlot {
+            slot_index: 0,
+            item_id: "water_bucket".into(),
+            count: 1,
+        }];
+        // `update_snapshot` stores the snapshot as-is (no block_index
+        // rebuild), so seed the index for the interaction target + effect
+        // cell lookups.
+        snapshot.block_index = snapshot
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.position, i))
+            .collect();
+        // Keep the verification budget (snapshot_interval_ms + 250 ms) tiny.
+        state.update_config(|c| c.snapshot_interval_ms = 1);
+        state.update_snapshot(snapshot);
+        let handle = spawn_executor(executor);
+
+        let pos = BlockPos::new(5, 64, 0);
+        let effect = BlockPos::new(5, 65, 0);
+        let result = send_and_await(
+            &sender,
+            BotCommand::UseItemOnBlock(pos, Some(0), Some(effect)),
+        )
+        .await;
+        let br = result.expect("expected Ok(BotResult)");
+        assert!(!br.success, "bucket placement must report failure");
+        assert!(
+            br.message.contains("cannot place fluid buckets"),
+            "message must explain the azalea limitation, got: {}",
+            br.message
+        );
+        assert!(
+            br.message.contains("/setblock"),
+            "message must offer the /setblock alternative, got: {}",
+            br.message
+        );
+        let data = br.data.expect("bucket failure carries data");
+        assert_eq!(data["reason"], "bucket_placement_unsupported");
+        assert_eq!(data["item"], "water_bucket");
+
+        drop(sender);
+        handle.await.expect("executor should finish");
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -4894,6 +5088,49 @@ mod tests {
             1,
             "default radius must include entity 42"
         );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_act_self_info_uses_live_position_after_move() {
+        // Regression for the functional-test observation: `act(Move)` reported
+        // the target but `self_info.position` was still the PRE-move position
+        // from the throttled snapshot. The ActResult must prefer the bot's
+        // live position (read at result build time) over the possibly-stale
+        // snapshot.
+        let (executor, sender, state, log) = make_executor();
+        let mut snapshot = make_populated_snapshot_defaults();
+        // Snapshot is stale: player still at (0,64,0).
+        snapshot.self_player.position = BlockPos::new(0, 64, 0);
+        snapshot.self_player.position_precise = None;
+        state.update_snapshot(snapshot);
+        // Live client position: the bot already arrived at (40.5, -60, -16.5).
+        *log.live_position.lock().unwrap() = Some([40.5, -60.0, -16.5]);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(
+            &sender,
+            BotCommand::Act(
+                ActAction::Move {
+                    target: BlockPos::new(40, -60, -16),
+                },
+                Some(0),
+            ),
+        )
+        .await
+        .expect("act should succeed");
+        let act: ActResult = serde_json::from_value(result.data.expect("data present"))
+            .expect("data is a serialized ActResult");
+        assert_eq!(
+            act.self_info.position,
+            BlockPos::new(40, -60, -17),
+            "self_info must reflect the live position (floor of 40.5, -60, -16.5), not the stale snapshot"
+        );
+        // Note: `position_precise` is `#[serde(skip)]` by design (W-1), so it
+        // does not survive the JSON round-trip this test deserializes — the
+        // integer `position` above is the observable contract.
 
         drop(sender);
         handle.await.expect("executor should finish");

@@ -158,10 +158,13 @@ async fn build_snapshot_inner(
     // `azalea::entity::LookDirection` exposes `y_rot()` which returns the
     // player's horizontal look angle in radians. It is `None` only briefly
     // before the first `ClientboundPlayerLookAtPacket` is processed (e.g.
-    // very first tick after spawn).
+    // very first tick after spawn). The raw angle is folded into
+    // Minecraft's `[-180, 180)` degree range here — the single write point
+    // for `SelfPlayer::yaw` — so `get_bot_status` and the `get_world_view`
+    // annotation never expose unbounded accumulated turns (e.g. -767.1°).
     let yaw: Option<f32> = bot
         .get_component::<azalea::entity::LookDirection>()
-        .map(|look| look.y_rot());
+        .map(|look| crate::utils::normalize_yaw(look.y_rot()));
 
     let inventory = read_inventory(bot);
 

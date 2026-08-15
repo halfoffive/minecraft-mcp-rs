@@ -111,12 +111,14 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
   **诚实的错误报告** —— `BotError::InvalidParams` 会映射为 MCP 的 `INVALID_PARAMS`；无法破坏的方块返回 `MiningInterrupted` 而非 panic；`set_game_mode` 会提示需要 OP 权限。
 
 - **Command feedback verification** — `execute_command` reads the server's
-  chat reply after sending: a rejected command (e.g. `Incorrect argument for
-  command ...`) returns a `CommandRejected` error (-32009) with the server's
-  verbatim feedback instead of a fake "Executed command" success. `drop_item`
+  chat reply after sending: every System message in the feedback window is
+  scanned, so a rejected command (e.g. `Incorrect argument for command ...`,
+  or Minecraft's two-line "Unknown or incomplete command …<--[HERE]" pair)
+  returns a `CommandRejected` error (-32009) with the server's verbatim
+  feedback instead of a fake "Executed command" success. `drop_item`
   verifies the inventory actually changed after the click.
 
-  **命令反馈校验** —— `execute_command` 在发送后会读取服务器的聊天回复：被拒绝的命令（如 `Incorrect argument for command ...`）会返回 `CommandRejected` 错误（-32009）并附上服务器的原始反馈，而不是伪造的"已执行"。`drop_item` 会在点击后校验背包确实发生了变化。
+  **命令反馈校验** —— `execute_command` 在发送后会读取服务器的聊天回复：反馈窗口内的**每一条** System 消息都会被扫描，因此被拒绝的命令（如 `Incorrect argument for command ...`，或 Minecraft 的"Unknown or incomplete command …<--[HERE]" 两行式拒绝）会返回 `CommandRejected` 错误（-32009）并附上服务器的原始反馈，而不是伪造的"已执行"。`drop_item` 会在点击后校验背包确实发生了变化。
 
 - **Fresh state on demand** — `get_self_info` / `get_inventory` accept
   `force=true` (default) to trigger an immediate snapshot rebuild before
@@ -141,6 +143,18 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 | **Unified / 统一** | `act` — one tool that can move, smart-move, fly, mine, attack, or collect items and returns an environment snapshot (`perception_radius` 0-32 trims the returned nearby blocks/entities payload) |
 
 上述工具按功能领域分类；`act` 是一个统一入口，能够根据传入参数执行移动、智能移动、飞行、挖掘、攻击或拾取物品，并返回环境快照。设置类工具（`get_settings` / `update_settings` / `connect_bot` / `disconnect_bot`）在机器人离线时也可用——LLM 客户端可以自行读取和修改所有配置，包括切换 Minecraft 服务器地址。
+
+## Known limitations / 已知限制
+
+- **Fluid buckets cannot be placed via `use_item_on_block`** — azalea 0.15.1's
+  block interaction fabricates the hit result (block centre, fixed Up face),
+  which the vanilla server rejects for bucket `UseItemOn` while accepting
+  block placements and flint-and-steel on the same path. The tool returns
+  `success:false` with `reason: "bucket_placement_unsupported"` and suggests
+  the working `execute_command` alternatives (`/setblock <x> <y> <z> water` /
+  `/fill`). There is no upstream azalea API to send a real raycast hit yet.
+
+  **流体桶无法通过 `use_item_on_block` 放置** —— azalea 0.15.1 的方块交互伪造了命中结果（方块中心、固定 Up 面），原版服务器在桶的 `UseItemOn` 场景会拒绝该命中，而方块放置和打火石走同一路径却能成功。该工具会返回 `success:false` 且携带 `reason: "bucket_placement_unsupported"`，并提示可用的 `execute_command` 替代方案（`/setblock <x> <y> <z> water` / `/fill`）。上游 azalea 目前没有提供发送真实射线命中结果的 API。
 
 ## Documentation
 
@@ -243,7 +257,7 @@ full usage):
 
 | Flag / 参数 | Description / 说明 |
 |-------------|---------------------|
-| `--headless` | Run without the desktop window; auto-connect the bot and exit when the MCP transport closes / 无桌面窗口运行；自动连接机器人，MCP 传输关闭时退出进程 |
+| `--headless` | Run without the desktop window; auto-connect the bot and exit when the MCP transport closes (Ctrl+C, client pipe break, or after 10 minutes with no bot command) / 无桌面窗口运行；自动连接机器人，MCP 传输关闭（Ctrl+C、客户端管道断开，或 10 分钟无任何机器人命令）时退出进程 |
 | `--gui` | Open the desktop window explicitly / 显式打开桌面窗口 |
 | `--stdio` | Force the MCP stdio transport; implies headless when used alone (overrides the configured transport) / 强制使用 MCP stdio 传输；单独使用时隐含无头模式（覆盖配置中的传输方式） |
 | `-h`, `--help` | Print usage to stderr and exit / 打印用法到 stderr 并退出 |

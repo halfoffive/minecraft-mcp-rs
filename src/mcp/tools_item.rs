@@ -362,8 +362,11 @@ pub struct GiveItemInput {
 /// `/item replace entity <bot> hotbar.<slot> with <item> <count>` and, if the
 /// server rejects `/item replace`, falls back to the swap-click
 /// [`BotCommand::MoveItemToHotbar`] path (reliable wherever the item already
-/// landed in the inventory). Requires server commands (op) — a known-disabled
-/// `commands_enabled` is rejected with `PermissionDenied`.
+/// landed in the inventory). Requires server commands (op) — command
+/// availability is verified live via a `/seed` probe, and only a
+/// probe-confirmed rejection yields `PermissionDenied` (the cached snapshot's
+/// `commands_enabled` can be a stale `PermissionLevel` heuristic right after
+/// a reconnect).
 pub async fn handle_give_item(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
@@ -401,14 +404,21 @@ pub async fn handle_give_item(
             "Bot is not connected to a server".to_string(),
         ));
     }
+    // Commands-availability gate. The cached snapshot's `commands_enabled`
+    // may reflect the `PermissionLevel` heuristic, which lags the real
+    // server state right after a reconnect (the permission component reads
+    // 0 before the first sync) — trusting it would reject /give for a bot
+    // that can actually run commands. Re-probe live via /seed: only reject
+    // when the probe itself confirms commands are unavailable. When the
+    // probe is unknown the /give attempt proceeds and a real rejection is
+    // surfaced by `handle_execute_command` (Bug-1 fix) instead.
+    if let Some(probe) = crate::mcp::tools_query::probe_commands_enabled(state, sender).await
+        && !probe
     {
-        let snapshot = state.read_snapshot();
-        if snapshot.commands_enabled == Some(false) {
-            return Err(BotError::PermissionDenied(
-                "Server commands are disabled for this bot — give_item needs OP permissions"
-                    .to_string(),
-            ));
-        }
+        return Err(BotError::PermissionDenied(
+            "Server commands are disabled for this bot — give_item needs OP permissions (verified via /seed probe)"
+                .to_string(),
+        ));
     }
     // Minecraft command ids are namespaced; the MCP contract uses bare
     // snake_case ids. Add the prefix unless already namespaced.
@@ -928,12 +938,34 @@ mod tests {
         state
     }
 
+    /// Consume the `/seed` command-availability probe that `give_item` sends
+    /// first and reply success. The probe runs before every /give so the
+    /// commands-enabled gate reflects live server state rather than the
+    /// possibly-stale snapshot heuristic.
+    async fn consume_probe(receiver: &mut crate::channel::BotCommandReceiver) {
+        let probe = receiver.recv().await.expect("probe command");
+        assert!(
+            matches!(probe.command, BotCommand::ExecuteCommand(ref c) if c == "/seed"),
+            "first command must be the /seed probe, got: {:?}",
+            probe.command
+        );
+        probe
+            .respond_to
+            .send(Ok(crate::types::BotResult {
+                success: true,
+                message: "ok".into(),
+                data: None,
+            }))
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_give_item_to_inventory_sends_give_command() {
         let state = make_give_state();
         let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
         let responder = tokio::spawn(async move {
+            consume_probe(&mut receiver).await;
             let wrapped = receiver.recv().await.expect("should receive give");
             assert!(
                 matches!(
@@ -974,6 +1006,7 @@ mod tests {
         let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
         let responder = tokio::spawn(async move {
+            consume_probe(&mut receiver).await;
             let first = receiver.recv().await.expect("give");
             assert!(matches!(
                 first.command,
@@ -1022,6 +1055,7 @@ mod tests {
         let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
         let responder = tokio::spawn(async move {
+            consume_probe(&mut receiver).await;
             let first = receiver.recv().await.expect("give");
             first
                 .respond_to
@@ -1072,13 +1106,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_give_item_rejected_when_commands_disabled() {
+        // The gate must reject only when the LIVE /seed probe confirms
+        // commands are unavailable — a rejected probe wins over whatever the
+        // snapshot heuristic cached.
         let state = Arc::new(SharedState::new(AppConfig::default()));
         state.set_online(true);
         state.update_snapshot(crate::types::WorldSnapshot {
             commands_enabled: Some(false),
             ..Default::default()
         });
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            let probe = receiver.recv().await.expect("probe command");
+            assert!(matches!(
+                probe.command,
+                BotCommand::ExecuteCommand(ref c) if c == "/seed"
+            ));
+            probe
+                .respond_to
+                .send(Err(BotError::CommandRejected {
+                    command: "/seed".into(),
+                    feedback: "You do not have permission to use this command".into(),
+                }))
+                .unwrap();
+        });
 
         let input = GiveItemInput {
             item_id: "dirt".into(),
@@ -1087,7 +1139,63 @@ mod tests {
             hotbar_slot: None,
         };
         let result = handle_give_item(&state, &sender, input).await;
-        assert!(matches!(result, Err(BotError::PermissionDenied(_))));
+        assert!(
+            matches!(result, Err(BotError::PermissionDenied(ref msg)) if msg.contains("verified via /seed probe")),
+            "probe-confirmed disabled must yield PermissionDenied, got: {result:?}"
+        );
+        responder.await.expect("responder finished");
+    }
+
+    #[tokio::test]
+    async fn test_give_item_probe_overrides_stale_snapshot_disabled() {
+        // Regression for the intermittent false "Permission denied" during
+        // the functional test: the cached snapshot reported
+        // `commands_enabled: Some(false)` from the PermissionLevel heuristic,
+        // but the live probe (and the actual /give) succeeded. The gate must
+        // trust the probe, not the stale snapshot.
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        state.set_online(true);
+        state.update_snapshot(crate::types::WorldSnapshot {
+            self_player: crate::types::SelfPlayer {
+                username: "TestBot".into(),
+                ..Default::default()
+            },
+            commands_enabled: Some(false),
+            ..Default::default()
+        });
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            consume_probe(&mut receiver).await;
+            let give = receiver.recv().await.expect("give command");
+            assert!(matches!(
+                give.command,
+                BotCommand::ExecuteCommand(ref c) if c == "/give TestBot minecraft:dirt 1"
+            ));
+            give.respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .unwrap();
+        });
+
+        let input = GiveItemInput {
+            item_id: "dirt".into(),
+            count: None,
+            target: None,
+            hotbar_slot: None,
+        };
+        let result = handle_give_item(&state, &sender, input)
+            .await
+            .expect("stale snapshot must not block a working /give");
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["success"], true);
+        assert_eq!(parsed["data"]["method"], "give");
+        // The successful probe is now cached, matching the real server state.
+        assert_eq!(state.get_commands_probe(), Some(true));
+        responder.await.expect("responder finished");
     }
 
     #[tokio::test]
