@@ -150,7 +150,13 @@ fn main() {
                 let transport = state_for_mcp.read_config().mcp_transport;
                 match transport {
                     McpTransport::Stdio => {
-                        serve_stdio(state_for_mcp.clone(), sender_for_mcp, receiver_for_mcp).await;
+                        serve_stdio(
+                            state_for_mcp.clone(),
+                            sender_for_mcp,
+                            receiver_for_mcp,
+                            headless,
+                        )
+                        .await;
                     }
                     McpTransport::Http => {
                         let (port, mcp_address) = {

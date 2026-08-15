@@ -3,7 +3,10 @@
 //! Currently hosts the `to_snake_case` helper used by the bot command
 //! executor and snapshot updater to convert azalea registry Debug names
 //! (e.g. `IronPickaxe`) into the snake_case item ids used by the
-//! block/tool tables (`iron_pickaxe`).
+//! block/tool tables (`iron_pickaxe`), plus the `normalize_yaw` helper that
+//! folds the player's raw look angle into Minecraft's `[-180, 180)` range
+//! before it reaches the snapshot and the MCP `get_bot_status` /
+//! `get_world_view` payloads.
 
 /// Naive CamelCase → snake_case conversion.
 ///
@@ -49,6 +52,24 @@ pub fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
             .zip(needle_bytes)
             .all(|(h, n)| h.eq_ignore_ascii_case(n))
     })
+}
+
+/// Fold a raw horizontal look angle (radians) into Minecraft's canonical
+/// `[-180, 180)` degree range.
+///
+/// `LookDirection::y_rot()` can grow unboundedly as the player keeps turning
+/// the same way (the functional test observed `yaw: -767.1` after several
+/// spins), and a `-767.1` in the `get_bot_status` / `get_world_view`
+/// annotation is meaningless to LLM clients. `rem_euclid(360)` maps any
+/// value into `[0, 360)`, then values ≥ 180 are folded back into
+/// `[-180, 180)` (so `270° → -90°`).
+pub fn normalize_yaw(yaw: f32) -> f32 {
+    let degrees = yaw.to_degrees().rem_euclid(360.0);
+    if degrees >= 180.0 {
+        degrees - 360.0
+    } else {
+        degrees
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -128,5 +149,36 @@ mod tests {
         // ASCII, but the helper must not panic or allocate on them.
         assert!(contains_ascii_case_insensitive("石stone", "stone"));
         assert!(!contains_ascii_case_insensitive("石", "石石"));
+    }
+
+    // ── normalize_yaw ─────────────────────────────────────────────
+
+    /// Assert two angles are equal within a small f32 tolerance (the
+    /// radian↔degree round-trip is not bit-exact).
+    fn assert_yaw_eq(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.001,
+            "expected {expected}°, got {actual}°"
+        );
+    }
+
+    #[test]
+    fn test_normalize_yaw_basic() {
+        assert_yaw_eq(normalize_yaw(0.0), 0.0);
+        assert_yaw_eq(normalize_yaw(90.0_f32.to_radians()), 90.0);
+        assert_yaw_eq(normalize_yaw((-90.0_f32).to_radians()), -90.0);
+        assert_yaw_eq(normalize_yaw(180.0_f32.to_radians()), -180.0);
+        assert_yaw_eq(normalize_yaw(359.0_f32.to_radians()), -1.0);
+    }
+
+    #[test]
+    fn test_normalize_yaw_wraps_accumulated_turns() {
+        // Several full turns in one direction must collapse back into
+        // [-180, 180) — the functional test observed -767.1°.
+        assert_yaw_eq(normalize_yaw((-767.1_f32).to_radians()), -47.1);
+        assert_yaw_eq(normalize_yaw(400.0_f32.to_radians()), 40.0);
+        assert_yaw_eq(normalize_yaw(270.0_f32.to_radians()), -90.0);
+        assert_yaw_eq(normalize_yaw((-270.0_f32).to_radians()), 90.0);
+        assert_yaw_eq(normalize_yaw(720.0_f32.to_radians()), 0.0);
     }
 }

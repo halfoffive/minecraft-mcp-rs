@@ -925,6 +925,14 @@ mod tests {
             !self.mock.goto_target_unreached.load(Ordering::SeqCst)
         }
 
+        fn position(&self) -> Option<[f64; 3]> {
+            // This mock keeps the snapshot in lock-step with bot movement
+            // (goto/teleport mutate the snapshot position), so the snapshot
+            // position IS the live position here.
+            let p = self.state.read_snapshot().self_player.position;
+            Some([p.x as f64, p.y as f64, p.z as f64])
+        }
+
         async fn goto(&self, pos: &BlockPos) -> Result<(), BotError> {
             if !self.mock.goto_succeeds.load(Ordering::SeqCst) {
                 return Err(BotError::PathfindingFailed {
