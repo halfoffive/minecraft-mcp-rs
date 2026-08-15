@@ -51,9 +51,11 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
   **双语 UI（英文 / 简体中文）** —— 可在运行时通过“设置”面板切换语言；系统会自动检测 CJK 字体，开箱即用即可正常显示中文。
 
 - **Live world state** — the bot periodically snapshots its surroundings into a
-  thread-safe `SharedState` readable by all tools
+  thread-safe `SharedState` readable by all tools; the snapshot keeps only the
+  blocks within `max(chunk_scan_radius, 8)` chunks of the player, so memory
+  stays bounded on long walks
 
-  **实时世界状态** —— 机器人会定期将周围环境快照保存到线程安全的 `SharedState`，所有工具均可读取。
+  **实时世界状态** —— 机器人会定期将周围环境快照保存到线程安全的 `SharedState`，所有工具均可读取；快照只保留玩家周围 `max(chunk_scan_radius, 8)` 个区块内的方块，长途移动时内存保持有界。
 
 - **Remote MCP HTTP server** — loopback-only (`127.0.0.1`), optional
   Bearer-token auth (off by default); transport mode (stdio / HTTP) selectable
@@ -403,11 +405,14 @@ variable is present:
 | `MINECRAFT_MCP_LANGUAGE` | `language` | system locale / 系统语言 |
 
 Malformed variable values log a warning and keep the default — startup never
-fails because of an environment typo. `MINECRAFT_MCP_TOKEN` is the ONLY way to
+fails because of an environment typo. Semantically invalid values that parse
+but would wedge the runtime (`0` for ports/durations, out-of-range radii) are
+also rejected per-field with a warning and the default is kept, followed by a
+final full-config validation gate. `MINECRAFT_MCP_TOKEN` is the ONLY way to
 pin the MCP bearer token; without it a fresh random UUID is generated per
 process start.
 
-非法环境变量值只会记录警告并保留默认值——不会因环境变量拼写错误而启动失败。`MINECRAFT_MCP_TOKEN` 是固定 MCP Bearer Token 的唯一途径；未设置时每次启动都会生成新的随机 UUID。
+非法环境变量值只会记录警告并保留默认值——不会因环境变量拼写错误而启动失败。能解析但语义非法的值（端口/时长/半径等为 `0` 或越界）也会按字段警告并回退默认值，随后再做一次全配置校验兜底。`MINECRAFT_MCP_TOKEN` 是固定 MCP Bearer Token 的唯一途径；未设置时每次启动都会生成新的随机 UUID。
 
 Runtime changes (UI settings panel, `update_settings` MCP tool) apply to the
 running process only — restart with the environment variables to persist them.

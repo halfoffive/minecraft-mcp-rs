@@ -68,6 +68,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Config-file persistence** (`config.json` read/write, `config_path`,
   the `dirs` dependency).
 
+### Fixed
+
+- **World-view cache key now uses a monotonic snapshot revision:** the
+  cache used the seconds-granularity `WorldSnapshot::timestamp`, so two
+  500 ms snapshot builds in the same second could share a timestamp and
+  `get_world_view` returned a stale PNG. `WorldSnapshot` now carries an
+  internal `snapshot_seq` (serde-skipped) that `SharedState` increments on
+  every store; the cache key is `(snapshot_seq, radius, scale)`.
+- **Semantically invalid environment values now fall back per-field:**
+  `MINECRAFT_MCP_SNAPSHOT_INTERVAL_MS=0`,
+  `MINECRAFT_MCP_COMMAND_TIMEOUT_SECS=0`, `MINECRAFT_MCP_CHUNK_SCAN_RADIUS=0`
+  and similar zero/out-of-range values previously parsed successfully and
+  wedged the runtime (per-tick snapshots, instant command timeouts, no chunk
+  scanning). `from_env` now validates each numeric value and falls back to
+  the default with a warning; `main` runs a final `validate()` gate and falls
+  back to full defaults if anything still slips through.
+- **Snapshot `blocks` are now bounded by a retention radius:** old blocks
+  outside `max(chunk_scan_radius, 8)` chunks from the player are pruned on
+  every build, so a long-lived bot no longer accumulates every chunk it ever
+  walked through (unbounded memory + per-tick clone/index rebuild).
+- **`Act(Fly)` in non-creative mode now fails with `PermissionDenied`:**
+  the executor previously returned `success:true, reached:false` when the
+  bot was not in Creative, which contradicted the MCP `fly_to` gate and the
+  "success means reached" rule.
+- **`collect_items` only matches real dropped-item entities:** the old
+  `contains("item") && !contains("frame")` filter also matched
+  `item_display`; it now matches exactly `item` / `item_entity`.
+- **`use_item_on_block` validates the effect cell too:** `face=up` at
+  y=320 (effect y=321) was accepted and later timed out as a fake failure;
+  it is now rejected at the MCP and executor validation gates.
+- **`get_nearby_blocks` enforces `max_blocks` at runtime:** values outside
+  `1..=10000` now return `InvalidParams` instead of silently truncating or
+  trying to return everything.
+
 ### Changed
 
 - **CLI migrated to clap:** `src/cli.rs` now parses `--headless` /
