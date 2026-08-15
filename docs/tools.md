@@ -9,15 +9,30 @@ function, and tool parameters are annotated with
 
 | Category | Tools |
 |----------|-------|
-| **Query** | `get_self_info`, `get_inventory`, `get_nearby_blocks`, `get_nearby_entities`, `get_chunk_summary`, `is_connected`, `get_chat_history`, `get_server_info`, `get_world_view` |
+| **Query** | `get_self_info`, `get_inventory`, `get_hotbar`, `get_bot_status`, `get_nearby_blocks`, `get_nearby_entities`, `get_chunk_summary`, `is_connected`, `get_chat_history`, `get_server_info`, `get_world_view` |
 | **Movement** | `move_to`, `walk_direction`, `jump`, `teleport`, `smart_move`, `fly_to` |
 | **Block** | `break_block`, `place_block`, `use_item_on_block` |
-| **Item** | `drop_item`, `set_hotbar_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items` |
+| **Item** | `drop_item`, `set_hotbar_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items`, `give_item` |
 | **Container** | `open_container`, `take_from_container`, `put_into_container`, `close_container` |
 | **Combat** | `attack_entity`, `shield_block` |
 | **Chat** | `send_chat`, `execute_command`, `set_game_mode` |
 | **Settings** | `get_settings`, `update_settings`, `connect_bot`, `disconnect_bot` |
-| **Unified** | `act` — one tool that can move, smart-move, fly, mine, attack, or collect items and returns an environment snapshot |
+| **Unified** | `act` — one tool that can move, smart-move, fly, mine, attack, or collect items and returns an environment snapshot. `perception_radius` (0-32, default = configured `block_perception_radius`) bounds the nearby blocks/entities payload — the default radius-32 result is >1 MB, so pass a small radius for iterative loops |
+
+## Hotbar, status & give helpers
+
+- `get_hotbar` — the 9 hotbar slots (0-8) plus `held_item_slot`; empty
+  slots render as `null`. The single explicit view of the slot layout that
+  `set_hotbar_item` / `equip_tool` / `drop_item` operate on.
+- `get_bot_status` — cheap polling endpoint for long-running operations
+  (`fly_to`, mining, `collect_items`): `connected`, `bot_busy`,
+  block + precise position, `yaw`, vitals, and snapshot age. Reads the
+  cached snapshot by default and reports `connected:false` while offline.
+- `give_item` — the smoke-test command fallback packaged as a tool: runs
+  `/give <bot> <item> <count>`, then for `target=hotbar` also
+  `/item replace entity <bot> hotbar.<slot> with <item> <count>` (falling
+  back to the swap-click `set_hotbar_item` move when the server rejects
+  `/item replace`). Requires server commands (OP).
 
 ## Settings & lifecycle tools
 
