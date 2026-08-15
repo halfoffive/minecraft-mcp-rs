@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`act` payload trimming (`perception_radius`):** the unified act tool
+  used to always return nearby blocks/entities at the configured
+  `block_perception_radius` (default 32 — over 1 MB of JSON per call).
+  `ActInput.perception_radius` (0..=32, `None` = configured default) now
+  bounds the payload per call; `0` strips the nearby context entirely.
+  Wired through as `BotCommand::Act(ActAction, Option<u32>)`.
+- **`get_hotbar`:** explicit view of the 9 hotbar slots (0-8, empty slots
+  as `null`) plus `held_item_slot` — the one-place answer to the slot
+  layout that `set_hotbar_item` / `equip_tool` / `drop_item` operate on.
+- **`get_bot_status`:** cheap polling endpoint for long-running operations
+  (`fly_to`, mining, `collect_items`): `connected`, `bot_busy`, block +
+  precise position, `yaw`, vitals, snapshot age. Reads the cached snapshot
+  by default and reports `connected:false` while offline instead of erroring.
+- **`give_item`:** the smoke-test command fallback packaged as a standard
+  tool — `/give <bot> <item> <count>`, then `/item replace entity <bot>
+  hotbar.<slot> with <item> <count>` for `target=hotbar`, falling back to
+  the swap-click `set_hotbar_item` move when the server rejects
+  `/item replace`. Requires server commands (OP).
+- **Smoke-test skill:** `skills/minecraft-mcp-smoke-test/SKILL.md` codifies
+  the full regression chain (connect → query → move → mine/place/use →
+  combat → container → command → chat) with the chat-report protocol
+  (`send_chat("[SMOKE] ...")` per category, `get_chat_history` as the
+  assertion log).
+
+### Changed
+
+- **`smart_move` retries once on transient obstacles:** a first attempt that
+  stops short (pathfinder error or "unreached") is retried once after a short
+  pause before an obstacle is reported; results carry `retried`.
+- **`attack_entity` auto-approaches moving targets:** a target farther than
+  6 blocks is now approached (path to its last known position) and re-checked
+  against a fresh snapshot before attacking, so a moving entity no longer
+  forces a manual `move_to` dance — the caller still gets an honest
+  `TooFar` when the entity keeps moving.
+- **`use_item_on_block` reports the item actually used:** the result message
+  now names the held item (e.g. `water_bucket`), so a wrong-slot
+  interaction is visible instead of silently pouring nothing.
+
 ### Fixed
 
 - **Inventory slot ordering (hotbar) — root cause of 4 broken tools:** azalea's
