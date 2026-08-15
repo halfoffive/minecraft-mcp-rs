@@ -58,8 +58,10 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         | BotCommand::PlaceBlock(pos, _)
         | BotCommand::OpenContainer(pos) => validate_position(pos),
 
-        // UseItemOnBlock additionally takes an optional hotbar slot (0-8).
-        BotCommand::UseItemOnBlock(pos, slot) => {
+        // UseItemOnBlock additionally takes an optional hotbar slot (0-8)
+        // and an optional expected placement position (validated like any
+        // other block position below).
+        BotCommand::UseItemOnBlock(pos, slot, effect_pos) => {
             validate_position(pos)?;
             if let Some(s) = slot
                 && *s > 8
@@ -67,6 +69,9 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
                 return Err(BotError::InvalidParams(format!(
                     "UseItemOnBlock hotbar slot must be 0-8, got {s}"
                 )));
+            }
+            if let Some(effect) = effect_pos {
+                validate_position(effect)?;
             }
             Ok(())
         }
@@ -517,13 +522,13 @@ mod tests {
 
     #[test]
     fn test_use_item_on_block_valid() {
-        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None);
+        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None, None);
         assert!(validate_command(&cmd).is_ok());
     }
 
     #[test]
     fn test_use_item_on_block_invalid_x() {
-        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(30_000_001, 0, 0), None);
+        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(30_000_001, 0, 0), None, None);
         assert!(validate_command(&cmd).is_err());
     }
 
@@ -531,7 +536,7 @@ mod tests {
     fn test_use_item_on_block_valid_slot() {
         // Hotbar slot 0-8 is valid.
         for slot in 0..=8u8 {
-            let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), Some(slot));
+            let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), Some(slot), None);
             assert!(
                 validate_command(&cmd).is_ok(),
                 "UseItemOnBlock slot {slot} should be valid"
@@ -542,10 +547,22 @@ mod tests {
     #[test]
     fn test_use_item_on_block_invalid_slot() {
         // Slot 9 is outside the hotbar range.
-        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), Some(9));
+        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), Some(9), None);
         assert!(validate_command(&cmd).is_err());
         // u8::MAX is far out of range.
-        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), Some(u8::MAX));
+        let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), Some(u8::MAX), None);
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_use_item_on_block_invalid_effect_position() {
+        // The expected placement cell must also be inside world bounds —
+        // previously only the right-clicked block was validated.
+        let cmd = BotCommand::UseItemOnBlock(
+            BlockPos::new(0, 320, 0),
+            None,
+            Some(BlockPos::new(0, 321, 0)),
+        );
         assert!(validate_command(&cmd).is_err());
     }
 
@@ -1084,7 +1101,7 @@ mod tests {
             BotCommand::Teleport(_) => 1,
             BotCommand::BreakBlock(_) => 1,
             BotCommand::PlaceBlock(_, _) => 1,
-            BotCommand::UseItemOnBlock(_, _) => 1,
+            BotCommand::UseItemOnBlock(_, _, _) => 1,
             BotCommand::SwitchHotbarSlot(_) => 1,
             BotCommand::DropItem(_, _) => 1,
             BotCommand::MoveItemToHotbar(_, _, _) => 1,
@@ -1135,7 +1152,7 @@ mod tests {
             BotCommand::Teleport(BlockPos::new(0, 0, 0)),
             BotCommand::BreakBlock(BlockPos::new(0, 0, 0)),
             BotCommand::PlaceBlock(BlockPos::new(0, 0, 0), "stone".into()),
-            BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None),
+            BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None, None),
             BotCommand::SwitchHotbarSlot(0),
             BotCommand::DropItem(0, 1),
             BotCommand::MoveItemToHotbar(0, "dirt".into(), 1),

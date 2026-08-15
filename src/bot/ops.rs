@@ -1089,6 +1089,7 @@ mod tests {
             // Include the chunk so `handle_break_block` considers it loaded.
             chunk_summary: vec![(chunk_x, chunk_z)],
             commands_enabled: None,
+            snapshot_seq: 0,
         }
     }
 
@@ -1780,6 +1781,7 @@ mod tests {
             timestamp: 1,
             chunk_summary: vec![(chunk_x, chunk_z)],
             commands_enabled: None,
+            snapshot_seq: 0,
         };
 
         // Measure just the lookup portion of `execute_mine_block`'s
@@ -1978,6 +1980,7 @@ mod tests {
             timestamp: 1,
             chunk_summary: vec![(0, 0)],
             commands_enabled: None,
+            snapshot_seq: 0,
         };
         let inventory = vec![Some(ItemStack {
             item_id: "stone".into(),

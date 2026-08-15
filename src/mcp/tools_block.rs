@@ -22,7 +22,7 @@ pub const CREATIVE_MODE_HINT: &str =
     "In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
 
 /// Full description for the `break_block` MCP tool.
-pub const BREAK_BLOCK_DESCRIPTION: &str = "Break a block at the given position. If use_best_tool is true, runs the full compound mine flow (tool selection, movement, mining, verification) equivalent to act(Mine). In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
+pub const BREAK_BLOCK_DESCRIPTION: &str = "Break a block at the given position. By default (use_best_tool=true) runs the full compound mine flow (tool selection, movement, mining, verification) equivalent to act(Mine). In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
 
 /// Full description for the `place_block` MCP tool.
 pub const PLACE_BLOCK_DESCRIPTION: &str = "Place a block at the given position. In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
@@ -35,7 +35,19 @@ pub struct BreakBlockInput {
     pub x: i32,
     pub y: i32,
     pub z: i32,
+    /// Run the full compound mine flow (tool selection, movement, mining,
+    /// verification) — equivalent to `act(Mine)`. Defaults to `true` so a
+    /// bare `break_block` call behaves correctly (approaches the block,
+    /// picks the right tool, and verifies the break). Set `false` for the
+    /// raw fire-and-forget break.
+    #[serde(default = "default_true")]
     pub use_best_tool: Option<bool>,
+}
+
+/// Serde default: `use_best_tool` defaults to `true` so direct `break_block`
+/// calls get the reliable compound flow instead of the raw single packet.
+fn default_true() -> Option<bool> {
+    Some(true)
 }
 
 /// Handle `break_block` MCP tool.
@@ -63,8 +75,12 @@ pub async fn handle_break_block(
     }
 
     let pos = BlockPos::new(input.x, input.y, input.z);
-    let cmd = if input.use_best_tool == Some(true) {
-        BotCommand::Act(ActAction::Mine { block_pos: pos }, None)
+    let cmd = if input.use_best_tool.unwrap_or(true) {
+        // perception_radius = Some(0): strip the nearby-blocks/entities
+        // context so the response stays compact; the ActResult still carries
+        // action_result, reason (e.g. ToolNotFound alternatives) and
+        // self_info.position for drift awareness.
+        BotCommand::Act(ActAction::Mine { block_pos: pos }, Some(0))
     } else {
         BotCommand::BreakBlock(pos)
     };
@@ -143,6 +159,54 @@ pub struct UseItemOnBlockInput {
     /// held item.
     #[schemars(range(min = 0, max = 8))]
     pub item_slot: Option<u8>,
+    /// Which face of the target block the item is used on; the placement
+    /// lands in the cell that face opens into (default: "up", i.e. the cell
+    /// above the target — e.g. pour a water bucket at (x, y+1, z) by using
+    /// it on (x, y, z) with face up). One of: up, down, north, south, east,
+    /// west. Only meaningful for placement items (buckets, blocks); other
+    /// items ignore it.
+    pub face: Option<String>,
+}
+
+/// Face direction for `use_item_on_block` — the cell the item's placement
+/// lands in is `target + face_offset`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UseFace {
+    Up,
+    Down,
+    North,
+    South,
+    East,
+    West,
+}
+
+impl UseFace {
+    /// Unit offset of this face: the cell the placement lands in.
+    fn offset(self) -> (i32, i32, i32) {
+        match self {
+            UseFace::Up => (0, 1, 0),
+            UseFace::Down => (0, -1, 0),
+            UseFace::North => (0, 0, -1),
+            UseFace::South => (0, 0, 1),
+            UseFace::East => (1, 0, 0),
+            UseFace::West => (-1, 0, 0),
+        }
+    }
+}
+
+/// Parse the `face` input string (case-insensitive). `None` → `Up`.
+fn parse_use_face(value: Option<&str>) -> Result<UseFace, BotError> {
+    match value.map(str::to_ascii_lowercase).as_deref() {
+        None | Some("up") => Ok(UseFace::Up),
+        Some("down") => Ok(UseFace::Down),
+        Some("north") => Ok(UseFace::North),
+        Some("south") => Ok(UseFace::South),
+        Some("east") => Ok(UseFace::East),
+        Some("west") => Ok(UseFace::West),
+        Some(other) => Err(BotError::InvalidParams(format!(
+            "face must be one of up/down/north/south/east/west, got {other:?}"
+        ))),
+    }
 }
 
 /// Handle `use_item_on_block` MCP tool.
@@ -150,6 +214,13 @@ pub struct UseItemOnBlockInput {
 /// Validates coordinates and optional slot, checks online status, then sends
 /// [`BotCommand::UseItemOnBlock`]. If `item_slot` is provided, the bot
 /// executor should switch to that slot before interacting.
+///
+/// The `face` argument (default `up`) declares which face of the target
+/// block the item is used on. The expected placement cell is
+/// `T = (x,y,z) + face_offset`; because the azalea interaction always
+/// reports an Up face, the executor right-clicks the block below `T` and
+/// verifies `T` turns non-air (server-side confirmation, no more fake
+/// success for water buckets).
 pub async fn handle_use_item_on_block(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
@@ -169,13 +240,29 @@ pub async fn handle_use_item_on_block(
         )));
     }
 
+    // Parse the face and derive the interaction target + expected effect cell.
+    let face = parse_use_face(input.face.as_deref())?;
+    let (fx, fy, fz) = face.offset();
+    let target = BlockPos::new(input.x, input.y, input.z);
+    let effect = BlockPos::new(target.x + fx, target.y + fy, target.z + fz);
+    if let Err(e) = validate_block_pos(&effect) {
+        return Err(BotError::InvalidParams(e));
+    }
+    // azalea's `block_interact` reports a fixed Up face, so the placement
+    // lands one cell above the right-clicked block: right-click the cell
+    // BELOW the expected effect position.
+    let interact_target = BlockPos::new(effect.x, effect.y - 1, effect.z);
+    if let Err(e) = validate_block_pos(&interact_target) {
+        return Err(BotError::InvalidParams(e));
+    }
+
     if !state.is_online() {
         return Err(BotError::Offline(
             "Bot is not connected to a server".to_string(),
         ));
     }
 
-    let cmd = BotCommand::UseItemOnBlock(BlockPos::new(input.x, input.y, input.z), input.item_slot);
+    let cmd = BotCommand::UseItemOnBlock(interact_target, input.item_slot, Some(effect));
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
@@ -441,6 +528,7 @@ mod tests {
             y: 64,
             z: 0,
             item_slot: None,
+            face: None,
         };
         let result = handle_use_item_on_block(&state, &sender, input).await;
         assert!(matches!(result, Err(BotError::Offline(_))));
@@ -455,10 +543,31 @@ mod tests {
             y: 0,
             z: 0,
             item_slot: None,
+            face: None,
         };
         let result = handle_use_item_on_block(&state, &sender, input).await;
         assert!(
             matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("out of bounds") || msg.contains("out of range"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_use_item_on_block_face_up_at_build_limit_rejected() {
+        // face=up at y=320 would place the effect cell at y=321, outside the
+        // build height. This must be rejected before dispatch.
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = UseItemOnBlockInput {
+            x: 0,
+            y: 320,
+            z: 0,
+            item_slot: None,
+            face: Some("up".into()),
+        };
+        let result = handle_use_item_on_block(&state, &sender, input).await;
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("out of bounds") || msg.contains("out of range")),
+            "got: {result:?}"
         );
     }
 
@@ -471,6 +580,7 @@ mod tests {
             y: 64,
             z: 0,
             item_slot: Some(10),
+            face: None,
         };
         let result = handle_use_item_on_block(&state, &sender, input).await;
         assert!(
@@ -487,6 +597,7 @@ mod tests {
             y: 64,
             z: 0,
             item_slot: None,
+            face: None,
         };
         let result = handle_use_item_on_block(&state, &sender, input)
             .await
@@ -496,21 +607,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_use_item_on_block_valid_with_slot() {
-        // Verify the item_slot is propagated as BotCommand::UseItemOnBlock(pos, Some(3)).
+        // Verify item_slot + face(default up) are propagated: the command's
+        // interaction target is the block below the expected effect cell.
         let state = Arc::new(SharedState::new(AppConfig::default()));
         make_online(&state);
         let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
         let expected_pos = BlockPos::new(1, 64, 1);
+        let expected_effect = BlockPos::new(1, 65, 1);
         let responder = tokio::spawn(async move {
             let wrapped = receiver.recv().await.expect("should receive command");
             assert!(
                 matches!(
                     wrapped.command,
-                    BotCommand::UseItemOnBlock(pos, Some(3)) if pos == expected_pos
+                    BotCommand::UseItemOnBlock(pos, Some(3), Some(effect))
+                        if pos == expected_pos && effect == expected_effect
                 ),
-                "expected UseItemOnBlock({:?}, Some(3)), got: {:?}",
+                "expected UseItemOnBlock({:?}, Some(3), Some({:?})), got: {:?}",
                 expected_pos,
+                expected_effect,
                 wrapped.command
             );
             wrapped
@@ -528,6 +643,7 @@ mod tests {
             y: 64,
             z: 1,
             item_slot: Some(3),
+            face: None,
         };
         let result = handle_use_item_on_block(&state, &sender, input)
             .await
@@ -554,6 +670,100 @@ mod tests {
         assert!(
             PLACE_BLOCK_DESCRIPTION.contains(CREATIVE_MODE_HINT),
             "place_block description must contain the Creative-mode hint"
+        );
+    }
+
+    // ── use_item_on_block: face handling ─────────────────────────
+
+    #[test]
+    fn test_parse_use_face_defaults_to_up() {
+        assert_eq!(parse_use_face(None).unwrap(), UseFace::Up);
+        assert_eq!(parse_use_face(Some("up")).unwrap(), UseFace::Up);
+        assert_eq!(parse_use_face(Some("UP")).unwrap(), UseFace::Up);
+    }
+
+    #[test]
+    fn test_parse_use_face_all_directions() {
+        assert_eq!(parse_use_face(Some("down")).unwrap(), UseFace::Down);
+        assert_eq!(parse_use_face(Some("north")).unwrap(), UseFace::North);
+        assert_eq!(parse_use_face(Some("south")).unwrap(), UseFace::South);
+        assert_eq!(parse_use_face(Some("east")).unwrap(), UseFace::East);
+        assert_eq!(parse_use_face(Some("west")).unwrap(), UseFace::West);
+    }
+
+    #[test]
+    fn test_parse_use_face_rejects_unknown() {
+        let err = parse_use_face(Some("sideways")).unwrap_err();
+        assert!(matches!(err, BotError::InvalidParams(_)));
+    }
+
+    #[test]
+    fn test_use_face_offsets() {
+        assert_eq!(UseFace::Up.offset(), (0, 1, 0));
+        assert_eq!(UseFace::Down.offset(), (0, -1, 0));
+        assert_eq!(UseFace::North.offset(), (0, 0, -1));
+        assert_eq!(UseFace::South.offset(), (0, 0, 1));
+        assert_eq!(UseFace::East.offset(), (1, 0, 0));
+        assert_eq!(UseFace::West.offset(), (-1, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn test_use_item_on_block_face_down_targets_cell_below() {
+        // face=down: effect lands at (x, y-1, z); the interaction target is
+        // the cell below that — (x, y-2, z) — because azalea always reports
+        // an Up face.
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        make_online(&state);
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            assert_eq!(
+                wrapped.command,
+                BotCommand::UseItemOnBlock(
+                    BlockPos::new(3, 62, 5),
+                    None,
+                    Some(BlockPos::new(3, 63, 5)),
+                )
+            );
+            wrapped
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .expect("should respond");
+        });
+        let input = UseItemOnBlockInput {
+            x: 3,
+            y: 64,
+            z: 5,
+            item_slot: None,
+            face: Some("down".into()),
+        };
+        handle_use_item_on_block(&state, &sender, input)
+            .await
+            .expect("handler should succeed");
+        // The responder task asserts the dispatched command; wait for it so
+        // assertion failures surface in the test.
+        responder.await.expect("responder task should finish");
+    }
+
+    #[tokio::test]
+    async fn test_use_item_on_block_invalid_face_rejected() {
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = UseItemOnBlockInput {
+            x: 0,
+            y: 64,
+            z: 0,
+            item_slot: None,
+            face: Some("sideways".into()),
+        };
+        let result = handle_use_item_on_block(&state, &sender, input).await;
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("face")),
+            "got: {result:?}"
         );
     }
 }

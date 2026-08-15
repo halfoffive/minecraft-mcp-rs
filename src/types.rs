@@ -148,7 +148,15 @@ pub enum BotCommand {
     ///
     /// The second argument is an optional hotbar slot (0-8) to select before
     /// interacting. `None` keeps the currently held item.
-    UseItemOnBlock(BlockPos, Option<u8>),
+    ///
+    /// The third argument is the expected placement/effect position `T`
+    /// (for fluid buckets / placeable blocks). `Some(T)` makes the executor
+    /// pre-check that T is empty, auto-approach the block when out of
+    /// interaction range, and after interacting poll the snapshot until T
+    /// turns non-air (server-side confirmation) — a timeout yields an
+    /// explicit failure instead of a fake success. `None` keeps the legacy
+    /// fire-and-forget semantics.
+    UseItemOnBlock(BlockPos, Option<u8>, Option<BlockPos>),
     /// Switch to a hotbar slot (0-8).
     SwitchHotbarSlot(u8),
     /// Drop items from a slot.
@@ -291,6 +299,14 @@ pub struct WorldSnapshot {
     /// Not serialized — rebuilt on each snapshot update.
     #[serde(skip)]
     pub block_index: HashMap<BlockPos, usize>,
+    /// Monotonic snapshot revision set by [`SharedState`](crate::state::SharedState)
+    /// every time the snapshot is stored. Used as the `get_world_view` cache
+    /// key instead of the seconds-granularity `timestamp`, which can repeat
+    /// for two consecutive 500 ms snapshot builds within the same second.
+    /// Not serialized — it is an internal cache-invalidation token, not part
+    /// of the MCP JSON contract.
+    #[serde(skip)]
+    pub snapshot_seq: u64,
 }
 
 impl Default for WorldSnapshot {
@@ -314,6 +330,7 @@ impl Default for WorldSnapshot {
             chunk_summary: Vec::new(),
             commands_enabled: None,
             block_index: HashMap::new(),
+            snapshot_seq: 0,
         }
     }
 }
@@ -515,7 +532,7 @@ mod tests {
             BotCommand::Teleport(_) => 1,
             BotCommand::BreakBlock(_) => 1,
             BotCommand::PlaceBlock(_, _) => 1,
-            BotCommand::UseItemOnBlock(_, _) => 1,
+            BotCommand::UseItemOnBlock(_, _, _) => 1,
             BotCommand::SwitchHotbarSlot(_) => 1,
             BotCommand::DropItem(_, _) => 1,
             BotCommand::MoveItemToHotbar(_, _, _) => 1,
@@ -817,7 +834,7 @@ mod tests {
             BotCommand::Teleport(BlockPos::new(0, 0, 0)),
             BotCommand::BreakBlock(BlockPos::new(0, 0, 0)),
             BotCommand::PlaceBlock(BlockPos::new(0, 0, 0), "stone".into()),
-            BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None),
+            BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None, None),
             BotCommand::SwitchHotbarSlot(0),
             BotCommand::DropItem(0, 1),
             BotCommand::MoveItemToHotbar(0, "dirt".into(), 1),

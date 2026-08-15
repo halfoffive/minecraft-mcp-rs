@@ -24,15 +24,25 @@ static INIT: Once = Once::new();
 /// - Filter: respects the `RUST_LOG` environment variable if set; otherwise
 ///   falls back to `minecraft_mcp_rs=debug, azalea=warn` (other crates default
 ///   to error).
+/// - **ANSI colours are ALWAYS on** (like cargo): ERROR renders red, WARN
+///   yellow, INFO green, DEBUG blue. The standard `NO_COLOR` environment
+///   variable disables them for log redirection to files / CI logs.
 /// - Safe to call multiple times — only the first call takes effect.
 pub fn init_logging() {
     INIT.call_once(|| {
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new("minecraft_mcp_rs=debug,azalea=warn"));
 
+        // Cargo-style colouring: ANSI on unless NO_COLOR is set. The
+        // previous default auto-detected the terminal, which silenced
+        // colours when stderr is forwarded through a pipe (e.g. via
+        // `bunx`), so ERROR lines were indistinguishable from INFO.
+        let ansi = std::env::var_os("NO_COLOR").is_none();
+
         tracing_subscriber::fmt()
             .with_writer(std::io::stderr)
             .with_env_filter(filter)
+            .with_ansi(ansi)
             .init();
     });
 }
@@ -89,6 +99,35 @@ mod tests {
         assert!(
             output_str.contains("logging module test message"),
             "Tracing output should contain the logged message, got: {output_str}"
+        );
+    }
+
+    /// Verify that an ANSI-enabled subscriber (as [`init_logging`] builds
+    /// unless `NO_COLOR` is set) actually emits colour escape sequences for
+    /// level names — the `ansi` feature must stay enabled in Cargo.toml,
+    /// otherwise this test fails with plain text output.
+    #[test]
+    fn test_ansi_subscriber_emits_escape_sequences() {
+        let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let buf = buffer.clone();
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || CapturingWriter {
+                buffer: buf.clone(),
+            })
+            .with_env_filter("minecraft_mcp_rs=debug")
+            .with_ansi(true)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!("ansi verification message");
+        });
+
+        let output = buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let output_str = String::from_utf8(output.clone()).expect("valid UTF-8");
+        assert!(
+            output_str.contains("\u{1b}["),
+            "ANSI-enabled output must contain ESC[ colour codes, got: {output_str:?}"
         );
     }
 

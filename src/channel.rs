@@ -62,6 +62,20 @@ impl BotCommandSender {
         Duration::from_secs(self.state.read_config().command_timeout_secs)
     }
 
+    /// The envelope timeout for a specific command: the configured command
+    /// timeout, or the longer fly timeout for `FlyTo` (long flights exceed
+    /// 30 s; `handle_fly_to`'s internal goto uses the same fly timeout, so
+    /// the executor always replies before this envelope fires).
+    fn timeout_for(&self, cmd: &BotCommand) -> Duration {
+        let base = self.timeout();
+        if matches!(cmd, BotCommand::FlyTo(_)) {
+            let fly = Duration::from_secs(self.state.read_config().fly_timeout_secs);
+            std::cmp::max(base, fly)
+        } else {
+            base
+        }
+    }
+
     /// Send a command to the bot and await the response.
     ///
     /// The response timeout is read from the shared
@@ -99,7 +113,8 @@ impl BotCommandSender {
         // Duration (not the raw u64) so sub-second values like
         // `0.2` work — `Duration::from_secs(0)` would otherwise
         // truncate them to zero and the timeout would fire instantly.
-        let timeout_dur = self.timeout();
+        // FlyTo gets its own (longer) envelope timeout.
+        let timeout_dur = self.timeout_for(&cmd_for_log);
         let timeout_secs = timeout_dur.as_secs();
         match timeout(timeout_dur, rx).await {
             Ok(Ok(result)) => {

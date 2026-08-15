@@ -62,6 +62,7 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::ReconnectInitialDelay => "重连初始延迟 (毫秒)：",
         TextKey::ReconnectMaxDelay => "重连最大延迟 (毫秒)：",
         TextKey::CommandTimeout => "命令超时 (秒)：",
+        TextKey::FlyTimeout => "飞行超时 (秒)：",
 
         // ── Connect / Disconnect buttons ───────────────────────────────
         TextKey::Connect => "连接",
@@ -185,6 +186,7 @@ mod tests {
             TextKey::ReconnectInitialDelay,
             TextKey::ReconnectMaxDelay,
             TextKey::CommandTimeout,
+            TextKey::FlyTimeout,
             TextKey::Connect,
             TextKey::Disconnect,
             TextKey::Connected,

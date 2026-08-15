@@ -83,6 +83,7 @@ pub struct EditConfig {
     pub reconnect_initial_delay_ms: u64,
     pub reconnect_max_delay_ms: u64,
     pub command_timeout_secs: u64,
+    pub fly_timeout_secs: u64,
     /// Bearer token presented by MCP clients over HTTP auth.
     pub mcp_token: String,
     /// Require Bearer-token auth for the HTTP transport (mirrors
@@ -109,6 +110,7 @@ impl From<&AppConfig> for EditConfig {
             reconnect_initial_delay_ms: cfg.reconnect_initial_delay_ms,
             reconnect_max_delay_ms: cfg.reconnect_max_delay_ms,
             command_timeout_secs: cfg.command_timeout_secs,
+            fly_timeout_secs: cfg.fly_timeout_secs,
             mcp_token: cfg.mcp_token.clone(),
             mcp_auth_enabled: cfg.mcp_auth_enabled,
             mcp_transport: cfg.mcp_transport,
@@ -141,6 +143,7 @@ impl EditConfig {
         new_config.reconnect_initial_delay_ms = self.reconnect_initial_delay_ms;
         new_config.reconnect_max_delay_ms = self.reconnect_max_delay_ms;
         new_config.command_timeout_secs = self.command_timeout_secs;
+        new_config.fly_timeout_secs = self.fly_timeout_secs;
         new_config.mcp_token = self.mcp_token.clone();
         new_config.mcp_auth_enabled = self.mcp_auth_enabled;
         new_config.mcp_transport = self.mcp_transport;

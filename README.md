@@ -51,9 +51,11 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
   **双语 UI（英文 / 简体中文）** —— 可在运行时通过“设置”面板切换语言；系统会自动检测 CJK 字体，开箱即用即可正常显示中文。
 
 - **Live world state** — the bot periodically snapshots its surroundings into a
-  thread-safe `SharedState` readable by all tools
+  thread-safe `SharedState` readable by all tools; the snapshot keeps only the
+  blocks within `max(chunk_scan_radius, 8)` chunks of the player, so memory
+  stays bounded on long walks
 
-  **实时世界状态** —— 机器人会定期将周围环境快照保存到线程安全的 `SharedState`，所有工具均可读取。
+  **实时世界状态** —— 机器人会定期将周围环境快照保存到线程安全的 `SharedState`，所有工具均可读取；快照只保留玩家周围 `max(chunk_scan_radius, 8)` 个区块内的方块，长途移动时内存保持有界。
 
 - **Remote MCP HTTP server** — loopback-only (`127.0.0.1`), optional
   Bearer-token auth (off by default); transport mode (stdio / HTTP) selectable
@@ -244,7 +246,6 @@ full usage):
 | `--headless` | Run without the desktop window; auto-connect the bot and exit when the MCP transport closes / 无桌面窗口运行；自动连接机器人，MCP 传输关闭时退出进程 |
 | `--gui` | Open the desktop window explicitly / 显式打开桌面窗口 |
 | `--stdio` | Force the MCP stdio transport; implies headless when used alone (overrides the configured transport) / 强制使用 MCP stdio 传输；单独使用时隐含无头模式（覆盖配置中的传输方式） |
-| `--config <path>` | Load the config file at `<path>` instead of the OS config dir / 从指定路径加载配置文件（替代系统配置目录） |
 | `-h`, `--help` | Print usage to stderr and exit / 打印用法到 stderr 并退出 |
 
 With NO arguments the binary prints help and exits; use `--gui` to open the
@@ -370,31 +371,56 @@ settings tools (`get_settings` / `update_settings`).
 | `reconnect_initial_delay_ms` | `5000` | Initial reconnect backoff / 初始重连退避（毫秒） |
 | `reconnect_max_delay_ms` | `60000` | Maximum reconnect backoff / 最大重连退避（毫秒） |
 | `command_timeout_secs` | `30` | Bot command timeout / 机器人命令超时（秒） |
+| `fly_timeout_secs` | `60` | Timeout for long `fly_to` flights / `fly_to` 长距离飞行超时（秒） |
 
 数值型字段均可在 UI 中通过滑块或键盘输入调整；修改后需点击 **Connect** 才会应用到机器人连接。
 
-### Config file persistence / 配置文件持久化
+### Configuration via environment variables / 环境变量配置
 
-Settings are persisted to a `config.json` in the OS config directory and
-reloaded on every startup — file values override defaults:
+Configuration is read **exclusively from environment variables** (12-factor
+style, like cargo) — there is **no config file** anymore. Each setting starts
+from its default and is overridden when the corresponding `MINECRAFT_MCP_*`
+variable is present:
 
-设置会持久化到系统配置目录下的 `config.json`，并在每次启动时重新加载——文件中的值会覆盖默认值：
+配置**完全从环境变量读取**（12-factor 风格，同 cargo）——**不再有配置文件**。每项设置先取默认值，再被对应的 `MINECRAFT_MCP_*` 环境变量覆盖：
 
-| OS / 系统 | Config file path / 配置文件路径 |
-|-----------|----------------------------------|
-| Windows | `%APPDATA%\minecraft-mcp-rs\config.json` |
-| Linux | `~/.config/minecraft-mcp-rs/config.json` |
-| macOS | `~/Library/Application Support/minecraft-mcp-rs/config.json` |
+| Variable / 环境变量 | Field / 字段 | Default / 默认 |
+|--------------------|--------------|----------------|
+| `MINECRAFT_MCP_MC_ADDRESS` | `mc_address` | `127.0.0.1` |
+| `MINECRAFT_MCP_MC_PORT` | `mc_port` | `25565` |
+| `MINECRAFT_MCP_AI_USERNAME` | `ai_username` | `AI_Bot` |
+| `MINECRAFT_MCP_MCP_ADDRESS` | `mcp_address` | `127.0.0.1` |
+| `MINECRAFT_MCP_MCP_PORT` | `mcp_port` | `3000` |
+| `MINECRAFT_MCP_TASK_NAME` | `task_name` | `mining` |
+| `MINECRAFT_MCP_CHUNK_SCAN_RADIUS` | `chunk_scan_radius` | `8` |
+| `MINECRAFT_MCP_BLOCK_PERCEPTION_RADIUS` | `block_perception_radius` | `32` |
+| `MINECRAFT_MCP_SNAPSHOT_INTERVAL_MS` | `snapshot_interval_ms` | `500` |
+| `MINECRAFT_MCP_RECONNECT_INITIAL_DELAY_MS` | `reconnect_initial_delay_ms` | `5000` |
+| `MINECRAFT_MCP_RECONNECT_MAX_DELAY_MS` | `reconnect_max_delay_ms` | `60000` |
+| `MINECRAFT_MCP_COMMAND_TIMEOUT_SECS` | `command_timeout_secs` | `30` |
+| `MINECRAFT_MCP_FLY_TIMEOUT_SECS` | `fly_timeout_secs` | `60` |
+| `MINECRAFT_MCP_TOKEN` | `mcp_token` | random UUID v4 / 随机 UUID v4 |
+| `MINECRAFT_MCP_AUTH_ENABLED` | `mcp_auth_enabled` | `false` |
+| `MINECRAFT_MCP_TRANSPORT` | `mcp_transport` | `http` |
+| `MINECRAFT_MCP_LANGUAGE` | `language` | system locale / 系统语言 |
 
-The `mcp_token` is persisted too (write is atomic: temp file + rename, `0600`
-on Unix). After upgrading, HTTP auth is off by default even for configs that
-contain a token. An agent can also change any setting — including the Minecraft
-server — through the MCP settings tools; changing
-`mc_address`/`mc_port`/`ai_username` while connected triggers an automatic
-reconnect, while `mcp_transport`/`mcp_address`/`mcp_port` take effect on the
-next process restart.
+Malformed variable values log a warning and keep the default — startup never
+fails because of an environment typo. Semantically invalid values that parse
+but would wedge the runtime (`0` for ports/durations, out-of-range radii) are
+also rejected per-field with a warning and the default is kept, followed by a
+final full-config validation gate. `MINECRAFT_MCP_TOKEN` is the ONLY way to
+pin the MCP bearer token; without it a fresh random UUID is generated per
+process start.
 
-`mcp_token` 也会被持久化（原子写入：临时文件 + 重命名，Unix 下权限为 `0600`）。升级后，即使配置文件中包含 Token，HTTP 鉴权默认也是关闭的。AI 代理还可以通过 MCP 设置工具修改任意设置——包括 Minecraft 服务器地址；已连接时修改 `mc_address`/`mc_port`/`ai_username` 会自动触发重连，而 `mcp_transport`/`mcp_address`/`mcp_port` 的变更在下次进程重启时生效。
+非法环境变量值只会记录警告并保留默认值——不会因环境变量拼写错误而启动失败。能解析但语义非法的值（端口/时长/半径等为 `0` 或越界）也会按字段警告并回退默认值，随后再做一次全配置校验兜底。`MINECRAFT_MCP_TOKEN` 是固定 MCP Bearer Token 的唯一途径；未设置时每次启动都会生成新的随机 UUID。
+
+Runtime changes (UI settings panel, `update_settings` MCP tool) apply to the
+running process only — restart with the environment variables to persist them.
+Changing `mc_address`/`mc_port`/`ai_username` while connected triggers an
+automatic reconnect, while `mcp_transport`/`mcp_address`/`mcp_port` take
+effect on the next process restart.
+
+运行时修改（UI 设置面板、`update_settings` MCP 工具）仅对当前进程生效——如需持久化，请在重启时通过环境变量配置。已连接时修改 `mc_address`/`mc_port`/`ai_username` 会自动触发重连，而 `mcp_transport`/`mcp_address`/`mcp_port` 的变更在下次进程重启时生效。
 
 ### Error contract / 错误契约
 

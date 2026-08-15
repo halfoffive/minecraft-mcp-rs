@@ -6,8 +6,9 @@
 //! address before the first connect):
 //!
 //! - `get_settings` — current config (token redacted) + runtime status.
-//! - `update_settings` — partial config update; validated, persisted to the
-//!   config file FIRST, then applied in memory. Changing
+//! - `update_settings` — partial config update; validated, then applied in
+//!   memory (no file persistence — `MINECRAFT_MCP_*` env vars are the
+//!   configuration source). Changing
 //!   `mc_address`/`mc_port`/`ai_username` triggers a reconnect when the bot
 //!   is online/connecting; `mcp_transport`/`mcp_address`/`mcp_port` take
 //!   effect on process restart.
@@ -50,6 +51,7 @@ struct SettingsView {
     reconnect_initial_delay_ms: u64,
     reconnect_max_delay_ms: u64,
     command_timeout_secs: u64,
+    fly_timeout_secs: u64,
     mcp_token: String,
     mcp_transport: String,
     mcp_auth_enabled: bool,
@@ -71,8 +73,7 @@ fn mcp_server_status_string(status: McpServerStatus) -> String {
 ///
 /// Returns pretty-printed JSON with the full configuration (the MCP token
 /// always redacted to `"***"`) plus a runtime block: `online`,
-/// `connecting`, `mcp_server_status`, and `config_path` (null when the OS
-/// exposes no config directory). Works offline.
+/// `connecting` and `mcp_server_status`. Works offline.
 pub fn get_settings(state: &Arc<SharedState>) -> Result<String, BotError> {
     let config = state.read_config().clone();
     let view = SettingsView {
@@ -88,6 +89,7 @@ pub fn get_settings(state: &Arc<SharedState>) -> Result<String, BotError> {
         reconnect_initial_delay_ms: config.reconnect_initial_delay_ms,
         reconnect_max_delay_ms: config.reconnect_max_delay_ms,
         command_timeout_secs: config.command_timeout_secs,
+        fly_timeout_secs: config.fly_timeout_secs,
         // NEVER expose the real token on a public surface.
         mcp_token: "***".to_string(),
         mcp_transport: transport_to_str(config.mcp_transport).to_string(),
@@ -106,13 +108,6 @@ pub fn get_settings(state: &Arc<SharedState>) -> Result<String, BotError> {
         "mcp_server_status".into(),
         json!(mcp_server_status_string(state.get_mcp_server_status())),
     );
-    obj.insert(
-        "config_path".into(),
-        match crate::config::config_path() {
-            Some(path) => json!(path.display().to_string()),
-            None => json!(null),
-        },
-    );
 
     serde_json::to_string_pretty(&value)
         .map_err(|e| BotError::Internal(format!("failed to serialize settings: {e}")))
@@ -123,8 +118,9 @@ pub fn get_settings(state: &Arc<SharedState>) -> Result<String, BotError> {
 /// Input for the `update_settings` MCP tool.
 ///
 /// All fields are optional — only the provided fields change (partial
-/// update). Values are validated via [`AppConfig::validate`] and persisted
-/// to the config file before being applied in memory.
+/// update). Values are validated via [`AppConfig::validate`] and applied in
+/// memory for the running process only — restart with `MINECRAFT_MCP_*`
+/// environment variables to persist across restarts.
 #[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct UpdateSettingsInput {
     /// Minecraft server address the bot connects to.
@@ -157,8 +153,13 @@ pub struct UpdateSettingsInput {
     /// Timeout for bot commands in seconds (> 0).
     #[schemars(range(min = 1))]
     pub command_timeout_secs: Option<u64>,
+    /// Timeout for `fly_to` long-distance flights in seconds (> 0, default
+    /// 60). Independent of `command_timeout_secs` so long flights can
+    /// breathe.
+    #[schemars(range(min = 1))]
+    pub fly_timeout_secs: Option<u64>,
     /// Bearer token MCP clients must present over HTTP. Redacted in every
-    /// tool response; persisted to the config file.
+    /// tool response; never persisted anywhere.
     pub mcp_token: Option<String>,
     /// MCP transport: "stdio" or "http". Takes effect on process restart.
     pub mcp_transport: Option<String>,
@@ -213,28 +214,14 @@ fn language_to_str(language: Language) -> &'static str {
 /// Handle the `update_settings` MCP tool.
 ///
 /// Partial update: only the provided fields change. The candidate config is
-/// validated ([`AppConfig::validate`]) and persisted to the config file
-/// BEFORE being applied in memory — a persistence failure leaves the
-/// running config untouched. Changing `mc_address`/`mc_port`/`ai_username`
-/// triggers a bot reconnect when connected/connecting; changes to
+/// validated ([`AppConfig::validate`]) and applied in memory (no file
+/// persistence). Changing `mc_address`/`mc_port`/`ai_username` triggers a
+/// bot reconnect when connected/connecting; changes to
 /// `mcp_transport`/`mcp_address`/`mcp_port` take effect on process restart.
 /// Works offline.
 pub fn update_settings(
     state: &Arc<SharedState>,
     input: UpdateSettingsInput,
-) -> Result<String, BotError> {
-    update_settings_with_path(state, input, None)
-}
-
-/// Path-parameterised implementation of [`update_settings`].
-///
-/// Production always passes `None` (the default [`crate::config::config_path`]);
-/// tests point this at a temp or impossible path to exercise the persist
-/// success/failure branches.
-pub(crate) fn update_settings_with_path(
-    state: &Arc<SharedState>,
-    input: UpdateSettingsInput,
-    path: Option<&std::path::Path>,
 ) -> Result<String, BotError> {
     let old = state.read_config().clone();
     let mut candidate = old.clone();
@@ -312,6 +299,12 @@ pub(crate) fn update_settings_with_path(
         candidate.command_timeout_secs = v;
         applied.insert("command_timeout_secs".into(), json!(v));
     }
+    if let Some(v) = input.fly_timeout_secs
+        && v != candidate.fly_timeout_secs
+    {
+        candidate.fly_timeout_secs = v;
+        applied.insert("fly_timeout_secs".into(), json!(v));
+    }
     if let Some(v) = input.mcp_token
         && v != candidate.mcp_token
     {
@@ -347,11 +340,8 @@ pub(crate) fn update_settings_with_path(
 
     candidate.validate().map_err(BotError::InvalidParams)?;
 
-    // Persist FIRST: if the write fails the in-memory config must stay
-    // untouched so disk and memory can never diverge.
-    if let Err(e) = candidate.save_to_disk(path) {
-        return Err(BotError::Internal(format!("failed to persist config: {e}")));
-    }
+    // No file persistence: `MINECRAFT_MCP_*` environment variables are the
+    // configuration source, so runtime updates live in memory only.
 
     state.update_config(|cfg| *cfg = candidate.clone());
 
@@ -381,7 +371,6 @@ pub(crate) fn update_settings_with_path(
 
     let mut response = serde_json::Map::new();
     response.insert("applied".into(), json!(applied));
-    response.insert("persisted".into(), json!(true));
     response.insert("reconnect_triggered".into(), json!(reconnect_triggered));
     if transport_restart_fields_changed {
         response.insert(
@@ -457,18 +446,6 @@ mod tests {
         Arc::new(state)
     }
 
-    /// Unique temp config path for persist tests (save_to_disk creates the
-    /// parent directories). The directory is keyed by label + pid so each
-    /// test owns its directory — cleanup never races parallel tests.
-    fn temp_config_path(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir()
-            .join(format!(
-                "minecraft-mcp-rs-t12-{label}-{}",
-                std::process::id()
-            ))
-            .join("config.json")
-    }
-
     // -- get_settings ---------------------------------------------------------
 
     #[test]
@@ -488,7 +465,6 @@ mod tests {
         assert!(result.contains("\"online\": false"));
         assert!(result.contains("\"connecting\": false"));
         assert!(result.contains("\"mcp_server_status\""));
-        assert!(result.contains("\"config_path\""));
     }
 
     #[test]
@@ -564,14 +540,12 @@ mod tests {
     #[test]
     fn test_update_settings_partial_update_preserves_other_fields() {
         let state = state_with_known_token();
-        let path = temp_config_path("partial");
         let input = UpdateSettingsInput {
             task_name: Some("diamond-mining".into()),
             ..Default::default()
         };
 
-        let result =
-            update_settings_with_path(&state, input, Some(&path)).expect("update should succeed");
+        let result = update_settings(&state, input).expect("update should succeed");
 
         let config = state.read_config().clone();
         assert_eq!(config.task_name, "diamond-mining");
@@ -582,7 +556,6 @@ mod tests {
 
         // Response shape: only the changed field in `applied`.
         let value: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(value["persisted"], json!(true));
         assert_eq!(value["reconnect_triggered"], json!(false));
         let applied = value["applied"].as_object().unwrap();
         assert_eq!(applied.len(), 1);
@@ -592,36 +565,28 @@ mod tests {
         // The token is NOT re-exposed through `applied`.
         assert!(!result.contains("super-secret-token-12345"));
 
-        // Persisted to disk: loading the same path round-trips the change.
-        let loaded = AppConfig::load_from_disk(Some(&path));
-        assert_eq!(loaded.task_name, "diamond-mining");
-        assert_eq!(loaded.mcp_token, "super-secret-token-12345");
-
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        // The update is memory-only: no file is ever written (the env-var
+        // config source has no file I/O by construction).
     }
 
     #[test]
     fn test_update_settings_same_value_not_in_applied() {
         let state = state_with_known_token();
-        let path = temp_config_path("same-value");
         let input = UpdateSettingsInput {
             mc_port: Some(AppConfig::default().mc_port),
             ..Default::default()
         };
-        let result =
-            update_settings_with_path(&state, input, Some(&path)).expect("update should succeed");
+        let result = update_settings(&state, input).expect("update should succeed");
         let value: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(
             value["applied"].as_object().unwrap().is_empty(),
             "unchanged values must not appear in applied: {result}"
         );
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
-    fn test_update_settings_auth_enabled_toggles_and_persists() {
+    fn test_update_settings_auth_enabled_toggles() {
         let state = state_with_known_token();
-        let path = temp_config_path("auth-enable");
         // Force a known starting value so the toggle is a real change.
         state.update_config(|cfg| cfg.mcp_auth_enabled = false);
         let input = UpdateSettingsInput {
@@ -629,8 +594,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            update_settings_with_path(&state, input, Some(&path)).expect("update should succeed");
+        let result = update_settings(&state, input).expect("update should succeed");
 
         // In-memory value applied.
         assert!(state.read_config().mcp_auth_enabled);
@@ -643,18 +607,11 @@ mod tests {
             value.get("note").is_none(),
             "auth toggle must not carry a restart note: {result}"
         );
-
-        // Persisted to disk: loading the same path round-trips the change.
-        let loaded = AppConfig::load_from_disk(Some(&path));
-        assert!(loaded.mcp_auth_enabled);
-
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
     fn test_update_settings_auth_enabled_same_value_not_applied() {
         let state = state_with_known_token();
-        let path = temp_config_path("auth-same");
         // Default is false — setting false again must be a no-op.
         state.update_config(|cfg| cfg.mcp_auth_enabled = false);
         let input = UpdateSettingsInput {
@@ -662,14 +619,12 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            update_settings_with_path(&state, input, Some(&path)).expect("update should succeed");
+        let result = update_settings(&state, input).expect("update should succeed");
         let value: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert!(
             value["applied"].as_object().unwrap().is_empty(),
             "unchanged auth value must not appear in applied: {result}"
         );
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     // -- update_settings: reconnect semantics ---------------------------------
@@ -678,14 +633,12 @@ mod tests {
     fn test_update_settings_connection_change_while_online_sets_restart() {
         let state = state_with_known_token();
         state.set_online(true);
-        let path = temp_config_path("online-restart");
         let input = UpdateSettingsInput {
             mc_address: Some("play.example.com".into()),
             ..Default::default()
         };
 
-        let result =
-            update_settings_with_path(&state, input, Some(&path)).expect("update should succeed");
+        let result = update_settings(&state, input).expect("update should succeed");
         let value: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(value["reconnect_triggered"], json!(true));
 
@@ -694,21 +647,17 @@ mod tests {
         assert!(!state.take_config_restart(), "flag must be single-shot");
         assert!(state.is_disconnect_requested());
         assert_eq!(state.read_config().mc_address, "play.example.com");
-
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
     fn test_update_settings_connection_change_while_offline_no_disconnect() {
         let state = state_with_known_token();
-        let path = temp_config_path("offline-restart");
         let input = UpdateSettingsInput {
             mc_port: Some(25566),
             ..Default::default()
         };
 
-        let result =
-            update_settings_with_path(&state, input, Some(&path)).expect("update should succeed");
+        let result = update_settings(&state, input).expect("update should succeed");
         let value: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(
             value["reconnect_triggered"],
@@ -720,22 +669,18 @@ mod tests {
         // disconnect is requested.
         assert!(state.take_config_restart());
         assert!(!state.is_disconnect_requested());
-
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
     fn test_update_settings_transport_change_includes_note() {
         let state = state_with_known_token();
         // Default transport is Http → switching to stdio is a change.
-        let path = temp_config_path("transport-note");
         let input = UpdateSettingsInput {
             mcp_transport: Some("stdio".into()),
             ..Default::default()
         };
 
-        let result =
-            update_settings_with_path(&state, input, Some(&path)).expect("update should succeed");
+        let result = update_settings(&state, input).expect("update should succeed");
         let value: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(value["applied"]["mcp_transport"], json!("stdio"));
         assert!(
@@ -745,8 +690,6 @@ mod tests {
             "transport change must carry the restart note: {result}"
         );
         assert_eq!(state.read_config().mcp_transport, McpTransport::Stdio);
-
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
@@ -755,14 +698,12 @@ mod tests {
         // Force a known starting language — the default follows the system
         // locale (which may already be zh_cn on this machine).
         state.update_config(|cfg| cfg.language = Language::En);
-        let path = temp_config_path("language");
         let input = UpdateSettingsInput {
             language: Some("zh_cn".into()),
             ..Default::default()
         };
 
-        let result =
-            update_settings_with_path(&state, input, Some(&path)).expect("update should succeed");
+        let result = update_settings(&state, input).expect("update should succeed");
         let value: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(value["applied"]["language"], json!("zh_cn"));
         assert_eq!(state.read_config().language, Language::ZhCn);
@@ -770,41 +711,6 @@ mod tests {
 
         // Restore the global i18n state for other tests.
         crate::i18n::set(Language::En);
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    // -- update_settings: persistence failure ----------------------------------
-
-    #[test]
-    fn test_update_settings_persist_failure_keeps_memory_untouched() {
-        let state = state_with_known_token();
-        // Create a regular FILE, then use it as the config's parent
-        // directory — create_dir_all fails on a path whose ancestor is a
-        // file, so save_to_disk returns Err.
-        let base =
-            std::env::temp_dir().join(format!("minecraft-mcp-rs-t12-fail-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        let file_as_dir = base.join("not-a-directory");
-        std::fs::write(&file_as_dir, "blocker").unwrap();
-        let impossible = file_as_dir.join("config.json");
-
-        let input = UpdateSettingsInput {
-            task_name: Some("should-not-apply".into()),
-            ..Default::default()
-        };
-        let result = update_settings_with_path(&state, input, Some(&impossible));
-        assert!(
-            matches!(&result, Err(BotError::Internal(msg)) if msg.contains("failed to persist")),
-            "got: {result:?}"
-        );
-        // In-memory config untouched — the failed persist must not leak.
-        assert_eq!(
-            state.read_config().task_name,
-            AppConfig::default().task_name
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     // -- connect_bot / disconnect_bot ------------------------------------------

@@ -133,6 +133,23 @@ pub struct NearbyBlocksInput {
     /// Optional case-insensitive substring filter on block_type. If None or
     /// empty, all block types are returned.
     pub filter_type: Option<String>,
+    /// Top-only mode: return only the highest NON-AIR block of each (x, z)
+    /// column. Surface-oriented tasks (pathfinding, base building) should
+    /// pass true — a flat world at radius 16 collapses from ~340 KB of
+    /// stacked layers to a single surface layer.
+    #[serde(default)]
+    pub top_only: bool,
+    /// Maximum number of blocks to return. The response reports
+    /// `truncated: true` when the match count exceeds this cap (default 500).
+    #[serde(default = "default_max_blocks")]
+    #[schemars(range(min = 1, max = 10000))]
+    pub max_blocks: u32,
+}
+
+/// Serde default: cap the response at 500 blocks so a large radius can
+/// never flood the LLM context (the historical 340 KB response).
+fn default_max_blocks() -> u32 {
+    500
 }
 
 /// Input for the `get_nearby_entities` MCP tool.
@@ -148,14 +165,28 @@ pub struct NearbyEntitiesInput {
 /// If `filter_type` is `Some(ft)` and non-empty, only blocks whose
 /// `block_type` contains `ft` (case-insensitive substring match) are
 /// included.
+///
+/// `top_only` collapses each (x, z) column to its highest NON-AIR block;
+/// `max_blocks` caps the response (with `truncated: true` reported when the
+/// cap is hit) so a large radius can never flood the LLM context.
+///
+/// The response is an object: `{blocks, count, total_matched, truncated,
+/// top_only}`.
 pub fn get_nearby_blocks(
     state: &Arc<SharedState>,
     radius: u32,
     filter_type: Option<String>,
+    top_only: bool,
+    max_blocks: u32,
 ) -> Result<String, BotError> {
     if !(1..=100).contains(&radius) {
         return Err(BotError::InvalidParams(format!(
             "radius must be in range 1..=100, got {radius}"
+        )));
+    }
+    if !(1..=10000).contains(&max_blocks) {
+        return Err(BotError::InvalidParams(format!(
+            "max_blocks must be in range 1..=10000, got {max_blocks}"
         )));
     }
     if !state.is_online() {
@@ -174,7 +205,7 @@ pub fn get_nearby_blocks(
         .filter(|ft| !ft.is_empty())
         .map(|ft| ft.to_lowercase());
 
-    let blocks: Vec<&crate::types::BlockEntry> = snapshot
+    let mut matched: Vec<&crate::types::BlockEntry> = snapshot
         .blocks
         .iter()
         .filter(|b| {
@@ -188,7 +219,38 @@ pub fn get_nearby_blocks(
         })
         .collect();
 
-    serde_json::to_string(&blocks)
+    let total_matched = matched.len();
+
+    if top_only {
+        // Group by (x, z) and keep the entry with the greatest y.
+        // `dedup_by` keeps the FIRST of each run, so sort with the highest
+        // y first (Reverse) — the survivor of each column is its top block.
+        matched.sort_by(|a, b| {
+            (a.position.x, a.position.z, std::cmp::Reverse(a.position.y)).cmp(&(
+                b.position.x,
+                b.position.z,
+                std::cmp::Reverse(b.position.y),
+            ))
+        });
+        matched.dedup_by(|a, b| a.position.x == b.position.x && a.position.z == b.position.z);
+    }
+
+    // Cap the response; report truncation honestly so the caller can shrink
+    // the radius / add a filter instead of reasoning about a partial list
+    // that looks complete.
+    let truncated = matched.len() > max_blocks as usize;
+    if truncated {
+        matched.truncate(max_blocks as usize);
+    }
+
+    let response = serde_json::json!({
+        "blocks": matched,
+        "count": matched.len(),
+        "total_matched": total_matched,
+        "truncated": truncated,
+        "top_only": top_only,
+    });
+    serde_json::to_string(&response)
         .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
 }
 
@@ -480,14 +542,18 @@ pub fn get_world_view(
 
     let snapshot = state.read_snapshot();
     let snapshot_ts = snapshot.timestamp;
+    let snapshot_seq = snapshot.snapshot_seq;
 
-    // Cache hit: same timestamp + radius + scale → return cached bytes.
+    // Cache hit: same snapshot revision + radius + scale → return cached
+    // bytes. `timestamp` alone is seconds-granularity and can repeat for two
+    // consecutive 500 ms snapshot builds; `snapshot_seq` is monotonic.
     if let Some(cache) = state.get_world_view_cache()
-        && cache.snapshot_timestamp == snapshot_ts
+        && cache.snapshot_seq == snapshot_seq
         && cache.radius == radius
         && cache.scale == scale
     {
         tracing::trace!(
+            snapshot_seq,
             snapshot_ts,
             radius,
             scale,
@@ -501,6 +567,7 @@ pub fn get_world_view(
 
     // Cache miss: re-render.
     tracing::debug!(
+        snapshot_seq,
         snapshot_ts,
         radius,
         scale,
@@ -535,7 +602,7 @@ pub fn get_world_view(
 
     // Store in cache for the next call.
     state.set_world_view_cache(crate::state::WorldViewCache {
-        snapshot_timestamp: snapshot_ts,
+        snapshot_seq,
         radius,
         scale,
         png_base64: encoded.clone(),
@@ -767,7 +834,7 @@ mod tests {
     #[test]
     fn test_get_nearby_blocks_radius_1() {
         let state = state_with_snapshot();
-        let result = get_nearby_blocks(&state, 1, None).unwrap();
+        let result = get_nearby_blocks(&state, 1, None, false, 500).unwrap();
         // Within radius 1 of (0,64,0): stone at (0,64,0), dirt at (0,65,0)
         assert!(result.contains("stone"));
         assert!(result.contains("dirt"));
@@ -778,7 +845,7 @@ mod tests {
     #[test]
     fn test_get_nearby_blocks_filter() {
         let state = state_with_snapshot();
-        let result = get_nearby_blocks(&state, 1, Some("stone".into())).unwrap();
+        let result = get_nearby_blocks(&state, 1, Some("stone".into()), false, 500).unwrap();
         assert!(result.contains("stone"));
         assert!(!result.contains("dirt"));
     }
@@ -786,7 +853,7 @@ mod tests {
     #[test]
     fn test_get_nearby_blocks_empty_filter_acts_as_none() {
         let state = state_with_snapshot();
-        let result = get_nearby_blocks(&state, 1, Some("".into())).unwrap();
+        let result = get_nearby_blocks(&state, 1, Some("".into()), false, 500).unwrap();
         assert!(result.contains("stone"));
         assert!(result.contains("dirt"));
     }
@@ -794,8 +861,69 @@ mod tests {
     #[test]
     fn test_get_nearby_blocks_offline() {
         let state = offline_state();
-        let result = get_nearby_blocks(&state, 5, None);
+        let result = get_nearby_blocks(&state, 5, None, false, 500);
         assert!(matches!(result, Err(BotError::Offline(_))));
+    }
+
+    #[test]
+    fn test_get_nearby_blocks_top_only_keeps_highest_of_column() {
+        // Column (0,0) holds stone at y=64 and dirt at y=65; top_only must
+        // return only the highest (dirt).
+        let state = state_with_snapshot();
+        let result = get_nearby_blocks(&state, 1, None, true, 500).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["top_only"], json!(true));
+        assert_eq!(v["truncated"], json!(false));
+        let blocks = v["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1, "one column, one top block: {result}");
+        let b = &blocks[0];
+        assert_eq!(b["block_type"], json!("dirt"));
+        assert!(b["position"]["y"] == json!(65));
+    }
+
+    #[test]
+    fn test_get_nearby_blocks_max_blocks_truncates_and_flags() {
+        let state = state_with_snapshot();
+        let result = get_nearby_blocks(&state, 100, None, false, 1).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["truncated"], json!(true), "got: {result}");
+        assert_eq!(v["count"], json!(1));
+        assert_eq!(
+            v["total_matched"],
+            json!(3),
+            "all 3 blocks matched before the cap"
+        );
+    }
+
+    #[test]
+    fn test_get_nearby_blocks_invalid_max_blocks_rejected() {
+        let state = state_with_snapshot();
+        let result = get_nearby_blocks(&state, 5, None, false, 0);
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("max_blocks")),
+            "expected InvalidParams for max_blocks=0, got: {result:?}"
+        );
+        let result = get_nearby_blocks(&state, 5, None, false, 10001);
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("max_blocks")),
+            "expected InvalidParams for max_blocks=10001, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_get_nearby_blocks_response_shape() {
+        let state = state_with_snapshot();
+        let result = get_nearby_blocks(&state, 1, None, false, 500).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(
+            v.get("blocks").is_some(),
+            "response must be an object with blocks"
+        );
+        assert!(v.get("count").is_some());
+        assert!(v.get("total_matched").is_some());
+        assert!(v.get("truncated").is_some());
+        assert!(v.get("top_only").is_some());
+        assert_eq!(v["truncated"], json!(false));
     }
 
     // -- get_nearby_entities ---------------------------------------------------
@@ -1150,6 +1278,38 @@ mod tests {
         );
     }
 
+    /// A new snapshot revision with the SAME seconds-granularity timestamp
+    /// must also invalidate the cache. This is the regression test for the
+    /// 500 ms-snapshot / 1 s-timestamp collision: two consecutive builds can
+    /// share a timestamp, but `snapshot_seq` is monotonic and must be the
+    /// cache key.
+    #[test]
+    fn test_get_world_view_cache_invalidates_on_snapshot_seq_change() {
+        let state = state_with_snapshot();
+        let first = get_world_view(&state, 4, 1).unwrap();
+        let first_ts = match &first[1].raw {
+            rmcp::model::RawContent::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t.text).unwrap();
+                v["snapshot_timestamp"].as_u64().unwrap()
+            }
+            _ => panic!("expected text"),
+        };
+        let first_seq = state.get_world_view_cache().unwrap().snapshot_seq;
+
+        // Update the snapshot but keep the SAME timestamp.
+        let mut snap = state.read_snapshot().as_ref().clone();
+        snap.timestamp = first_ts;
+        state.update_snapshot(snap);
+
+        let second = get_world_view(&state, 4, 1).unwrap();
+        let second_seq = state.get_world_view_cache().unwrap().snapshot_seq;
+        assert_ne!(
+            first_seq, second_seq,
+            "same-timestamp snapshot update must invalidate the cache"
+        );
+        assert_eq!(second.len(), 2);
+    }
+
     /// A snapshot update (new timestamp) should invalidate the cache —
     /// the second call should re-render with the new timestamp.
     #[test]
@@ -1232,7 +1392,7 @@ mod tests {
         let state = state_with_snapshot();
         // u32::MAX is rejected by runtime bounds check instead of being
         // silently clamped (and potentially wrapping via `as i32`).
-        let result = get_nearby_blocks(&state, u32::MAX, None);
+        let result = get_nearby_blocks(&state, u32::MAX, None, false, 500);
         assert!(
             result.is_err(),
             "u32::MAX must be rejected by radius validation, got: {result:?}"
