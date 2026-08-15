@@ -45,16 +45,25 @@ fn main() {
     tracing::info!("Minecraft MCP server starting");
 
     // ══════════════════════════════════════════════════════════════════
-    // Parse CLI arguments. Help prints to stderr and exits 0; a parse
-    // error prints to stderr and exits 2 (stdout stays clean for the MCP
-    // transport either way). No arguments (or `--help`) resolves to
+    // Parse CLI arguments with clap. Help/version print to stderr and
+    // exit 0; a usage error prints to stderr and exits 2 (stdout stays
+    // clean for the MCP transport either way). No arguments resolves to
     // `RunMode::Help` — print usage and exit; otherwise `--gui` → GUI,
     // `--headless`/`--stdio` → headless.
     // ══════════════════════════════════════════════════════════════════
-    let args = match minecraft_mcp_rs::cli::parse_cli_args(std::env::args().skip(1)) {
+    let args = match minecraft_mcp_rs::cli::parse_cli_args() {
         Ok(args) => args,
+        Err(e)
+            if matches!(
+                e.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) =>
+        {
+            eprint!("{e}");
+            return;
+        }
         Err(e) => {
-            eprintln!("{e}");
+            eprint!("{e}");
             std::process::exit(2);
         }
     };
