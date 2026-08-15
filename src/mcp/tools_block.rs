@@ -64,7 +64,7 @@ pub async fn handle_break_block(
 
     let pos = BlockPos::new(input.x, input.y, input.z);
     let cmd = if input.use_best_tool == Some(true) {
-        BotCommand::Act(ActAction::Mine { block_pos: pos })
+        BotCommand::Act(ActAction::Mine { block_pos: pos }, None)
     } else {
         BotCommand::BreakBlock(pos)
     };
@@ -278,7 +278,7 @@ mod tests {
             assert!(
                 matches!(
                     wrapped.command,
-                    BotCommand::Act(ActAction::Mine { block_pos })
+                    BotCommand::Act(ActAction::Mine { block_pos }, _)
                         if block_pos == BlockPos::new(10, 64, -5)
                 ),
                 "expected Act(Mine) for use_best_tool=true, got: {:?}",

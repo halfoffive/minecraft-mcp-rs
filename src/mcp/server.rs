@@ -37,15 +37,15 @@ use crate::mcp::tools_container::{
     CloseContainerInput, OpenContainerInput, PutIntoContainerInput, TakeFromContainerInput,
 };
 use crate::mcp::tools_item::{
-    CollectItemsInput, DropItemInput, EquipToolInput, SetHotbarItemInput, SwitchHotbarSlotInput,
-    UseItemInput,
+    CollectItemsInput, DropItemInput, EquipToolInput, GiveItemInput, SetHotbarItemInput,
+    SwitchHotbarSlotInput, UseItemInput,
 };
 use crate::mcp::tools_movement::{
     FlyToInput, JumpInput, MoveToInput, SmartMoveInput, TeleportInput, WalkDirectionInput,
 };
 use crate::mcp::tools_query::{
-    GetWorldViewInput, InventoryInput, NearbyBlocksInput, NearbyEntitiesInput, SelfInfoInput,
-    ServerInfoInput,
+    BotStatusInput, GetWorldViewInput, HotbarInput, InventoryInput, NearbyBlocksInput,
+    NearbyEntitiesInput, SelfInfoInput, ServerInfoInput,
 };
 use crate::mcp::tools_settings::UpdateSettingsInput;
 use crate::state::{McpServerStatus, SharedState};
@@ -81,7 +81,7 @@ impl McpBotServer {
 }
 
 // ---------------------------------------------------------------------------
-// Tool Router — 26 MCP tool stubs
+// Tool Router — 29 MCP tool stubs
 // ---------------------------------------------------------------------------
 
 #[tool_router]
@@ -108,6 +108,28 @@ impl McpBotServer {
         Parameters(input): Parameters<InventoryInput>,
     ) -> Result<String, BotError> {
         crate::mcp::tools_query::get_inventory(&self.state, input).await
+    }
+
+    #[tool(
+        description = "Get the bot's 9 hotbar slots (0-8). Occupied slots carry slot/item_id/count; empty slots are null. Also returns the currently selected held_item_slot.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_hotbar(
+        &self,
+        Parameters(input): Parameters<HotbarInput>,
+    ) -> Result<String, BotError> {
+        crate::mcp::tools_query::get_hotbar(&self.state, input).await
+    }
+
+    #[tool(
+        description = "Lightweight status poll for long-running operations (fly_to / mining / collect_items): connected, bot_busy, position (block + precise), yaw, health, hunger, gamemode, snapshot age. Reads the cached snapshot by default (no forced refresh) and reports connected:false while offline instead of erroring.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_bot_status(
+        &self,
+        Parameters(input): Parameters<BotStatusInput>,
+    ) -> Result<String, BotError> {
+        crate::mcp::tools_query::get_bot_status(&self.state, input).await
     }
 
     #[tool(
@@ -286,7 +308,7 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Use the held item on a block",
+        description = "Use the held item on a block. Always pass item_slot (0-8) so the correct item is held — e.g. the hotbar slot holding water_bucket when pouring water.",
         annotations(destructive_hint = true)
     )]
     async fn use_item_on_block(
@@ -340,6 +362,17 @@ impl McpBotServer {
         Parameters(input): Parameters<SetHotbarItemInput>,
     ) -> Result<String, BotError> {
         crate::mcp::tools_item::handle_set_hotbar_item(&self.state, &self.sender, input).await
+    }
+
+    #[tool(
+        description = "Give the bot an item via server commands (requires OP). Runs /give, and for target=hotbar also /item replace (falling back to a swap-click move if /item replace is rejected). The smoke-test command fallback packaged as one tool.",
+        annotations(destructive_hint = true)
+    )]
+    async fn give_item(
+        &self,
+        Parameters(input): Parameters<GiveItemInput>,
+    ) -> Result<String, BotError> {
+        crate::mcp::tools_item::handle_give_item(&self.state, &self.sender, input).await
     }
 
     #[tool(
@@ -472,7 +505,7 @@ impl McpBotServer {
     // ── Unified action tool ──────────────────────────────────
 
     #[tool(
-        description = "Unified action tool. Executes one action and returns the result plus nearby blocks, entities, and self info for iterative mining/exploration loops.",
+        description = "Unified action tool. Executes one action and returns the result plus nearby blocks, entities, and self info for iterative mining/exploration loops. perception_radius (0-32, default = configured block_perception_radius) bounds the nearby blocks/entities payload — pass a small value (e.g. 2) or 0 to keep responses compact.",
         annotations(destructive_hint = true)
     )]
     async fn act(&self, Parameters(input): Parameters<ActInput>) -> Result<String, BotError> {
@@ -1149,6 +1182,51 @@ mod tests {
 
         let result = server
             .use_item(Parameters(UseItemInput { item_slot: None }))
+            .await;
+        assert!(matches!(result, Err(BotError::Offline(_))));
+    }
+
+    #[tokio::test]
+    async fn test_get_hotbar_offline_via_server() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
+
+        let result = server
+            .get_hotbar(Parameters(HotbarInput { force: false }))
+            .await;
+        assert!(matches!(result, Err(BotError::Offline(_))));
+    }
+
+    #[tokio::test]
+    async fn test_get_bot_status_offline_via_server_reports_disconnected() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
+
+        let result = server
+            .get_bot_status(Parameters(BotStatusInput { force: false }))
+            .await
+            .expect("get_bot_status never errors offline");
+        assert!(result.contains("false"));
+    }
+
+    #[tokio::test]
+    async fn test_give_item_offline_via_server() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(state, sender, receiver);
+
+        let result = server
+            .give_item(Parameters(GiveItemInput {
+                item_id: "dirt".into(),
+                count: None,
+                target: None,
+                hotbar_slot: None,
+            }))
             .await;
         assert!(matches!(result, Err(BotError::Offline(_))));
     }

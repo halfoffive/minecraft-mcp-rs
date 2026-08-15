@@ -8,15 +8,29 @@
 
 | 类别 | 工具 |
 |----------|-------|
-| **查询（Query）** | `get_self_info`, `get_inventory`, `get_nearby_blocks`, `get_nearby_entities`, `get_chunk_summary`, `is_connected`, `get_chat_history`, `get_server_info`, `get_world_view` |
+| **查询（Query）** | `get_self_info`, `get_inventory`, `get_hotbar`, `get_bot_status`, `get_nearby_blocks`, `get_nearby_entities`, `get_chunk_summary`, `is_connected`, `get_chat_history`, `get_server_info`, `get_world_view` |
 | **移动（Movement）** | `move_to`, `walk_direction`, `jump`, `teleport`, `smart_move`, `fly_to` |
 | **方块（Block）** | `break_block`, `place_block`, `use_item_on_block` |
-| **物品（Item）** | `drop_item`, `set_hotbar_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items` |
+| **物品（Item）** | `drop_item`, `set_hotbar_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items`, `give_item` |
 | **容器（Container）** | `open_container`, `take_from_container`, `put_into_container`, `close_container` |
 | **战斗（Combat）** | `attack_entity`, `shield_block` |
 | **聊天（Chat）** | `send_chat`, `execute_command`, `set_game_mode` |
 | **设置（Settings）** | `get_settings`, `update_settings`, `connect_bot`, `disconnect_bot` |
-| **统一（Unified）** | `act` —— 一个可以移动、智能移动、飞行、挖掘、攻击或收集物品，并返回环境快照的工具 |
+| **统一（Unified）** | `act` —— 一个可以移动、智能移动、飞行、挖掘、攻击或收集物品，并返回环境快照的工具。`perception_radius`（0-32，默认取配置 `block_perception_radius`）裁剪返回的周边方块/实体载荷——默认半径 32 的结果超过 1MB，迭代循环请传小半径 |
+
+## 快捷栏、状态与给予物品
+
+- `get_hotbar` —— 9 个快捷栏槽位（0-8）加 `held_item_slot`；空槽渲染为
+  `null`。这是 `set_hotbar_item` / `equip_tool` / `drop_item` 所依赖的
+  槽位布局的唯一显式视图。
+- `get_bot_status` —— 长耗时操作（`fly_to`、挖掘、`collect_items`）的
+  轻量轮询端点：`connected`、`bot_busy`、方块级 + 精确位置、`yaw`、
+  生命值与快照时间戳。默认读缓存快照，离线时返回 `connected:false` 而非报错。
+- `give_item` —— 冒烟测试的命令兜底模板封装为工具：执行
+  `/give <bot> <item> <count>`；`target=hotbar` 时再执行
+  `/item replace entity <bot> hotbar.<slot> with <item> <count>`（服务器拒绝
+  `/item replace` 时回退到 swap-click 的 `set_hotbar_item` 路径）。
+  需要服务器命令权限（OP）。
 
 ## 设置与生命周期工具
 

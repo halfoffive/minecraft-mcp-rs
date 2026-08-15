@@ -128,15 +128,15 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 
 | Category / 类别 | Tools / 工具 |
 |-----------------|--------------|
-| **Query / 查询** | `get_self_info`, `get_inventory`, `get_nearby_blocks`, `get_nearby_entities`, `get_chunk_summary`, `is_connected`, `get_chat_history`, `get_server_info`, `get_world_view` |
+| **Query / 查询** | `get_self_info`, `get_inventory`, `get_hotbar`, `get_bot_status`, `get_nearby_blocks`, `get_nearby_entities`, `get_chunk_summary`, `is_connected`, `get_chat_history`, `get_server_info`, `get_world_view` |
 | **Movement / 移动** | `move_to`, `walk_direction`, `jump`, `teleport`, `smart_move`, `fly_to` |
 | **Block / 方块** | `break_block`, `place_block`, `use_item_on_block` |
-| **Item / 物品** | `drop_item`, `set_hotbar_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items` |
+| **Item / 物品** | `drop_item`, `set_hotbar_item`, `equip_tool`, `switch_hotbar_slot`, `use_item`, `collect_items`, `give_item` |
 | **Container / 容器** | `open_container`, `take_from_container`, `put_into_container`, `close_container` |
 | **Combat / 战斗** | `attack_entity`, `shield_block` |
 | **Chat / 聊天** | `send_chat`, `execute_command`, `set_game_mode` |
 | **Settings / 设置** | `get_settings`, `update_settings`, `connect_bot`, `disconnect_bot` |
-| **Unified / 统一** | `act` — one tool that can move, smart-move, fly, mine, attack, or collect items and returns an environment snapshot |
+| **Unified / 统一** | `act` — one tool that can move, smart-move, fly, mine, attack, or collect items and returns an environment snapshot (`perception_radius` 0-32 trims the returned nearby blocks/entities payload) |
 
 上述工具按功能领域分类；`act` 是一个统一入口，能够根据传入参数执行移动、智能移动、飞行、挖掘、攻击或拾取物品，并返回环境快照。设置类工具（`get_settings` / `update_settings` / `connect_bot` / `disconnect_bot`）在机器人离线时也可用——LLM 客户端可以自行读取和修改所有配置，包括切换 Minecraft 服务器地址。
 

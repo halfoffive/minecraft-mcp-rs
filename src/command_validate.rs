@@ -214,8 +214,20 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
             Ok(())
         }
 
-        // Unified Act tool — delegate to the inner action's validation.
-        BotCommand::Act(action) => validate_act_action(action),
+        // Unified Act tool — delegate to the inner action's validation and
+        // bound the per-call perception radius (0..=32) that trims the
+        // nearby blocks/entities payload of the resulting ActResult.
+        BotCommand::Act(action, perception_radius) => {
+            validate_act_action(action)?;
+            if let Some(radius) = perception_radius
+                && *radius > 32
+            {
+                return Err(BotError::InvalidParams(format!(
+                    "Act perception radius must be 0..=32, got {radius}"
+                )));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -866,52 +878,89 @@ mod tests {
 
     #[test]
     fn test_act_move_valid() {
-        let cmd = BotCommand::Act(ActAction::Move {
-            target: BlockPos::new(10, 64, 20),
-        });
+        let cmd = BotCommand::Act(
+            ActAction::Move {
+                target: BlockPos::new(10, 64, 20),
+            },
+            None,
+        );
         assert!(validate_command(&cmd).is_ok());
     }
 
     #[test]
     fn test_act_smart_move_invalid() {
-        let cmd = BotCommand::Act(ActAction::SmartMove {
-            target: BlockPos::new(0, 500, 0),
-        });
+        let cmd = BotCommand::Act(
+            ActAction::SmartMove {
+                target: BlockPos::new(0, 500, 0),
+            },
+            None,
+        );
         assert!(validate_command(&cmd).is_err());
     }
 
     #[test]
     fn test_act_fly_valid() {
-        let cmd = BotCommand::Act(ActAction::Fly {
-            target: BlockPos::new(0, 200, 0),
-        });
+        let cmd = BotCommand::Act(
+            ActAction::Fly {
+                target: BlockPos::new(0, 200, 0),
+            },
+            None,
+        );
         assert!(validate_command(&cmd).is_ok());
     }
 
     #[test]
     fn test_act_mine_invalid() {
-        let cmd = BotCommand::Act(ActAction::Mine {
-            block_pos: BlockPos::new(0, -65, 0),
-        });
+        let cmd = BotCommand::Act(
+            ActAction::Mine {
+                block_pos: BlockPos::new(0, -65, 0),
+            },
+            None,
+        );
         assert!(validate_command(&cmd).is_err());
     }
 
     #[test]
     fn test_act_attack_valid() {
-        let cmd = BotCommand::Act(ActAction::Attack { entity_id: 42 });
+        let cmd = BotCommand::Act(ActAction::Attack { entity_id: 42 }, None);
         assert!(validate_command(&cmd).is_ok());
     }
 
     #[test]
     fn test_act_collect_items_zero() {
-        let cmd = BotCommand::Act(ActAction::CollectItems { radius: 0 });
+        let cmd = BotCommand::Act(ActAction::CollectItems { radius: 0 }, None);
         assert!(validate_command(&cmd).is_err());
     }
 
     #[test]
     fn test_act_collect_items_valid() {
-        let cmd = BotCommand::Act(ActAction::CollectItems { radius: 16 });
+        let cmd = BotCommand::Act(ActAction::CollectItems { radius: 16 }, None);
         assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_act_perception_radius_valid() {
+        let cmd = BotCommand::Act(
+            ActAction::Move {
+                target: BlockPos::new(0, 64, 0),
+            },
+            Some(16),
+        );
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_act_perception_radius_too_large() {
+        let cmd = BotCommand::Act(
+            ActAction::Move {
+                target: BlockPos::new(0, 64, 0),
+            },
+            Some(33),
+        );
+        assert!(matches!(
+            validate_command(&cmd),
+            Err(BotError::InvalidParams(_))
+        ));
     }
 
     // ── clamp_to_i32 (P0-#1) ───────────────────────────────────────
@@ -944,9 +993,12 @@ mod tests {
     #[test]
     fn test_act_input_validation() {
         // Y far above the build height must be rejected.
-        let bad_y = BotCommand::Act(ActAction::Move {
-            target: BlockPos::new(0, 9999, 0),
-        });
+        let bad_y = BotCommand::Act(
+            ActAction::Move {
+                target: BlockPos::new(0, 9999, 0),
+            },
+            None,
+        );
         assert!(
             matches!(validate_command(&bad_y), Err(BotError::InvalidParams(_))),
             "y=9999 should be rejected, got {:?}",
@@ -954,30 +1006,42 @@ mod tests {
         );
 
         // Y exactly at the boundary is allowed.
-        let ok_y = BotCommand::Act(ActAction::Move {
-            target: BlockPos::new(0, 64, 0),
-        });
+        let ok_y = BotCommand::Act(
+            ActAction::Move {
+                target: BlockPos::new(0, 64, 0),
+            },
+            None,
+        );
         assert!(validate_command(&ok_y).is_ok());
 
         // Y one below the lower build limit must be rejected.
-        let low_y = BotCommand::Act(ActAction::Move {
-            target: BlockPos::new(0, -65, 0),
-        });
+        let low_y = BotCommand::Act(
+            ActAction::Move {
+                target: BlockPos::new(0, -65, 0),
+            },
+            None,
+        );
         assert!(matches!(
             validate_command(&low_y),
             Err(BotError::InvalidParams(_))
         ));
 
         // entity_id at the boundary (i32::MAX) is allowed.
-        let ok_attack = BotCommand::Act(ActAction::Attack {
-            entity_id: i32::MAX as u32,
-        });
+        let ok_attack = BotCommand::Act(
+            ActAction::Attack {
+                entity_id: i32::MAX as u32,
+            },
+            None,
+        );
         assert!(validate_command(&ok_attack).is_ok());
 
         // entity_id above i32::MAX must be rejected.
-        let bad_attack = BotCommand::Act(ActAction::Attack {
-            entity_id: u32::MAX,
-        });
+        let bad_attack = BotCommand::Act(
+            ActAction::Attack {
+                entity_id: u32::MAX,
+            },
+            None,
+        );
         assert!(matches!(
             validate_command(&bad_attack),
             Err(BotError::InvalidParams(_))
@@ -1042,7 +1106,7 @@ mod tests {
             BotCommand::SmartMove(_) => 1,
             BotCommand::FlyTo(_) => 1,
             BotCommand::CollectItems(_) => 1,
-            BotCommand::Act(_) => 1,
+            BotCommand::Act(_, _) => 1,
         }
     }
 
@@ -1093,9 +1157,12 @@ mod tests {
             BotCommand::SmartMove(BlockPos::new(0, 0, 0)),
             BotCommand::FlyTo(BlockPos::new(0, 0, 0)),
             BotCommand::CollectItems(8),
-            BotCommand::Act(ActAction::Move {
-                target: BlockPos::new(0, 0, 0),
-            }),
+            BotCommand::Act(
+                ActAction::Move {
+                    target: BlockPos::new(0, 0, 0),
+                },
+                None,
+            ),
         ]
     }
 }

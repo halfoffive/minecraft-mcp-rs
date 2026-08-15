@@ -926,9 +926,12 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
         BotCommand::SmartMove(BlockPos::new(0, 64, 0)),
         BotCommand::FlyTo(BlockPos::new(0, 64, 0)),
         BotCommand::CollectItems(5),
-        BotCommand::Act(ActAction::Move {
-            target: BlockPos::new(0, 64, 0),
-        }),
+        BotCommand::Act(
+            ActAction::Move {
+                target: BlockPos::new(0, 64, 0),
+            },
+            None,
+        ),
     ];
 
     assert_eq!(
@@ -972,7 +975,7 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
         "ActAction should have exactly 6 sub-variants"
     );
     for action in act_variants {
-        let cmd = BotCommand::Act(action);
+        let cmd = BotCommand::Act(action, None);
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(
             !json.to_lowercase().contains("craft_item"),
