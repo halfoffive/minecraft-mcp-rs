@@ -39,7 +39,8 @@ a different file with `--config <path>`.
 
 ## Headless mode & CLI flags
 
-The binary accepts a small set of flags:
+The binary accepts a small set of flags (parsed by clap, help generated from
+the flag docs and printed to stderr):
 
 | Flag | Description |
 |------|-------------|
@@ -47,10 +48,12 @@ The binary accepts a small set of flags:
 | `--headless` | No desktop window; auto-connect the bot and exit when the MCP transport closes |
 | `--stdio` | Force the MCP stdio transport (overrides the config); alone (without `--gui`) this implies headless mode |
 | `--config <path>` | Load the config file at `<path>` |
-| `-h`, `--help` | Print usage to stderr and exit |
+| `-h`, `--help` | Print usage to stderr and exit 0 |
+| `-V`, `--version` | Print the version to stderr and exit 0 |
 
-With no arguments the binary prints help and exits 0; `--gui` opens the
-desktop UI.
+Precedence is unchanged: `--headless` wins over `--gui`; `--stdio` alone
+implies headless; `--config <path>` alone runs the GUI. With no arguments the
+binary prints help and exits 0; a usage error prints to stderr and exits 2.
 
 In headless mode the bot auto-connects on startup, and an agent-driven config
 change (via the `update_settings` MCP tool) that touches the server
