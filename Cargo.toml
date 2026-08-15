@@ -27,6 +27,7 @@ base64 = "0.22"
 axum = "0.8"
 sys-locale = "0.3"
 dirs = "6"
+clap = { version = "4.6.6", features = ["derive"] }
 
 # Test-only: construct azalea ECS worlds in unit tests (InstanceHolder
 # fields use parking_lot locks). Already in the dependency graph via azalea.
