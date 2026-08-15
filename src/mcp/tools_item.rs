@@ -338,6 +338,162 @@ pub async fn handle_collect_items(
     }
 }
 
+// ── give_item ───────────────────────────────────────────────────────────────
+
+/// Input for the `give_item` MCP tool.
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
+pub struct GiveItemInput {
+    /// Item id to give, e.g. "diamond_pickaxe" or "minecraft:diamond_pickaxe".
+    pub item_id: String,
+    /// Stack size to give (1-64, default 1).
+    #[schemars(range(min = 1, max = 64))]
+    pub count: Option<u8>,
+    /// Where to put the item: "inventory" (default) or "hotbar".
+    pub target: Option<String>,
+    /// Hotbar slot to fill when target is "hotbar" (0-8, default 0).
+    #[schemars(range(min = 0, max = 8))]
+    pub hotbar_slot: Option<u8>,
+}
+
+/// Handle `give_item` MCP tool.
+///
+/// Packages the smoke-test's command fallback as a standard operation: runs
+/// `/give <bot> <item> <count>`; when `target` is "hotbar" it follows with
+/// `/item replace entity <bot> hotbar.<slot> with <item> <count>` and, if the
+/// server rejects `/item replace`, falls back to the swap-click
+/// [`BotCommand::MoveItemToHotbar`] path (reliable wherever the item already
+/// landed in the inventory). Requires server commands (op) — a known-disabled
+/// `commands_enabled` is rejected with `PermissionDenied`.
+pub async fn handle_give_item(
+    state: &Arc<SharedState>,
+    sender: &BotCommandSender,
+    input: GiveItemInput,
+) -> Result<String, BotError> {
+    if input.item_id.trim().is_empty() {
+        return Err(BotError::InvalidParams(
+            "item_id cannot be empty".to_string(),
+        ));
+    }
+    let count = input.count.unwrap_or(1);
+    if !(1..=64).contains(&count) {
+        return Err(BotError::InvalidParams(format!(
+            "count must be between 1 and 64, got {count}"
+        )));
+    }
+    let target_hotbar = match input.target.as_deref().map(|t| t.to_lowercase()) {
+        None => false,
+        Some(t) if t == "hotbar" => true,
+        Some(t) if t == "inventory" => false,
+        Some(other) => {
+            return Err(BotError::InvalidParams(format!(
+                "target must be 'inventory' or 'hotbar', got '{other}'"
+            )));
+        }
+    };
+    let hotbar_slot = input.hotbar_slot.unwrap_or(0);
+    if hotbar_slot > 8 {
+        return Err(BotError::InvalidParams(format!(
+            "hotbar_slot must be 0-8, got {hotbar_slot}"
+        )));
+    }
+    if !state.is_online() {
+        return Err(BotError::Offline(
+            "Bot is not connected to a server".to_string(),
+        ));
+    }
+    {
+        let snapshot = state.read_snapshot();
+        if snapshot.commands_enabled == Some(false) {
+            return Err(BotError::PermissionDenied(
+                "Server commands are disabled for this bot — give_item needs OP permissions"
+                    .to_string(),
+            ));
+        }
+    }
+    // Minecraft command ids are namespaced; the MCP contract uses bare
+    // snake_case ids. Add the prefix unless already namespaced.
+    let namespaced = if input.item_id.contains(':') {
+        input.item_id.clone()
+    } else {
+        format!("minecraft:{}", input.item_id)
+    };
+    let username = {
+        let snapshot = state.read_snapshot();
+        let name = snapshot.self_player.username.clone();
+        if name.is_empty() {
+            return Err(BotError::Internal(
+                "Cannot determine the bot's username for /give".to_string(),
+            ));
+        }
+        name
+    };
+
+    let give_cmd = BotCommand::ExecuteCommand(format!("/give {username} {namespaced} {count}"));
+    sender.send_command(give_cmd).await?;
+
+    if target_hotbar {
+        let replace_cmd = BotCommand::ExecuteCommand(format!(
+            "/item replace entity {username} hotbar.{hotbar_slot} with {namespaced} {count}"
+        ));
+        match sender.send_command(replace_cmd).await {
+            Ok(_) => {
+                return serde_json::to_string(&crate::types::BotResult {
+                    success: true,
+                    message: format!(
+                        "Gave {count}x {namespaced} to {username} into hotbar slot {hotbar_slot} (/item replace)"
+                    ),
+                    data: Some(serde_json::json!({
+                        "item_id": input.item_id,
+                        "count": count,
+                        "target": "hotbar",
+                        "hotbar_slot": hotbar_slot,
+                        "method": "item_replace",
+                    })),
+                })
+                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")));
+            }
+            Err(BotError::CommandRejected { .. }) => {
+                // `/item replace` is not supported on every server. The item
+                // is already in the inventory (the /give succeeded), so fall
+                // back to the reliable swap-click move.
+                let swap = BotCommand::MoveItemToHotbar(hotbar_slot, input.item_id.clone(), count);
+                match sender.send_command(swap).await {
+                    Ok(swap_result) => {
+                        return serde_json::to_string(&crate::types::BotResult {
+                            success: swap_result.success,
+                            message: format!(
+                                "Gave {count}x {namespaced} to {username}; /item replace rejected, moved into hotbar slot {hotbar_slot} via swap-click"
+                            ),
+                            data: Some(serde_json::json!({
+                                "item_id": input.item_id,
+                                "count": count,
+                                "target": "hotbar",
+                                "hotbar_slot": hotbar_slot,
+                                "method": "swap_click",
+                            })),
+                        })
+                        .map_err(|e| BotError::Internal(format!("Serialization error: {e}")));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    serde_json::to_string(&crate::types::BotResult {
+        success: true,
+        message: format!("Gave {count}x {namespaced} to {username} (inventory)"),
+        data: Some(serde_json::json!({
+            "item_id": input.item_id,
+            "count": count,
+            "target": "inventory",
+            "method": "give",
+        })),
+    })
+    .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -752,5 +908,235 @@ mod tests {
                 .unwrap_or(false)
         );
         responder.await.expect("responder should finish");
+    }
+
+    // ── give_item ──────────────────────────────────────────────────────────
+
+    /// Online state with username TestBot and commands enabled so give_item
+    /// passes its gates and the emitted commands can be asserted.
+    fn make_give_state() -> Arc<SharedState> {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        state.set_online(true);
+        state.update_snapshot(crate::types::WorldSnapshot {
+            self_player: crate::types::SelfPlayer {
+                username: "TestBot".into(),
+                ..Default::default()
+            },
+            commands_enabled: Some(true),
+            ..Default::default()
+        });
+        state
+    }
+
+    #[tokio::test]
+    async fn test_give_item_to_inventory_sends_give_command() {
+        let state = make_give_state();
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive give");
+            assert!(
+                matches!(
+                    wrapped.command,
+                    BotCommand::ExecuteCommand(ref c)
+                        if c == "/give TestBot minecraft:diamond_pickaxe 1"
+                ),
+                "got: {:?}",
+                wrapped.command
+            );
+            wrapped
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .expect("respond");
+        });
+
+        let input = GiveItemInput {
+            item_id: "diamond_pickaxe".into(),
+            count: None,
+            target: None,
+            hotbar_slot: None,
+        };
+        let result = handle_give_item(&state, &sender, input).await.unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["success"], true);
+        assert_eq!(parsed["data"]["target"], "inventory");
+        assert_eq!(parsed["data"]["method"], "give");
+        responder.await.expect("responder finished");
+    }
+
+    #[tokio::test]
+    async fn test_give_item_to_hotbar_sends_item_replace() {
+        let state = make_give_state();
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            let first = receiver.recv().await.expect("give");
+            assert!(matches!(
+                first.command,
+                BotCommand::ExecuteCommand(ref c) if c == "/give TestBot minecraft:water_bucket 1"
+            ));
+            first
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .unwrap();
+            let second = receiver.recv().await.expect("replace");
+            assert!(matches!(
+                second.command,
+                BotCommand::ExecuteCommand(ref c)
+                    if c == "/item replace entity TestBot hotbar.3 with minecraft:water_bucket 1"
+            ));
+            second
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .unwrap();
+        });
+
+        let input = GiveItemInput {
+            item_id: "water_bucket".into(),
+            count: None,
+            target: Some("hotbar".into()),
+            hotbar_slot: Some(3),
+        };
+        let result = handle_give_item(&state, &sender, input).await.unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["data"]["method"], "item_replace");
+        assert_eq!(parsed["data"]["hotbar_slot"], 3);
+        responder.await.expect("responder finished");
+    }
+
+    #[tokio::test]
+    async fn test_give_item_falls_back_to_swap_click_when_replace_rejected() {
+        let state = make_give_state();
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            let first = receiver.recv().await.expect("give");
+            first
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .unwrap();
+            let second = receiver.recv().await.expect("replace");
+            second
+                .respond_to
+                .send(Err(BotError::CommandRejected {
+                    command: "/item replace ...".into(),
+                    feedback: "Unknown command".into(),
+                }))
+                .unwrap();
+            let third = receiver.recv().await.expect("swap fallback");
+            assert!(
+                matches!(
+                    third.command,
+                    BotCommand::MoveItemToHotbar(3, ref id, 1) if id == "water_bucket"
+                ),
+                "got: {:?}",
+                third.command
+            );
+            third
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .unwrap();
+        });
+
+        let input = GiveItemInput {
+            item_id: "water_bucket".into(),
+            count: None,
+            target: Some("hotbar".into()),
+            hotbar_slot: Some(3),
+        };
+        let result = handle_give_item(&state, &sender, input).await.unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["data"]["method"], "swap_click");
+        responder.await.expect("responder finished");
+    }
+
+    #[tokio::test]
+    async fn test_give_item_rejected_when_commands_disabled() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        state.set_online(true);
+        state.update_snapshot(crate::types::WorldSnapshot {
+            commands_enabled: Some(false),
+            ..Default::default()
+        });
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let input = GiveItemInput {
+            item_id: "dirt".into(),
+            count: None,
+            target: None,
+            hotbar_slot: None,
+        };
+        let result = handle_give_item(&state, &sender, input).await;
+        assert!(matches!(result, Err(BotError::PermissionDenied(_))));
+    }
+
+    #[tokio::test]
+    async fn test_give_item_validation_errors() {
+        let (state, sender) = setup();
+        make_online(&state);
+
+        let empty = GiveItemInput {
+            item_id: "  ".into(),
+            count: None,
+            target: None,
+            hotbar_slot: None,
+        };
+        assert!(matches!(
+            handle_give_item(&state, &sender, empty).await,
+            Err(BotError::InvalidParams(_))
+        ));
+
+        let bad_count = GiveItemInput {
+            item_id: "dirt".into(),
+            count: Some(0),
+            target: None,
+            hotbar_slot: None,
+        };
+        assert!(matches!(
+            handle_give_item(&state, &sender, bad_count).await,
+            Err(BotError::InvalidParams(_))
+        ));
+
+        let bad_target = GiveItemInput {
+            item_id: "dirt".into(),
+            count: None,
+            target: Some("backpack".into()),
+            hotbar_slot: None,
+        };
+        assert!(matches!(
+            handle_give_item(&state, &sender, bad_target).await,
+            Err(BotError::InvalidParams(_))
+        ));
+
+        let bad_slot = GiveItemInput {
+            item_id: "dirt".into(),
+            count: None,
+            target: Some("hotbar".into()),
+            hotbar_slot: Some(9),
+        };
+        assert!(matches!(
+            handle_give_item(&state, &sender, bad_slot).await,
+            Err(BotError::InvalidParams(_))
+        ));
     }
 }

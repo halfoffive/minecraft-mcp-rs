@@ -305,6 +305,107 @@ pub async fn get_server_info(
 }
 
 // ---------------------------------------------------------------------------
+// get_hotbar — the 9 hotbar slots (the slot-order invariant lives here)
+// ---------------------------------------------------------------------------
+
+/// Input for the `get_hotbar` MCP tool.
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
+pub struct HotbarInput {
+    /// Force an immediate snapshot refresh before reading (default true).
+    #[serde(default = "default_true")]
+    pub force: bool,
+}
+
+/// Get the bot's 9 hotbar slots (0-8) plus the currently selected slot.
+///
+/// Returns every slot — occupied slots as `{"slot", "item_id", "count"}`,
+/// empty slots as `null` — so a client can see exactly what the hotbar
+/// holds before using `set_hotbar_item` / `equip_tool` / `drop_item`
+/// (the shared root cause behind their historical slot mistakes). `force`
+/// behaves like [`get_inventory`].
+pub async fn get_hotbar(state: &Arc<SharedState>, input: HotbarInput) -> Result<String, BotError> {
+    if !state.is_online() {
+        return Err(BotError::Offline("Bot is currently offline".to_string()));
+    }
+    if input.force {
+        refresh_snapshot_and_wait(state).await;
+    }
+    let snapshot = state.read_snapshot();
+    let slots: Vec<Option<serde_json::Value>> = (0..=8u8)
+        .map(|slot| {
+            snapshot
+                .self_player
+                .inventory
+                .iter()
+                .find(|entry| entry.slot_index == slot)
+                .map(|entry| {
+                    json!({
+                        "slot": entry.slot_index,
+                        "item_id": entry.item_id,
+                        "count": entry.count,
+                    })
+                })
+        })
+        .collect();
+    Ok(json!({
+        "hotbar": slots,
+        "held_item_slot": snapshot.self_player.held_item_slot,
+    })
+    .to_string())
+}
+
+// ---------------------------------------------------------------------------
+// get_bot_status — cheap polling endpoint for long-running operations
+// ---------------------------------------------------------------------------
+
+/// Input for the `get_bot_status` MCP tool.
+#[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
+pub struct BotStatusInput {
+    /// Force an immediate snapshot rebuild before reading (default false —
+    /// this is the cheap polling endpoint, so it reads the cached snapshot).
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Lightweight status poll for long-running operations (`fly_to` / mining /
+/// `collect_items`): connection state, whether the executor is busy, the
+/// bot's block + precise position, heading, vitals, and snapshot age.
+///
+/// Unlike [`get_self_info`] this defaults to the cached snapshot (no forced
+/// rebuild) and never errors while offline — it reports `connected: false`
+/// so a poller can wait for a reconnect.
+pub async fn get_bot_status(
+    state: &Arc<SharedState>,
+    input: BotStatusInput,
+) -> Result<String, BotError> {
+    if !state.is_online() {
+        return Ok(json!({
+            "connected": false,
+            "bot_busy": false,
+        })
+        .to_string());
+    }
+    if input.force {
+        refresh_snapshot_and_wait(state).await;
+    }
+    let snapshot = state.read_snapshot();
+    let player = &snapshot.self_player;
+    Ok(json!({
+        "connected": true,
+        "bot_busy": state.executor_busy(),
+        "position": [player.position.x, player.position.y, player.position.z],
+        "position_precise": player.position_precise,
+        "yaw": player.yaw,
+        "health": player.health,
+        "hunger": player.hunger,
+        "gamemode": gamemode_to_str(player.gamemode),
+        "held_item_slot": player.held_item_slot,
+        "snapshot_timestamp": snapshot.timestamp,
+    })
+    .to_string())
+}
+
+// ---------------------------------------------------------------------------
 // get_world_view — top-down PNG render for multimodal models
 // ---------------------------------------------------------------------------
 
@@ -604,6 +705,61 @@ mod tests {
         let state = offline_state();
         let result = get_inventory(&state, InventoryInput { force: false }).await;
         assert!(matches!(result, Err(BotError::Offline(_))));
+    }
+
+    // -- get_hotbar -------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_hotbar_returns_nine_slots_with_empties() {
+        let state = state_with_snapshot();
+        // state_with_snapshot: hotbar slots 0 (iron_pickaxe) + 1 (oak_planks),
+        // held_item_slot = 3.
+        let result = get_hotbar(&state, HotbarInput { force: false })
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let hotbar = parsed["hotbar"].as_array().unwrap();
+        assert_eq!(hotbar.len(), 9, "hotbar must render all 9 slots");
+        assert_eq!(hotbar[0]["item_id"], "iron_pickaxe");
+        assert_eq!(hotbar[1]["count"], 64);
+        assert!(hotbar[2].is_null(), "empty slots render as null");
+        assert!(hotbar[8].is_null());
+        assert_eq!(parsed["held_item_slot"], 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_hotbar_offline() {
+        let state = offline_state();
+        let result = get_hotbar(&state, HotbarInput { force: false }).await;
+        assert!(matches!(result, Err(BotError::Offline(_))));
+    }
+
+    // -- get_bot_status ---------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_bot_status_online() {
+        let state = state_with_snapshot();
+        let result = get_bot_status(&state, BotStatusInput { force: false })
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["connected"], true);
+        assert_eq!(parsed["bot_busy"], false);
+        assert_eq!(parsed["position"], serde_json::json!([0, 64, 0]));
+        assert_eq!(parsed["gamemode"], "survival");
+        assert_eq!(parsed["health"], 18.0);
+        assert_eq!(parsed["snapshot_timestamp"], 42);
+        assert_eq!(parsed["held_item_slot"], 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_bot_status_offline_reports_connected_false() {
+        let state = offline_state();
+        let result = get_bot_status(&state, BotStatusInput { force: false })
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["connected"], false);
     }
 
     // -- get_nearby_blocks -----------------------------------------------------

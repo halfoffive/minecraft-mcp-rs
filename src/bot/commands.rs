@@ -748,7 +748,7 @@ impl<B: BotActions> CommandExecutor<B> {
             BotCommand::CloseContainer => self.handle_close_container(),
 
             // ── Combat ────────────────────────────────────────────
-            BotCommand::AttackEntity(id) => self.handle_attack_entity(id),
+            BotCommand::AttackEntity(id) => self.handle_attack_entity(id).await,
             BotCommand::ShieldBlock(blocking) => self.handle_shield_block(blocking),
 
             // ── Chat / command ────────────────────────────────────
@@ -763,7 +763,7 @@ impl<B: BotActions> CommandExecutor<B> {
             BotCommand::SmartMove(target) => self.handle_smart_move(target).await,
             BotCommand::FlyTo(target) => self.handle_fly_to(target).await,
             BotCommand::CollectItems(radius) => self.handle_collect_items(radius).await,
-            BotCommand::Act(action) => self.handle_act(action).await,
+            BotCommand::Act(action, perception) => self.handle_act(action, perception).await,
         }
     }
 
@@ -986,9 +986,22 @@ impl<B: BotActions> CommandExecutor<B> {
             self.bot.switch_hotbar_slot(slot);
         }
         self.bot.block_interact(&pos);
+
+        // Report the item that was actually used: the smoke test's water-
+        // bucket failure was caused by a wrong held slot, and an honest
+        // "Used X" message lets the caller verify the right item was in hand.
+        let snapshot = self.state.read_snapshot();
+        let used_slot = item_slot.unwrap_or(snapshot.self_player.held_item_slot);
+        let used_item = snapshot
+            .self_player
+            .inventory
+            .iter()
+            .find(|entry| entry.slot_index == used_slot)
+            .map(|entry| entry.item_id.as_str())
+            .unwrap_or("empty");
         Ok(BotResult {
             success: true,
-            message: format!("Used item on block at {} (slot: {:?})", pos, item_slot),
+            message: format!("Used {used_item} on block at {} (slot {used_slot})", pos),
             data: None,
         })
     }
@@ -1357,7 +1370,16 @@ impl<B: BotActions> CommandExecutor<B> {
 
     // ── Combat handlers ──────────────────────────────────────────
 
-    fn handle_attack_entity(&self, entity_id: u32) -> Result<BotResult, BotError> {
+    /// Attack an entity by its Minecraft entity ID.
+    ///
+    /// Entities move, so a stale snapshot position can make a direct attack
+    /// fail with a range error. When the target is farther than
+    /// `MAX_ATTACK_REACH` away, the bot paths to the entity's last known
+    /// position first, then re-reads the snapshot and attacks only when the
+    /// entity is now within reach. If it moved on (or despawned) during the
+    /// approach, the caller gets the honest `TooFar` / `InvalidParams`
+    /// error and should re-run `get_nearby_entities` → `move_to` → attack.
+    async fn handle_attack_entity(&self, entity_id: u32) -> Result<BotResult, BotError> {
         trace!(entity_id, "AttackEntity");
         // Fail fast if the target entity is outside a reasonable attack reach.
         // The snapshot may be slightly stale, so the threshold is generous.
@@ -1372,22 +1394,49 @@ impl<B: BotActions> CommandExecutor<B> {
                 "Entity with ID {entity_id} not found in current world snapshot"
             )));
         };
-        let dx = (entity.position.x - snapshot.self_player.position.x) as f64;
-        let dy = (entity.position.y - snapshot.self_player.position.y) as f64;
-        let dz = (entity.position.z - snapshot.self_player.position.z) as f64;
-        let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+        let entity_pos = entity.position;
+        let distance = distance_between(entity_pos, snapshot.self_player.position);
+        let mut approached = false;
         if distance > MAX_ATTACK_REACH {
+            // Moving-target fix: approach the entity's last known position
+            // before attacking. A movement timeout also falls through — the
+            // fresh re-check below decides the outcome either way.
+            drop(snapshot);
+            let _ = self.goto_with_margin(entity_pos).await;
+            approached = true;
+        }
+        // (On the direct-attack path the snapshot guard simply falls out of
+        // scope here — no long await between its last use and this point.)
+
+        // Fresh read after the (potential) approach: the entity may have
+        // moved while the bot walked, and the snapshot refreshes on its own
+        // tick. Attack only when the target is within reach *now*.
+        let fresh = self.state.read_snapshot();
+        let Some(current_entity) = fresh.entities.iter().find(|e| e.id == entity_id) else {
+            return Err(BotError::InvalidParams(format!(
+                "Entity with ID {entity_id} no longer in the world snapshot"
+            )));
+        };
+        let fresh_distance = distance_between(current_entity.position, fresh.self_player.position);
+        if fresh_distance > MAX_ATTACK_REACH {
             return Err(BotError::TooFar {
-                target: entity.position,
-                current: snapshot.self_player.position,
+                target: current_entity.position,
+                current: fresh.self_player.position,
                 max_distance: MAX_ATTACK_REACH,
             });
         }
-        drop(snapshot);
+        drop(fresh);
+
         self.bot.attack_entity(entity_id)?;
         Ok(BotResult {
             success: true,
-            message: format!("Attacked entity {}", entity_id),
+            message: if approached {
+                format!(
+                    "Attacked entity {entity_id} after approaching (distance {fresh_distance:.1})"
+                )
+            } else {
+                format!("Attacked entity {entity_id}")
+            },
             data: None,
         })
     }
@@ -1541,67 +1590,72 @@ impl<B: BotActions> CommandExecutor<B> {
     async fn handle_smart_move(&self, target: BlockPos) -> Result<BotResult, BotError> {
         trace!(?target, "SmartMove");
 
-        match self.goto_with_margin(target).await {
-            GotoOutcome::TimedOut {
-                start,
-                current,
-                timeout_secs,
-            } => Ok(movement_timeout_result(
-                "SmartMove",
-                target,
-                start,
-                current,
-                timeout_secs,
-            )),
-            GotoOutcome::Completed(goto_result) => {
-                let current_pos = self.state.read_snapshot().self_player.position;
+        // Transient pathfinding misreads (e.g. the grass block underfoot
+        // momentarily reported as an obstacle) usually resolve on a second
+        // attempt. Retry exactly once before declaring an obstacle; a
+        // TimedOut already spent the full movement window, so it is never
+        // retried (retrying would double the latency for no benefit).
+        let mut retried = false;
+        loop {
+            match self.goto_with_margin(target).await {
+                GotoOutcome::TimedOut {
+                    start,
+                    current,
+                    timeout_secs,
+                } => {
+                    return Ok(movement_timeout_result(
+                        "SmartMove",
+                        target,
+                        start,
+                        current,
+                        timeout_secs,
+                    ));
+                }
+                GotoOutcome::Completed(goto_result) => {
+                    let current_pos = self.state.read_snapshot().self_player.position;
 
-                match goto_result {
-                    Ok(()) => {
-                        // Reached the target (or pathfinder believes it did).
-                        let reached = (current_pos.x - target.x).abs() <= 1
-                            && (current_pos.y - target.y).abs() <= 1
-                            && (current_pos.z - target.z).abs() <= 1;
-                        let reason = if reached { "reached" } else { "obstacle" };
-                        let obstacle = if reached {
-                            None
-                        } else {
-                            // Look for a solid block directly ahead (between
-                            // current and target) to report as the obstacle.
-                            find_obstacle_block(&self.state.read_snapshot(), current_pos, target)
-                        };
+                    // Reached when the bot ends within one block of the target
+                    // on every axis (the same margin the previous logic used).
+                    let reached = (current_pos.x - target.x).abs() <= 1
+                        && (current_pos.y - target.y).abs() <= 1
+                        && (current_pos.z - target.z).abs() <= 1;
 
-                        // F2-6: `success` must reflect whether the target was
-                        // actually reached. Previously this branch reported
-                        // `success: true` even when an obstacle stopped the bot
-                        // short — dishonest.
-                        Ok(BotResult {
-                            success: reached,
-                            message: format!("SmartMove to {target}: {reason}"),
-                            data: Some(serde_json::json!({
-                                "reached": reached,
-                                "reason": reason,
-                                "position": [current_pos.x, current_pos.y, current_pos.z],
-                                "obstacle": obstacle.map(obstacle_to_json),
-                            })),
-                        })
+                    if !reached && !retried {
+                        // First attempt stopped short (Ok-but-unreached or a
+                        // pathfinder error). Give the world a beat and retry
+                        // once before declaring an obstacle.
+                        retried = true;
+                        tokio::time::sleep(SMART_MOVE_RETRY_DELAY).await;
+                        continue;
                     }
-                    Err(e) => {
-                        // Pathfinder failed — treat as obstacle. F2-6: report
-                        // `success: false` (previously `true` despite the block).
-                        let obstacle =
-                            find_obstacle_block(&self.state.read_snapshot(), current_pos, target);
-                        Ok(BotResult {
-                            success: false,
-                            message: format!("SmartMove to {target} blocked: {e}"),
-                            data: Some(serde_json::json!({
-                                "reached": false,
-                                "reason": "obstacle",
-                                "position": [current_pos.x, current_pos.y, current_pos.z],
-                                "obstacle": obstacle.map(obstacle_to_json),
-                            })),
-                        })
-                    }
+
+                    let reason = if reached { "reached" } else { "obstacle" };
+                    let obstacle = if reached {
+                        None
+                    } else {
+                        // Look for a solid block directly ahead (between
+                        // current and target) to report as the obstacle.
+                        find_obstacle_block(&self.state.read_snapshot(), current_pos, target)
+                    };
+                    let message = match (&goto_result, reached) {
+                        (Err(e), false) => format!("SmartMove to {target} blocked: {e}"),
+                        _ => format!("SmartMove to {target}: {reason}"),
+                    };
+
+                    // F2-6: `success` must reflect whether the target was
+                    // actually reached. Previously blocked branches reported
+                    // `success: true` — dishonest.
+                    return Ok(BotResult {
+                        success: reached,
+                        message,
+                        data: Some(serde_json::json!({
+                            "reached": reached,
+                            "reason": reason,
+                            "position": [current_pos.x, current_pos.y, current_pos.z],
+                            "obstacle": obstacle.map(obstacle_to_json),
+                            "retried": retried,
+                        })),
+                    });
                 }
             }
         }
@@ -1745,7 +1799,16 @@ impl<B: BotActions> CommandExecutor<B> {
     /// Unified Act tool — dispatches the inner [`ActAction`] to the
     /// appropriate handler, then wraps the result in an [`ActResult`]
     /// enriched with nearby blocks/entities and self info from the snapshot.
-    async fn handle_act(&self, action: ActAction) -> Result<BotResult, BotError> {
+    ///
+    /// `perception` is the per-call radius (blocks, Chebyshev, 0..=32)
+    /// bounding the nearby blocks/entities payload; `None` falls back to the
+    /// configured `block_perception_radius`. Callers that only need the
+    /// action outcome pass `Some(0)` to strip the nearby context entirely.
+    async fn handle_act(
+        &self,
+        action: ActAction,
+        perception: Option<u32>,
+    ) -> Result<BotResult, BotError> {
         trace!(?action, "Act");
         let (action_result, reason): (String, Option<String>) = match action {
             ActAction::Move { target } => match self.handle_move_to(target).await {
@@ -1788,7 +1851,7 @@ impl<B: BotActions> CommandExecutor<B> {
                     Err(e) => ("failed".into(), Some(e.to_string())),
                 }
             }
-            ActAction::Attack { entity_id } => match self.handle_attack_entity(entity_id) {
+            ActAction::Attack { entity_id } => match self.handle_attack_entity(entity_id).await {
                 Ok(r) => act_outcome(r),
                 Err(e) => ("failed".into(), Some(e.to_string())),
             },
@@ -1801,7 +1864,12 @@ impl<B: BotActions> CommandExecutor<B> {
         // Build the enriched result from the current snapshot.
         let snapshot = self.state.read_snapshot();
         let player_pos = snapshot.self_player.position;
-        let perception_radius: i32 = self.state.read_config().block_perception_radius as i32;
+        // Per-call override (0..=32, validated upstream) or the configured
+        // default. Small radii keep the ActResult payload tiny — the default
+        // radius-32 result serialises to over 1 MB of nearby-block JSON.
+        let perception_radius: i32 = perception
+            .map(|r| r as i32)
+            .unwrap_or_else(|| self.state.read_config().block_perception_radius as i32);
 
         let nearby_blocks: Vec<_> = snapshot
             .blocks
@@ -1845,6 +1913,15 @@ impl<B: BotActions> CommandExecutor<B> {
 // Free-function helpers for v2 handlers
 // ═══════════════════════════════════════════════════════════════
 
+/// Euclidean distance between two block positions (used by the attack reach
+/// checks). Pure f64 arithmetic — no allocation, no snapshot access.
+fn distance_between(a: BlockPos, b: BlockPos) -> f64 {
+    let dx = (a.x - b.x) as f64;
+    let dy = (a.y - b.y) as f64;
+    let dz = (a.z - b.z) as f64;
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
 /// How long the executor waits for server feedback after sending a
 /// `/execute`-style command before deciding whether it was rejected.
 ///
@@ -1859,6 +1936,11 @@ const COMMAND_FEEDBACK_WAIT_MS: u64 = 400;
 /// client sees a bare `CommandTimeout` instead of the structured partial
 /// result (`position`, `distance`, ...) this executor builds.
 const MOVEMENT_REPLY_MARGIN: Duration = Duration::from_secs(1);
+
+/// Pause between the first and the single retry of a smart_move whose first
+/// attempt stopped short — lets the server settle a transient misread (e.g.
+/// the block underfoot reported as an obstacle) before trying again.
+const SMART_MOVE_RETRY_DELAY: Duration = Duration::from_millis(300);
 
 /// Outcome of a [`CommandExecutor::goto_with_margin`] run.
 enum GotoOutcome {
@@ -2023,7 +2105,9 @@ mod tests {
     use super::*;
     use crate::channel::{BotCommandSender, create_command_channel};
     use crate::config::AppConfig;
-    use crate::types::{BlockEntry, EntityEntry, MaterialTier, SelfPlayer, ToolType};
+    use crate::types::{
+        BlockEntry, EntityEntry, InventorySlot, MaterialTier, SelfPlayer, ToolType,
+    };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -2036,6 +2120,15 @@ mod tests {
     struct MockCallLog {
         goto_calls: Mutex<Vec<BlockPos>>,
         goto_succeeds: AtomicBool,
+        /// Number of upcoming goto attempts that must fail (transient-error
+        /// simulation). Decremented per goto call.
+        goto_failures_remaining: AtomicUsize,
+        /// When set, a successful goto also moves the shared snapshot's
+        /// player position (default off — existing tests assert log-only
+        /// movement). Enables tests of handlers that re-read the snapshot
+        /// after movement (smart_move retry, attack auto-approach).
+        goto_updates_snapshot: AtomicBool,
+        snapshot_for_goto: Mutex<Option<Arc<crate::state::SharedState>>>,
         /// When `true`, `is_goto_target_reached` always returns `false`,
         /// forcing `RealBotClient::goto`'s 50ms fallback loop to keep
         /// spinning until `command_timeout_secs` elapses. Default is
@@ -2073,6 +2166,9 @@ mod tests {
             Self {
                 goto_calls: Mutex::new(Vec::new()),
                 goto_succeeds: AtomicBool::new(true),
+                goto_failures_remaining: AtomicUsize::new(0),
+                goto_updates_snapshot: AtomicBool::new(false),
+                snapshot_for_goto: Mutex::new(None),
                 goto_target_unreached: AtomicBool::new(false),
                 goto_hangs: AtomicBool::new(false),
                 jump_calls: AtomicUsize::new(0),
@@ -2111,6 +2207,13 @@ mod tests {
         fn log(&self) -> &Arc<MockCallLog> {
             &self.log
         }
+
+        /// Make successful goto calls also update the shared snapshot's
+        /// player position (see `MockCallLog::goto_updates_snapshot`).
+        fn bind_state(&self, state: Arc<crate::state::SharedState>) {
+            *self.log.snapshot_for_goto.lock().unwrap() = Some(state);
+            self.log.goto_updates_snapshot.store(true, Ordering::SeqCst);
+        }
     }
 
     impl BotActions for MockBotClient {
@@ -2135,8 +2238,31 @@ mod tests {
                     tokio::task::yield_now().await;
                 }
             }
+            // Transient-failure simulation: consume one remaining failure and
+            // report a pathfinding error before consulting goto_succeeds.
+            if self.log.goto_failures_remaining.load(Ordering::SeqCst) > 0 {
+                self.log
+                    .goto_failures_remaining
+                    .fetch_sub(1, Ordering::SeqCst);
+                return Err(BotError::PathfindingFailed {
+                    target: BlockPos {
+                        x: pos.x,
+                        y: pos.y,
+                        z: pos.z,
+                    },
+                    reason: "mock transient pathfinding failure".into(),
+                });
+            }
             if self.log.goto_succeeds.load(Ordering::SeqCst) {
                 *self.log.position.lock().unwrap() = *pos;
+                if self.log.goto_updates_snapshot.load(Ordering::SeqCst)
+                    && let Some(state) = self.log.snapshot_for_goto.lock().unwrap().clone()
+                {
+                    // Mirror the real client's tick-driven snapshot: a
+                    // completed goto lands the new position in the shared
+                    // snapshot so post-movement re-checks see it.
+                    state.modify_snapshot(|snap| snap.self_player.position = *pos);
+                }
                 Ok(())
             } else {
                 Err(BotError::PathfindingFailed {
@@ -2266,6 +2392,26 @@ mod tests {
         let (sender, receiver) = create_command_channel(16, Arc::clone(&state));
         state.set_online(true);
         let mock = MockBotClient::new();
+        let log = mock.log().clone();
+        let executor = CommandExecutor::new(mock, Arc::clone(&state), receiver, None);
+        (executor, sender, state, log)
+    }
+
+    /// Like `make_executor`, but the mock's successful goto also moves the
+    /// shared snapshot's player position — needed by handlers that re-read
+    /// the snapshot after movement (smart_move retry, attack auto-approach).
+    fn make_executor_with_snapshot_goto() -> (
+        CommandExecutor<MockBotClient>,
+        BotCommandSender,
+        Arc<SharedState>,
+        Arc<MockCallLog>,
+    ) {
+        let config = AppConfig::default();
+        let state = Arc::new(SharedState::new(config));
+        let (sender, receiver) = create_command_channel(16, Arc::clone(&state));
+        state.set_online(true);
+        let mock = MockBotClient::new();
+        mock.bind_state(Arc::clone(&state));
         let log = mock.log().clone();
         let executor = CommandExecutor::new(mock, Arc::clone(&state), receiver, None);
         (executor, sender, state, log)
@@ -3199,6 +3345,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_attack_entity_auto_approaches_when_too_far() {
+        // Moving-target fix: a target farther than MAX_ATTACK_REACH must be
+        // approached (goto) before attacking; with the mock goto updating the
+        // shared snapshot, the fresh re-check passes and the attack lands.
+        let (executor, sender, state, log) = make_executor_with_snapshot_goto();
+        state.update_snapshot(crate::types::WorldSnapshot {
+            entities: vec![EntityEntry {
+                id: 42,
+                uuid: "far-42".into(),
+                entity_type: "zombie".into(),
+                position: BlockPos::new(20, 64, 0),
+                display_name: Some("Zombie".into()),
+                health: Some(20.0),
+            }],
+            ..make_populated_snapshot_defaults()
+        });
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::AttackEntity(42)).await;
+        let br = result.expect("expected Ok(BotResult)");
+        assert!(br.success, "auto-approach should enable the attack: {br:?}");
+        assert!(
+            br.message.contains("approaching"),
+            "message: {}",
+            br.message
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+        assert_eq!(log.goto_calls.lock().unwrap().len(), 1);
+        let attacks = log.attack_calls.lock().unwrap();
+        assert_eq!(attacks.len(), 1);
+        assert_eq!(attacks[0], 42);
+    }
+
+    #[tokio::test]
+    async fn test_attack_entity_too_far_reports_too_far_after_approach() {
+        // When the approach does not bring the bot within reach (the mock
+        // does not update the snapshot), the handler must still fail honestly
+        // with TooFar and must not attack.
+        let (executor, sender, state, log) = make_executor();
+        state.update_snapshot(crate::types::WorldSnapshot {
+            entities: vec![EntityEntry {
+                id: 42,
+                uuid: "far-42".into(),
+                entity_type: "zombie".into(),
+                position: BlockPos::new(20, 64, 0),
+                display_name: Some("Zombie".into()),
+                health: Some(20.0),
+            }],
+            ..make_populated_snapshot_defaults()
+        });
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::AttackEntity(42)).await;
+        assert!(
+            matches!(result, Err(BotError::TooFar { .. })),
+            "expected TooFar, got {result:?}"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+        assert_eq!(
+            log.goto_calls.lock().unwrap().len(),
+            1,
+            "one approach attempt"
+        );
+        assert!(
+            log.attack_calls.lock().unwrap().is_empty(),
+            "no attack when still out of reach"
+        );
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // ShieldBlock tests
     // ═══════════════════════════════════════════════════════════════
@@ -3496,6 +3716,34 @@ mod tests {
         let interacts = log.interact_calls.lock().unwrap();
         assert_eq!(interacts.len(), 1);
         assert_eq!(interacts[0], pos);
+    }
+
+    #[tokio::test]
+    async fn test_use_item_on_block_reports_item_used() {
+        // The result message must name the item actually held so callers can
+        // detect a wrong-slot interaction (the water-bucket smoke failure).
+        let (executor, sender, state, _log) = make_executor();
+        let mut snapshot = make_populated_snapshot_defaults();
+        snapshot.self_player.held_item_slot = 2;
+        snapshot.self_player.inventory = vec![InventorySlot {
+            slot_index: 2,
+            item_id: "water_bucket".into(),
+            count: 1,
+        }];
+        state.update_snapshot(snapshot);
+        let handle = spawn_executor(executor);
+
+        let pos = BlockPos::new(5, 65, 5);
+        let result = send_and_await(&sender, BotCommand::UseItemOnBlock(pos, None)).await;
+        let br = result.expect("expected Ok(BotResult)");
+        assert!(
+            br.message.contains("water_bucket"),
+            "message should name the used item: {}",
+            br.message
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
     }
 
     #[test]
@@ -3882,9 +4130,55 @@ mod tests {
         assert!(br.success, "expected success == true when reached");
         let data = br.data.expect("data present");
         assert_eq!(data.get("reached"), Some(&serde_json::json!(true)));
+        assert_eq!(data.get("retried"), Some(&serde_json::json!(false)));
 
         drop(sender);
         handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_smart_move_retries_once_and_reaches_target() {
+        // Transient-obstacle regression: the first goto attempt fails with a
+        // pathfinding error, the single retry succeeds and lands the snapshot
+        // position on the target — result must report reached + retried and
+        // issue exactly two goto calls.
+        let (executor, sender, state, log) = make_executor_with_snapshot_goto();
+        make_populated_snapshot(&state); // player at (0,64,0)
+        log.goto_failures_remaining.store(1, Ordering::SeqCst);
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(5, 64, 0);
+        let result = send_and_await(&sender, BotCommand::SmartMove(target)).await;
+        let br = result.expect("expected Ok(BotResult)");
+        assert!(br.success, "retry should reach the target: {br:?}");
+        let data = br.data.expect("data present");
+        assert_eq!(data.get("reached"), Some(&serde_json::json!(true)));
+        assert_eq!(data.get("retried"), Some(&serde_json::json!(true)));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+        assert_eq!(log.goto_calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_smart_move_retries_once_then_reports_obstacle() {
+        // Both attempts fail: exactly two goto calls, and the final result
+        // stays honest (success false, reached false, retried true).
+        let (executor, sender, _state, log) = make_executor();
+        log.goto_succeeds.store(false, Ordering::SeqCst);
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(5, 64, 5);
+        let result = send_and_await(&sender, BotCommand::SmartMove(target)).await;
+        let br = result.expect("expected Ok(BotResult)");
+        assert!(!br.success, "expected success == false: {br:?}");
+        let data = br.data.expect("data present");
+        assert_eq!(data.get("reached"), Some(&serde_json::json!(false)));
+        assert_eq!(data.get("retried"), Some(&serde_json::json!(true)));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+        assert_eq!(log.goto_calls.lock().unwrap().len(), 2);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -4273,7 +4567,7 @@ mod tests {
 
         let result = send_and_await(
             &sender,
-            BotCommand::Act(ActAction::Attack { entity_id: 99 }),
+            BotCommand::Act(ActAction::Attack { entity_id: 99 }, None),
         )
         .await;
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
@@ -4300,9 +4594,12 @@ mod tests {
 
         let result = send_and_await(
             &sender,
-            BotCommand::Act(ActAction::SmartMove {
-                target: BlockPos::new(5, 64, 5),
-            }),
+            BotCommand::Act(
+                ActAction::SmartMove {
+                    target: BlockPos::new(5, 64, 5),
+                },
+                None,
+            ),
         )
         .await;
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
@@ -4326,6 +4623,66 @@ mod tests {
                 .contains("blocked"),
             "reason should carry the blocked message: {:?}",
             act_result.reason
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_act_perception_radius_trims_nearby_context() {
+        // The act result must honour the per-call perception radius: with
+        // Some(2) the stone block at (5,64,0) and the zombie at (3,64,1) are
+        // outside the Chebyshev radius; with None the configured default
+        // (block_perception_radius = 32) includes both.
+        let (executor, sender, state, _log) = make_executor();
+        make_populated_snapshot(&state);
+        let handle = spawn_executor(executor);
+
+        let trimmed = send_and_await(
+            &sender,
+            BotCommand::Act(
+                ActAction::Move {
+                    target: BlockPos::new(0, 64, 0),
+                },
+                Some(2),
+            ),
+        )
+        .await
+        .expect("act with radius should succeed");
+        let small: ActResult = serde_json::from_value(trimmed.data.expect("data present"))
+            .expect("data is a serialized ActResult");
+        assert!(
+            small.nearby_blocks.is_empty(),
+            "radius 2 must exclude block at (5,64,0)"
+        );
+        assert!(
+            small.nearby_entities.is_empty(),
+            "radius 2 must exclude entity at (3,64,1)"
+        );
+
+        let full = send_and_await(
+            &sender,
+            BotCommand::Act(
+                ActAction::Move {
+                    target: BlockPos::new(0, 64, 0),
+                },
+                None,
+            ),
+        )
+        .await
+        .expect("act without radius should succeed");
+        let wide: ActResult = serde_json::from_value(full.data.expect("data present"))
+            .expect("data is a serialized ActResult");
+        assert_eq!(
+            wide.nearby_blocks.len(),
+            1,
+            "default radius must include block at (5,64,0)"
+        );
+        assert_eq!(
+            wide.nearby_entities.len(),
+            1,
+            "default radius must include entity 42"
         );
 
         drop(sender);

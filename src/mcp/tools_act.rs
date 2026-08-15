@@ -31,6 +31,13 @@ pub struct ActInput {
     /// The action to execute. One of: `move`, `smart_move`, `fly`, `mine`,
     /// `attack`, `collect_items`.
     pub action: ActAction,
+    /// Per-call perception radius (blocks, Chebyshev, 0..=32) bounding the
+    /// nearby blocks/entities included in the result. `None` (default) uses
+    /// the configured `block_perception_radius`. `0` returns no nearby
+    /// context at all — use it when only the action outcome matters and the
+    /// full-context payload (over 1 MB at the default radius) is wasteful.
+    #[schemars(range(min = 0, max = 32))]
+    pub perception_radius: Option<u32>,
 }
 
 /// Handle the unified `act` MCP tool.
@@ -50,6 +57,13 @@ pub async fn handle_act(
     // entity_id) at the MCP layer so callers get a fast `InvalidParams`
     // error rather than waiting for the bot executor to fail.
     validate_act_action(&input.action)?;
+    if let Some(radius) = input.perception_radius
+        && radius > 32
+    {
+        return Err(BotError::InvalidParams(format!(
+            "perception_radius must be 0..=32, got {radius}"
+        )));
+    }
 
     if !state.is_online() {
         return Err(BotError::Offline(
@@ -57,7 +71,7 @@ pub async fn handle_act(
         ));
     }
 
-    let cmd = BotCommand::Act(input.action);
+    let cmd = BotCommand::Act(input.action, input.perception_radius);
     match sender.send_command(cmd).await {
         Ok(result) => serde_json::to_string(&result)
             .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
@@ -120,7 +134,7 @@ mod tests {
         let responder = tokio::spawn(async move {
             let wrapped = receiver.recv().await.expect("should receive command");
             match wrapped.command {
-                BotCommand::Act(ActAction::Move { target }) => {
+                BotCommand::Act(ActAction::Move { target }, _) => {
                     assert_eq!(target, BlockPos::new(1, 64, 2));
                 }
                 other => panic!("expected Act(Move), got: {other:?}"),
@@ -136,6 +150,7 @@ mod tests {
         });
 
         let input = ActInput {
+            perception_radius: None,
             action: ActAction::Move {
                 target: BlockPos::new(1, 64, 2),
             },
@@ -161,7 +176,7 @@ mod tests {
         let responder = tokio::spawn(async move {
             let wrapped = receiver.recv().await.expect("should receive command");
             match wrapped.command {
-                BotCommand::Act(ActAction::Mine { block_pos }) => {
+                BotCommand::Act(ActAction::Mine { block_pos }, _) => {
                     assert_eq!(block_pos, BlockPos::new(5, 60, -7));
                 }
                 other => panic!("expected Act(Mine), got: {other:?}"),
@@ -177,6 +192,7 @@ mod tests {
         });
 
         let input = ActInput {
+            perception_radius: None,
             action: ActAction::Mine {
                 block_pos: BlockPos::new(5, 60, -7),
             },
@@ -197,6 +213,7 @@ mod tests {
     async fn test_act_offline() {
         let (state, sender) = setup();
         let input = ActInput {
+            perception_radius: None,
             action: ActAction::Move {
                 target: BlockPos::new(0, 64, 0),
             },
@@ -212,6 +229,7 @@ mod tests {
         let (state, sender) = make_echo_channel();
         make_online(&state);
         let input = ActInput {
+            perception_radius: None,
             action: ActAction::CollectItems { radius: 8 },
         };
         let result = handle_act(&state, &sender, input).await.unwrap();
@@ -222,6 +240,63 @@ mod tests {
                 .unwrap_or(false)
         );
         assert!(json["message"].as_str().unwrap().contains("CollectItems"));
+    }
+
+    /// The per-call perception radius must travel with the command so the bot
+    /// layer can trim the ActResult payload (regression for the >1 MB act
+    /// responses observed in the smoke test).
+    #[tokio::test]
+    async fn test_act_passes_perception_radius_through() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        make_online(&state);
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            assert!(
+                matches!(
+                    wrapped.command,
+                    BotCommand::Act(ActAction::Move { .. }, Some(2))
+                ),
+                "expected Act(Move, Some(2)), got: {:?}",
+                wrapped.command
+            );
+            wrapped
+                .respond_to
+                .send(Ok(BotResult {
+                    success: true,
+                    message: "moved".into(),
+                    data: None,
+                }))
+                .expect("should respond");
+        });
+
+        let input = ActInput {
+            perception_radius: Some(2),
+            action: ActAction::Move {
+                target: BlockPos::new(1, 64, 2),
+            },
+        };
+        let result = handle_act(&state, &sender, input).await.unwrap();
+        let json: Value = serde_json::from_str(&result).expect("valid JSON");
+        assert!(json["success"].as_bool().unwrap_or(false));
+        responder.await.expect("responder should finish");
+    }
+
+    /// A perception_radius above the 0..=32 contract must be rejected at the
+    /// MCP layer before any command reaches the bot.
+    #[tokio::test]
+    async fn test_act_rejects_oversized_perception_radius() {
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = ActInput {
+            perception_radius: Some(33),
+            action: ActAction::Move {
+                target: BlockPos::new(0, 64, 0),
+            },
+        };
+        let result = handle_act(&state, &sender, input).await;
+        assert!(matches!(result, Err(BotError::InvalidParams(_))));
     }
 
     // ── ActInput schema ────────────────────────────────────────────────────
@@ -240,6 +315,7 @@ mod tests {
     async fn test_act_input_validation() {
         // Y far above the build height must be rejected.
         let bad_y = ActInput {
+            perception_radius: None,
             action: ActAction::Move {
                 target: BlockPos::new(0, 9999, 0),
             },
@@ -265,6 +341,7 @@ mod tests {
 
         // entity_id above i32::MAX must be rejected (Attack variant).
         let bad_attack = ActInput {
+            perception_radius: None,
             action: ActAction::Attack {
                 entity_id: u32::MAX,
             },
@@ -296,6 +373,7 @@ mod tests {
     async fn test_act_input_validation_passes_before_offline_check() {
         let (state, sender) = setup(); // offline
         let input = ActInput {
+            perception_radius: None,
             action: ActAction::Move {
                 target: BlockPos::new(0, 64, 0), // y = 64 is valid
             },
@@ -315,6 +393,7 @@ mod tests {
         let (state, sender) = setup();
         state.set_online(true);
         let input = ActInput {
+            perception_radius: None,
             action: ActAction::Attack {
                 entity_id: u32::MAX,
             },
@@ -336,6 +415,7 @@ mod tests {
         let (state2, sender2) = make_echo_channel();
         state2.set_online(true);
         let ok_input = ActInput {
+            perception_radius: None,
             action: ActAction::Attack {
                 entity_id: i32::MAX as u32,
             },
@@ -351,6 +431,7 @@ mod tests {
         let (state3, sender3) = setup();
         state3.set_online(true);
         let over_input = ActInput {
+            perception_radius: None,
             action: ActAction::Attack {
                 entity_id: (i32::MAX as u32) + 1,
             },

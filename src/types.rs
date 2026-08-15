@@ -208,7 +208,12 @@ pub enum BotCommand {
     /// Collect nearby items within the given pickup radius (in blocks).
     CollectItems(u32),
     /// Unified action tool — dispatches one of the [`ActAction`] variants.
-    Act(ActAction),
+    ///
+    /// The optional `u32` is a per-call perception radius (blocks, Chebyshev,
+    /// 0..=32) bounding the nearby blocks/entities carried in the resulting
+    /// [`ActResult`]. `None` falls back to the configured
+    /// [`crate::config::AppConfig::block_perception_radius`].
+    Act(ActAction, Option<u32>),
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -531,7 +536,7 @@ mod tests {
             BotCommand::SmartMove(_) => 1,
             BotCommand::FlyTo(_) => 1,
             BotCommand::CollectItems(_) => 1,
-            BotCommand::Act(_) => 1,
+            BotCommand::Act(_, _) => 1,
         }
     }
 
@@ -834,9 +839,12 @@ mod tests {
             BotCommand::SmartMove(BlockPos::new(0, 0, 0)),
             BotCommand::FlyTo(BlockPos::new(0, 0, 0)),
             BotCommand::CollectItems(8),
-            BotCommand::Act(ActAction::Move {
-                target: BlockPos::new(0, 0, 0),
-            }),
+            BotCommand::Act(
+                ActAction::Move {
+                    target: BlockPos::new(0, 0, 0),
+                },
+                None,
+            ),
         ]
     }
 }
