@@ -245,6 +245,9 @@ pub async fn handle_use_item_on_block(
     let (fx, fy, fz) = face.offset();
     let target = BlockPos::new(input.x, input.y, input.z);
     let effect = BlockPos::new(target.x + fx, target.y + fy, target.z + fz);
+    if let Err(e) = validate_block_pos(&effect) {
+        return Err(BotError::InvalidParams(e));
+    }
     // azalea's `block_interact` reports a fixed Up face, so the placement
     // lands one cell above the right-clicked block: right-click the cell
     // BELOW the expected effect position.
@@ -545,6 +548,26 @@ mod tests {
         let result = handle_use_item_on_block(&state, &sender, input).await;
         assert!(
             matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("out of bounds") || msg.contains("out of range"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_use_item_on_block_face_up_at_build_limit_rejected() {
+        // face=up at y=320 would place the effect cell at y=321, outside the
+        // build height. This must be rejected before dispatch.
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = UseItemOnBlockInput {
+            x: 0,
+            y: 320,
+            z: 0,
+            item_slot: None,
+            face: Some("up".into()),
+        };
+        let result = handle_use_item_on_block(&state, &sender, input).await;
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("out of bounds") || msg.contains("out of range")),
+            "got: {result:?}"
         );
     }
 

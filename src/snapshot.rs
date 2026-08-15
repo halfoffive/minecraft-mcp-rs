@@ -198,6 +198,11 @@ impl SnapshotBuilder {
             chunk_summary,
             commands_enabled: self.old.commands_enabled,
             block_index,
+            // Production callers immediately store this through
+            // `SharedState::update_snapshot`, which overwrites the sequence
+            // with a monotonic revision. Direct `SnapshotBuilder::build`
+            // callers (tests) do not need a non-zero value.
+            snapshot_seq: 0,
         }
     }
 }

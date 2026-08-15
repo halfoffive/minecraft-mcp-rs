@@ -61,7 +61,7 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         // UseItemOnBlock additionally takes an optional hotbar slot (0-8)
         // and an optional expected placement position (validated like any
         // other block position below).
-        BotCommand::UseItemOnBlock(pos, slot, _) => {
+        BotCommand::UseItemOnBlock(pos, slot, effect_pos) => {
             validate_position(pos)?;
             if let Some(s) = slot
                 && *s > 8
@@ -69,6 +69,9 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
                 return Err(BotError::InvalidParams(format!(
                     "UseItemOnBlock hotbar slot must be 0-8, got {s}"
                 )));
+            }
+            if let Some(effect) = effect_pos {
+                validate_position(effect)?;
             }
             Ok(())
         }
@@ -548,6 +551,18 @@ mod tests {
         assert!(validate_command(&cmd).is_err());
         // u8::MAX is far out of range.
         let cmd = BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), Some(u8::MAX), None);
+        assert!(validate_command(&cmd).is_err());
+    }
+
+    #[test]
+    fn test_use_item_on_block_invalid_effect_position() {
+        // The expected placement cell must also be inside world bounds —
+        // previously only the right-clicked block was validated.
+        let cmd = BotCommand::UseItemOnBlock(
+            BlockPos::new(0, 320, 0),
+            None,
+            Some(BlockPos::new(0, 321, 0)),
+        );
         assert!(validate_command(&cmd).is_err());
     }
 

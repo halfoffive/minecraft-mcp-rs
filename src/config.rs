@@ -320,35 +320,100 @@ impl AppConfig {
     pub fn from_env() -> AppConfig {
         let mut config = AppConfig::default();
         config.mc_address = env_var_or("MINECRAFT_MCP_MC_ADDRESS", config.mc_address);
-        config.mc_port = env_parse_or("MINECRAFT_MCP_MC_PORT", config.mc_port);
+        config.mc_port = env_parse_or_validated("MINECRAFT_MCP_MC_PORT", config.mc_port, |v| {
+            if *v == 0 {
+                Err("must be greater than 0".into())
+            } else {
+                Ok(())
+            }
+        });
         config.ai_username = env_var_or("MINECRAFT_MCP_AI_USERNAME", config.ai_username);
         config.mcp_address = env_var_or("MINECRAFT_MCP_MCP_ADDRESS", config.mcp_address);
-        config.mcp_port = env_parse_or("MINECRAFT_MCP_MCP_PORT", config.mcp_port);
+        config.mcp_port = env_parse_or_validated("MINECRAFT_MCP_MCP_PORT", config.mcp_port, |v| {
+            if *v == 0 {
+                Err("must be greater than 0".into())
+            } else {
+                Ok(())
+            }
+        });
         config.task_name = env_var_or("MINECRAFT_MCP_TASK_NAME", config.task_name);
-        config.chunk_scan_radius =
-            env_parse_or("MINECRAFT_MCP_CHUNK_SCAN_RADIUS", config.chunk_scan_radius);
-        config.block_perception_radius = env_parse_or(
+        config.chunk_scan_radius = env_parse_or_validated(
+            "MINECRAFT_MCP_CHUNK_SCAN_RADIUS",
+            config.chunk_scan_radius,
+            |v| {
+                if !(1..=16).contains(v) {
+                    Err(format!("must be between 1 and 16, got {v}"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        config.block_perception_radius = env_parse_or_validated(
             "MINECRAFT_MCP_BLOCK_PERCEPTION_RADIUS",
             config.block_perception_radius,
+            |v| {
+                if !(8..=64).contains(v) {
+                    Err(format!("must be between 8 and 64, got {v}"))
+                } else {
+                    Ok(())
+                }
+            },
         );
-        config.snapshot_interval_ms = env_parse_or(
+        config.snapshot_interval_ms = env_parse_or_validated(
             "MINECRAFT_MCP_SNAPSHOT_INTERVAL_MS",
             config.snapshot_interval_ms,
+            |v| {
+                if *v == 0 {
+                    Err("must be greater than 0".into())
+                } else {
+                    Ok(())
+                }
+            },
         );
-        config.reconnect_initial_delay_ms = env_parse_or(
+        config.reconnect_initial_delay_ms = env_parse_or_validated(
             "MINECRAFT_MCP_RECONNECT_INITIAL_DELAY_MS",
             config.reconnect_initial_delay_ms,
+            |v| {
+                if *v == 0 {
+                    Err("must be greater than 0".into())
+                } else {
+                    Ok(())
+                }
+            },
         );
-        config.reconnect_max_delay_ms = env_parse_or(
+        config.reconnect_max_delay_ms = env_parse_or_validated(
             "MINECRAFT_MCP_RECONNECT_MAX_DELAY_MS",
             config.reconnect_max_delay_ms,
+            |v| {
+                if *v == 0 {
+                    Err("must be greater than 0".into())
+                } else {
+                    Ok(())
+                }
+            },
         );
-        config.command_timeout_secs = env_parse_or(
+        config.command_timeout_secs = env_parse_or_validated(
             "MINECRAFT_MCP_COMMAND_TIMEOUT_SECS",
             config.command_timeout_secs,
+            |v| {
+                if *v == 0 {
+                    Err("must be greater than 0".into())
+                } else {
+                    Ok(())
+                }
+            },
         );
-        config.fly_timeout_secs =
-            env_parse_or("MINECRAFT_MCP_FLY_TIMEOUT_SECS", config.fly_timeout_secs);
+        config.fly_timeout_secs = env_parse_or_validated(
+            "MINECRAFT_MCP_FLY_TIMEOUT_SECS",
+            config.fly_timeout_secs,
+            |v| {
+                if *v == 0 {
+                    Err("must be greater than 0".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
         config.mcp_token = env_var_or("MINECRAFT_MCP_TOKEN", config.mcp_token);
         config.mcp_auth_enabled =
             env_parse_or("MINECRAFT_MCP_AUTH_ENABLED", config.mcp_auth_enabled);
@@ -396,6 +461,45 @@ fn env_parse_or<T: std::str::FromStr>(name: &str, fallback: T) -> T {
     match std::env::var(name) {
         Ok(v) => match v.parse::<T>() {
             Ok(parsed) => parsed,
+            Err(_) => {
+                tracing::warn!(
+                    name,
+                    value = %v,
+                    "invalid value for environment variable; using default"
+                );
+                fallback
+            }
+        },
+        Err(_) => fallback,
+    }
+}
+
+/// Parse a numeric env var, then apply a range/semantic validation.
+///
+/// Malformed values warn and keep the default, exactly like [`env_parse_or`].
+/// Values that parse but are semantically invalid (e.g. `0` for a positive
+/// duration or an out-of-range radius) also warn and keep the default, so a
+/// stale environment can never wedge the process with `snapshot_interval_ms=0`
+/// or `command_timeout_secs=0`.
+fn env_parse_or_validated<T, F>(name: &str, fallback: T, validate: F) -> T
+where
+    T: std::str::FromStr,
+    F: FnOnce(&T) -> Result<(), String>,
+{
+    match std::env::var(name) {
+        Ok(v) => match v.parse::<T>() {
+            Ok(parsed) => match validate(&parsed) {
+                Ok(()) => parsed,
+                Err(reason) => {
+                    tracing::warn!(
+                        name,
+                        value = %v,
+                        %reason,
+                        "invalid value for environment variable; using default"
+                    );
+                    fallback
+                }
+            },
             Err(_) => {
                 tracing::warn!(
                     name,
@@ -1000,6 +1104,44 @@ mod tests {
         assert_eq!(config.mcp_auth_enabled, defaults.mcp_auth_enabled);
         assert_eq!(config.mcp_transport, defaults.mcp_transport);
         assert_eq!(config.language, defaults.language);
+    }
+
+    #[test]
+    fn test_from_env_zero_values_fall_back_without_panic() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = [
+            EnvGuard::set("MINECRAFT_MCP_MC_PORT", "0"),
+            EnvGuard::set("MINECRAFT_MCP_MCP_PORT", "0"),
+            EnvGuard::set("MINECRAFT_MCP_CHUNK_SCAN_RADIUS", "0"),
+            EnvGuard::set("MINECRAFT_MCP_BLOCK_PERCEPTION_RADIUS", "0"),
+            EnvGuard::set("MINECRAFT_MCP_SNAPSHOT_INTERVAL_MS", "0"),
+            EnvGuard::set("MINECRAFT_MCP_RECONNECT_INITIAL_DELAY_MS", "0"),
+            EnvGuard::set("MINECRAFT_MCP_RECONNECT_MAX_DELAY_MS", "0"),
+            EnvGuard::set("MINECRAFT_MCP_COMMAND_TIMEOUT_SECS", "0"),
+            EnvGuard::set("MINECRAFT_MCP_FLY_TIMEOUT_SECS", "0"),
+        ];
+        let config = AppConfig::from_env();
+        let defaults = AppConfig::default();
+        assert_eq!(config.mc_port, defaults.mc_port);
+        assert_eq!(config.mcp_port, defaults.mcp_port);
+        assert_eq!(config.chunk_scan_radius, defaults.chunk_scan_radius);
+        assert_eq!(
+            config.block_perception_radius,
+            defaults.block_perception_radius
+        );
+        assert_eq!(config.snapshot_interval_ms, defaults.snapshot_interval_ms);
+        assert_eq!(
+            config.reconnect_initial_delay_ms,
+            defaults.reconnect_initial_delay_ms
+        );
+        assert_eq!(
+            config.reconnect_max_delay_ms,
+            defaults.reconnect_max_delay_ms
+        );
+        assert_eq!(config.command_timeout_secs, defaults.command_timeout_secs);
+        assert_eq!(config.fly_timeout_secs, defaults.fly_timeout_secs);
+        // The resulting config must pass full validation too.
+        assert!(config.validate().is_ok());
     }
 
     #[test]

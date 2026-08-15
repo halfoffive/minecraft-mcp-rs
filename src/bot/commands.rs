@@ -1818,15 +1818,13 @@ impl<B: BotActions> CommandExecutor<B> {
         let current_pos = snapshot.self_player.position;
 
         if gamemode != GameMode::Creative {
-            return Ok(BotResult {
-                success: true,
-                message: format!("FlyTo {target}: not in creative mode"),
-                data: Some(serde_json::json!({
-                    "reached": false,
-                    "reason": "not_creative",
-                    "position": [current_pos.x, current_pos.y, current_pos.z],
-                })),
-            });
+            // Act(Fly) reaches this handler without the MCP layer's creative
+            // gate, so enforce it here too. Returning `success: true` with
+            // `reached: false` was dishonest — the bot cannot fly, so the
+            // action failed.
+            return Err(BotError::PermissionDenied(
+                "FlyTo requires Creative mode".into(),
+            ));
         }
 
         // Horizontal leg: path to the target XZ at the current Y. Keeping Y
@@ -1893,19 +1891,14 @@ impl<B: BotActions> CommandExecutor<B> {
         let player_pos = snapshot.self_player.position;
         let r = clamp_to_i32(radius);
 
-        // Filter for item entities within radius. Entity types from azalea
-        // for dropped items contain "item" (e.g. "item", "item_frame").
-        // We match case-insensitively on "item" but exclude "item_frame"
-        // since those are not pickup-able.
+        // Filter for dropped-item entities within radius. azalea reports
+        // dropped items as `item` (and some versions as `item_entity`).
+        // `is_collectible_item_entity` matches only those two —
+        // `item_frame` and `item_display` are not pickup-able.
         let item_targets: Vec<BlockPos> = snapshot
             .entities
             .iter()
-            .filter(|e| {
-                let etype = e.entity_type.to_lowercase();
-                etype == "item"
-                    || etype == "item_entity"
-                    || (etype.contains("item") && !etype.contains("frame"))
-            })
+            .filter(|e| is_collectible_item_entity(&e.entity_type))
             .filter(|e| {
                 (e.position.x - player_pos.x).abs() <= r
                     && (e.position.y - player_pos.y).abs() <= r
@@ -2085,6 +2078,17 @@ fn item_has_placement_effect(item_id: &str) -> bool {
         return true;
     }
     crate::block_data::BLOCK_TO_TOOL_TYPE.contains_key(item_id)
+}
+
+/// Whether an entity type string is a dropped-item entity that can be picked
+/// up by walking over it.
+///
+/// azalea reports dropped items as `item` (and some versions as
+/// `item_entity`). `item_frame` and `item_display` are block-like/display
+/// entities and must NOT be treated as drops.
+fn is_collectible_item_entity(entity_type: &str) -> bool {
+    let etype = entity_type.to_lowercase();
+    etype == "item" || etype == "item_entity"
 }
 
 /// How long the executor waits for server feedback after sending a
@@ -4428,6 +4432,47 @@ mod tests {
 
         // No teleport must have been issued past the obstacle.
         assert!(log.teleport_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_fly_to_not_creative_is_permission_denied() {
+        // Act(Fly) reaches the executor without the MCP layer's creative
+        // gate, so `handle_fly_to` must reject non-creative mode itself
+        // instead of returning `success: true, reached: false`.
+        let (executor, sender, state, log) = make_executor();
+        state.update_snapshot(crate::types::WorldSnapshot {
+            self_player: SelfPlayer {
+                position: BlockPos::new(0, 64, 0),
+                gamemode: GameMode::Survival,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(10, 70, 0);
+        let result = send_and_await(&sender, BotCommand::FlyTo(target)).await;
+        assert!(
+            matches!(result, Err(BotError::PermissionDenied(_))),
+            "expected PermissionDenied, got: {result:?}"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        // No movement or teleport must have been attempted.
+        assert!(log.goto_calls.lock().unwrap().is_empty());
+        assert!(log.teleport_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_is_collectible_item_entity_exact_match_only() {
+        assert!(is_collectible_item_entity("item"));
+        assert!(is_collectible_item_entity("ITEM"));
+        assert!(is_collectible_item_entity("item_entity"));
+        assert!(!is_collectible_item_entity("item_frame"));
+        assert!(!is_collectible_item_entity("item_display"));
+        assert!(!is_collectible_item_entity("zombie"));
     }
 
     // ═══════════════════════════════════════════════════════════════
