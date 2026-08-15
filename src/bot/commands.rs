@@ -14,11 +14,12 @@ use tokio::time::sleep;
 use tracing::{debug, trace, warn};
 
 use crate::block_data::ItemStack;
-use crate::bot::ops::CompoundOpExecutor;
+use crate::bot::ops::{CompoundOpExecutor, wait_for_block_present};
 use crate::channel::{
     BotCommandReceiver, BotCommandSender, BotCommandWithResponder, ReceiverLease,
 };
 use crate::command_validate::clamp_to_i32;
+use crate::compound_ops::find_standable_neighbor;
 use crate::error::BotError;
 use crate::state::SharedState;
 use crate::tool_select::{build_tool_alternatives, find_tool_in_inventory};
@@ -702,6 +703,11 @@ impl<B: BotActions> CommandExecutor<B> {
         // and covers commands generated internally by compound operations.
         crate::command_validate::validate_command(&cmd)?;
 
+        // Record command activity so the snapshot updater keeps its fast
+        // rebuild interval while commands keep arriving (idle bots relax to
+        // a slower interval).
+        self.state.mark_command_activity();
+
         // Check online status for commands that require a connection.
         if !self.state.is_online() {
             return Err(BotError::Offline("bot is not connected".into()));
@@ -719,8 +725,9 @@ impl<B: BotActions> CommandExecutor<B> {
             // ── Block interaction ─────────────────────────────────
             BotCommand::BreakBlock(pos) => self.handle_break_block(pos),
             BotCommand::PlaceBlock(pos, block_type) => self.handle_place_block(pos, block_type),
-            BotCommand::UseItemOnBlock(pos, item_slot) => {
-                self.handle_use_item_on_block(pos, item_slot)
+            BotCommand::UseItemOnBlock(pos, item_slot, effect_pos) => {
+                self.handle_use_item_on_block(pos, item_slot, effect_pos)
+                    .await
             }
 
             // ── Item / inventory ──────────────────────────────────
@@ -809,9 +816,25 @@ impl<B: BotActions> CommandExecutor<B> {
     /// On timeout the pathfinder is stopped so the bot does not keep walking
     /// toward a goal the caller has already given up on.
     async fn goto_with_margin(&self, target: BlockPos) -> GotoOutcome {
+        self.goto_with_margin_with_timeout(target, None).await
+    }
+
+    /// [`Self::goto_with_margin`] with an explicit timeout override.
+    ///
+    /// `timeout_secs` replaces the configured `command_timeout_secs` (used
+    /// by `fly_to`, whose long flights need their own `fly_timeout_secs`
+    /// — see [`crate::config::AppConfig::fly_timeout_secs`]).
+    async fn goto_with_margin_with_timeout(
+        &self,
+        target: BlockPos,
+        timeout_secs: Option<u64>,
+    ) -> GotoOutcome {
         // Read the configured timeout from shared state — the same value
-        // `BotCommandSender::send_command`'s envelope timeout uses.
-        let timeout_dur = Duration::from_secs(self.state.read_config().command_timeout_secs);
+        // `BotCommandSender::send_command`'s envelope timeout uses (the
+        // per-command fly override matches `timeout_for`).
+        let timeout_dur = Duration::from_secs(
+            timeout_secs.unwrap_or_else(|| self.state.read_config().command_timeout_secs),
+        );
         let timeout_secs = timeout_dur.as_secs();
         // Leave a small margin for the executor to reply before the envelope
         // timeout in `BotCommandSender::send_command` abandons the response.
@@ -963,12 +986,34 @@ impl<B: BotActions> CommandExecutor<B> {
         })
     }
 
-    fn handle_use_item_on_block(
+    /// Use an item on a block, with optional placement verification.
+    ///
+    /// `pos` is the block actually right-clicked; `effect_pos` (when `Some`)
+    /// is the position where the item's effect is EXPECTED to land (e.g. the
+    /// cell a water bucket should fill). With `effect_pos` set the handler:
+    ///
+    /// 1. Pre-checks `pos` is in the world snapshot and `effect_pos` is
+    ///    currently air/empty — an occupied target yields an explicit
+    ///    `InvalidParams` ("cannot place into an occupied cell") instead of a
+    ///    fake success.
+    /// 2. Auto-approaches `pos` when the bot is out of interaction range
+    ///    (4.5 blocks, survival reach) — the server silently rejects
+    ///    out-of-range interactions, which previously surfaced as
+    ///    "success with no world change".
+    /// 3. After the click, polls the snapshot until `effect_pos` turns
+    ///    non-air (server-side confirmation). A timeout returns an explicit
+    ///    `success: false` result with the held item named, instead of the
+    ///    old fire-and-forget "success".
+    ///
+    /// Items without a placement effect (tools, food, interactables like
+    /// chests) skip verification and keep the legacy "Used X" report.
+    async fn handle_use_item_on_block(
         &self,
         pos: BlockPos,
         item_slot: Option<u8>,
+        effect_pos: Option<BlockPos>,
     ) -> Result<BotResult, BotError> {
-        trace!(?pos, ?item_slot, "UseItemOnBlock");
+        trace!(?pos, ?item_slot, ?effect_pos, "UseItemOnBlock");
         // If a hotbar slot was specified, select it before interacting so the
         // correct item is used. Mirrors `handle_switch_hotbar_slot`'s range
         // check (the MCP layer also validates, but defend in depth).
@@ -982,15 +1027,11 @@ impl<B: BotActions> CommandExecutor<B> {
                 "item_slot {slot} out of hotbar range (0-8)"
             )));
         }
-        if let Some(slot) = item_slot {
-            self.bot.switch_hotbar_slot(slot);
-        }
-        self.bot.block_interact(&pos);
 
-        // Report the item that was actually used: the smoke test's water-
-        // bucket failure was caused by a wrong held slot, and an honest
-        // "Used X" message lets the caller verify the right item was in hand.
         let snapshot = self.state.read_snapshot();
+
+        // Identify the item that will be used (for the confirmation gate and
+        // the result message).
         let used_slot = item_slot.unwrap_or(snapshot.self_player.held_item_slot);
         let used_item = snapshot
             .self_player
@@ -998,7 +1039,102 @@ impl<B: BotActions> CommandExecutor<B> {
             .iter()
             .find(|entry| entry.slot_index == used_slot)
             .map(|entry| entry.item_id.as_str())
-            .unwrap_or("empty");
+            .unwrap_or("empty")
+            .to_string();
+
+        // Placement verification path (fluid buckets / placeable blocks).
+        if let Some(effect) = effect_pos {
+            // (1) Pre-check the interaction target exists in the snapshot
+            // and the effect cell is currently empty (air or unknown).
+            if !snapshot.block_index.contains_key(&pos) {
+                return Err(BotError::ChunkNotLoaded(pos));
+            }
+            let effect_occupied = snapshot
+                .block_index
+                .get(&effect)
+                .map(|&idx| !snapshot.blocks[idx].block_type.eq_ignore_ascii_case("air"))
+                .unwrap_or(false);
+            if effect_occupied {
+                let occupant = snapshot
+                    .block_index
+                    .get(&effect)
+                    .map(|&idx| snapshot.blocks[idx].block_type.clone())
+                    .unwrap_or_default();
+                return Err(BotError::InvalidParams(format!(
+                    "cannot use item at {}: target cell {} is already occupied by {occupant} (a fluid bucket/block lands in the cell the used face opens into)",
+                    pos, effect
+                )));
+            }
+
+            // (2) Auto-approach when out of interaction range. Minecraft's
+            // survival reach is 4.5 blocks; the server silently drops
+            // interactions beyond it (the historical fake-success bug).
+            const INTERACT_REACH: f64 = 4.5;
+            let player_pos = snapshot.self_player.position;
+            if distance_between(player_pos, pos) > INTERACT_REACH {
+                let fresh = self.state.read_snapshot();
+                let stand = match find_standable_neighbor(&fresh, pos) {
+                    Some(s) => s,
+                    None => {
+                        return Err(BotError::Internal(format!(
+                            "no standable position adjacent to interaction target {pos}"
+                        )));
+                    }
+                };
+                // Best-effort approach: a movement failure falls through to
+                // the (now honest) result below rather than aborting early.
+                let _ = self.goto_with_margin(stand).await;
+            }
+        }
+
+        // (3) Switch slot and right-click.
+        if let Some(slot) = item_slot {
+            self.bot.switch_hotbar_slot(slot);
+        }
+        self.bot.block_interact(&pos);
+
+        // (4) Server-side confirmation: poll the snapshot until the effect
+        // cell turns non-air. Only placement items are verified; everything
+        // else keeps the legacy report.
+        if let Some(effect) = effect_pos
+            && item_has_placement_effect(&used_item)
+        {
+            let budget = Duration::from_millis(self.state.read_config().snapshot_interval_ms + 250);
+            if wait_for_block_present(&self.state, effect, budget).await {
+                return Ok(BotResult {
+                    success: true,
+                    message: format!(
+                        "Used {used_item} on block at {} (slot {used_slot}); confirmed at {}",
+                        pos, effect
+                    ),
+                    data: Some(serde_json::json!({
+                        "verified": true,
+                        "effect_position": effect,
+                        "item": used_item,
+                    })),
+                });
+            }
+            // Honest failure: the click was sent but the world never changed.
+            warn!(
+                ?pos,
+                ?effect,
+                %used_item,
+                "use_item_on_block: no effect observed at target cell"
+            );
+            return Ok(BotResult {
+                success: false,
+                message: format!(
+                    "use_item_on_block: no effect observed at {effect} within {} ms (used {used_item} on {pos}); the interaction was likely rejected by the server",
+                    budget.as_millis()
+                ),
+                data: Some(serde_json::json!({
+                    "verified": false,
+                    "effect_position": effect,
+                    "item": used_item,
+                })),
+            });
+        }
+
         Ok(BotResult {
             success: true,
             message: format!("Used {used_item} on block at {} (slot {used_slot})", pos),
@@ -1428,6 +1564,9 @@ impl<B: BotActions> CommandExecutor<B> {
         drop(fresh);
 
         self.bot.attack_entity(entity_id)?;
+        // Report the bot's position: the auto-approach above may have moved
+        // the bot, and the caller must see that drift in the result.
+        let final_pos = self.state.read_snapshot().self_player.position;
         Ok(BotResult {
             success: true,
             message: if approached {
@@ -1437,7 +1576,7 @@ impl<B: BotActions> CommandExecutor<B> {
             } else {
                 format!("Attacked entity {entity_id}")
             },
-            data: None,
+            data: Some(serde_json::json!({"position": final_pos})),
         })
     }
 
@@ -1693,7 +1832,13 @@ impl<B: BotActions> CommandExecutor<B> {
         // Horizontal leg: path to the target XZ at the current Y. Keeping Y
         // unchanged makes the goal reachable by azalea's ground pathfinder.
         let horizontal_target = BlockPos::new(target.x, current_pos.y, target.z);
-        match self.goto_with_margin(horizontal_target).await {
+        // Long flights need a longer window than ordinary commands: use the
+        // dedicated fly timeout (default 60 s).
+        let fly_timeout = self.state.read_config().fly_timeout_secs;
+        match self
+            .goto_with_margin_with_timeout(horizontal_target, Some(fly_timeout))
+            .await
+        {
             GotoOutcome::TimedOut {
                 start,
                 current,
@@ -1787,12 +1932,19 @@ impl<B: BotActions> CommandExecutor<B> {
             }
         }
 
+        // Report the bot's END position: collect_items walks toward every
+        // target, so callers must be able to detect the drift without a
+        // separate get_self_info round-trip.
+        let final_pos = self.state.read_snapshot().self_player.position;
         Ok(BotResult {
             success: true,
             message: format!(
                 "Visited {visited} item drop location(s); auto-pickup expected on proximity"
             ),
-            data: Some(serde_json::json!({"visited": visited})),
+            data: Some(serde_json::json!({
+                "visited": visited,
+                "position": final_pos,
+            })),
         })
     }
 
@@ -1920,6 +2072,19 @@ fn distance_between(a: BlockPos, b: BlockPos) -> f64 {
     let dy = (a.y - b.y) as f64;
     let dz = (a.z - b.z) as f64;
     (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// Whether using this item is expected to place a block/fluid in the world
+/// (thus needs server-side confirmation after the click).
+///
+/// Fluid buckets (water/lava/powder snow) place a fluid block; milk does
+/// not. Placeable blocks are detected via the block-to-tool table, which
+/// carries an entry for every mined/placed block.
+fn item_has_placement_effect(item_id: &str) -> bool {
+    if item_id.ends_with("_bucket") && !item_id.contains("milk") {
+        return true;
+    }
+    crate::block_data::BLOCK_TO_TOOL_TYPE.contains_key(item_id)
 }
 
 /// How long the executor waits for server feedback after sending a
@@ -3682,7 +3847,7 @@ mod tests {
         let handle = spawn_executor(executor);
 
         let pos = BlockPos::new(5, 65, 5);
-        let result = send_and_await(&sender, BotCommand::UseItemOnBlock(pos, None)).await;
+        let result = send_and_await(&sender, BotCommand::UseItemOnBlock(pos, None, None)).await;
         assert!(result.is_ok());
 
         drop(sender);
@@ -3703,7 +3868,7 @@ mod tests {
         let handle = spawn_executor(executor);
 
         let pos = BlockPos::new(5, 65, 5);
-        let result = send_and_await(&sender, BotCommand::UseItemOnBlock(pos, Some(3))).await;
+        let result = send_and_await(&sender, BotCommand::UseItemOnBlock(pos, Some(3), None)).await;
         assert!(result.is_ok());
 
         drop(sender);
@@ -3734,7 +3899,7 @@ mod tests {
         let handle = spawn_executor(executor);
 
         let pos = BlockPos::new(5, 65, 5);
-        let result = send_and_await(&sender, BotCommand::UseItemOnBlock(pos, None)).await;
+        let result = send_and_await(&sender, BotCommand::UseItemOnBlock(pos, None, None)).await;
         let br = result.expect("expected Ok(BotResult)");
         assert!(
             br.message.contains("water_bucket"),
@@ -3746,15 +3911,15 @@ mod tests {
         handle.await.expect("executor should finish");
     }
 
-    #[test]
-    fn test_use_item_on_block_out_of_range_slot_direct_handler() {
+    #[tokio::test]
+    async fn test_use_item_on_block_out_of_range_slot_direct_handler() {
         // Defense-in-depth: dispatch's central gate already rejects
         // item_slot > 8, but the handler's own branch must carry
         // `InvalidParams` (not `Internal`) and must not interact.
         let (executor, _sender, _state, log) = make_executor();
 
         let pos = BlockPos::new(5, 65, 5);
-        let result = executor.handle_use_item_on_block(pos, Some(9));
+        let result = executor.handle_use_item_on_block(pos, Some(9), None).await;
         assert!(
             matches!(result, Err(BotError::InvalidParams(ref msg))
                 if msg.contains("out of hotbar range")),

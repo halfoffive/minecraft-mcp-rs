@@ -148,7 +148,15 @@ pub enum BotCommand {
     ///
     /// The second argument is an optional hotbar slot (0-8) to select before
     /// interacting. `None` keeps the currently held item.
-    UseItemOnBlock(BlockPos, Option<u8>),
+    ///
+    /// The third argument is the expected placement/effect position `T`
+    /// (for fluid buckets / placeable blocks). `Some(T)` makes the executor
+    /// pre-check that T is empty, auto-approach the block when out of
+    /// interaction range, and after interacting poll the snapshot until T
+    /// turns non-air (server-side confirmation) — a timeout yields an
+    /// explicit failure instead of a fake success. `None` keeps the legacy
+    /// fire-and-forget semantics.
+    UseItemOnBlock(BlockPos, Option<u8>, Option<BlockPos>),
     /// Switch to a hotbar slot (0-8).
     SwitchHotbarSlot(u8),
     /// Drop items from a slot.
@@ -515,7 +523,7 @@ mod tests {
             BotCommand::Teleport(_) => 1,
             BotCommand::BreakBlock(_) => 1,
             BotCommand::PlaceBlock(_, _) => 1,
-            BotCommand::UseItemOnBlock(_, _) => 1,
+            BotCommand::UseItemOnBlock(_, _, _) => 1,
             BotCommand::SwitchHotbarSlot(_) => 1,
             BotCommand::DropItem(_, _) => 1,
             BotCommand::MoveItemToHotbar(_, _, _) => 1,
@@ -817,7 +825,7 @@ mod tests {
             BotCommand::Teleport(BlockPos::new(0, 0, 0)),
             BotCommand::BreakBlock(BlockPos::new(0, 0, 0)),
             BotCommand::PlaceBlock(BlockPos::new(0, 0, 0), "stone".into()),
-            BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None),
+            BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None, None),
             BotCommand::SwitchHotbarSlot(0),
             BotCommand::DropItem(0, 1),
             BotCommand::MoveItemToHotbar(0, "dirt".into(), 1),
