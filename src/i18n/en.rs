@@ -62,6 +62,7 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::ReconnectInitialDelay => "Reconnect Initial Delay (ms):",
         TextKey::ReconnectMaxDelay => "Reconnect Max Delay (ms):",
         TextKey::CommandTimeout => "Command Timeout (s):",
+        TextKey::FlyTimeout => "Fly Timeout (s):",
 
         // ── Connect / Disconnect buttons ───────────────────────────────
         TextKey::Connect => "Connect",
@@ -194,6 +195,7 @@ mod tests {
             TextKey::ReconnectInitialDelay,
             TextKey::ReconnectMaxDelay,
             TextKey::CommandTimeout,
+            TextKey::FlyTimeout,
             TextKey::Connect,
             TextKey::Disconnect,
             TextKey::Connected,

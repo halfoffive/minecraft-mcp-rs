@@ -143,6 +143,10 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
         ui.label(i18n::tr(TextKey::CommandTimeout));
         ui.add(DragValue::new(&mut edit.command_timeout_secs).range(1..=300));
     });
+    ui.horizontal(|ui| {
+        ui.label(i18n::tr(TextKey::FlyTimeout));
+        ui.add(DragValue::new(&mut edit.fly_timeout_secs).range(1..=600));
+    });
 
     ui.separator();
 

@@ -13,7 +13,7 @@ use arc_swap::ArcSwap;
 use azalea::container::ContainerHandle;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -262,6 +262,10 @@ pub struct SharedState {
     /// by `get_server_info` (and other query tools) so clients can tell that
     /// a `force` snapshot refresh may return pre-command state.
     executor_busy: AtomicBool,
+    /// Epoch-millis timestamp of the last dispatched bot command
+    /// (0 = never). The snapshot updater reads this to relax its rebuild
+    /// interval while the bot is idle.
+    last_command_at: AtomicU64,
 }
 
 impl SharedState {
@@ -313,6 +317,7 @@ impl SharedState {
             snapshot_force: Mutex::new(None),
             commands_probe: Mutex::new(None),
             executor_busy: AtomicBool::new(false),
+            last_command_at: AtomicU64::new(0),
         }
     }
 
@@ -689,6 +694,24 @@ impl SharedState {
     /// Read the command-executor busy flag.
     pub fn executor_busy(&self) -> bool {
         self.executor_busy.load(Ordering::Relaxed)
+    }
+
+    /// Record that a bot command was dispatched right now (epoch millis).
+    ///
+    /// Called by the command executor on every dispatch; the snapshot
+    /// updater keeps the fast rebuild interval only while commands keep
+    /// arriving.
+    pub fn mark_command_activity(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.last_command_at.store(now, Ordering::Relaxed);
+    }
+
+    /// Epoch-millis timestamp of the last dispatched command (0 = never).
+    pub fn last_command_at_ms(&self) -> u64 {
+        self.last_command_at.load(Ordering::Relaxed)
     }
 
     /// Store the last error message reported by the bot/MCP layer.
