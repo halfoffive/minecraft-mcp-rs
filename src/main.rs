@@ -42,8 +42,6 @@ fn main() {
     // ══════════════════════════════════════════════════════════════════
     init_logging();
 
-    tracing::info!("Minecraft MCP server starting");
-
     // ══════════════════════════════════════════════════════════════════
     // Parse CLI arguments with clap. Help/version print to stderr and
     // exit 0; a usage error prints to stderr and exits 2 (stdout stays
@@ -73,13 +71,19 @@ fn main() {
         return;
     }
 
+    // The MCP server only starts in Gui/Headless mode — the log line must
+    // come AFTER the mode is resolved so a bare `minecraft-mcp-rs` invocation
+    // (help mode) never claims the server is starting.
+    tracing::info!("Minecraft MCP server starting");
+
     // ══════════════════════════════════════════════════════════════════
-    // Load the config file (explicit path via --config, else the OS config
-    // dir), then apply CLI overrides. `--stdio` forces the stdio MCP
-    // transport so `npx minecraft-mcp-rs --headless --stdio` works
-    // regardless of what the config file says.
+    // Load configuration from environment variables (MINECRAFT_MCP_*,
+    // cargo-style 12-factor — no config file anymore), then apply CLI
+    // overrides. `--stdio` forces the stdio MCP transport so
+    // `npx minecraft-mcp-rs --headless --stdio` works regardless of what
+    // the environment says.
     // ══════════════════════════════════════════════════════════════════
-    let mut config = AppConfig::load_from_disk(args.config_path.as_deref());
+    let mut config = AppConfig::from_env();
     if args.force_stdio {
         config.mcp_transport = McpTransport::Stdio;
     }

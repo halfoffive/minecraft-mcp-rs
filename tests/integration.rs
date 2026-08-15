@@ -539,7 +539,7 @@ async fn test_query_tools_offline_return_error() {
         Err(BotError::Offline(_))
     ));
     assert!(matches!(
-        minecraft_mcp_rs::mcp::tools_query::get_nearby_blocks(&state, 10, None),
+        minecraft_mcp_rs::mcp::tools_query::get_nearby_blocks(&state, 10, None, false, 500),
         Err(BotError::Offline(_))
     ));
     assert!(matches!(
@@ -865,7 +865,7 @@ async fn test_all_query_tools_exist_and_work() {
     assert!(inventory.contains("held_item_slot"));
 
     let nearby_blocks =
-        minecraft_mcp_rs::mcp::tools_query::get_nearby_blocks(&state, 1, None).unwrap();
+        minecraft_mcp_rs::mcp::tools_query::get_nearby_blocks(&state, 1, None, false, 500).unwrap();
     assert!(!nearby_blocks.is_empty());
 
     let nearby_entities =
@@ -905,7 +905,7 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
         BotCommand::Teleport(BlockPos::new(0, 64, 0)),
         BotCommand::BreakBlock(BlockPos::new(0, 64, 0)),
         BotCommand::PlaceBlock(BlockPos::new(0, 64, 0), "slot:0".into()),
-        BotCommand::UseItemOnBlock(BlockPos::new(0, 64, 0), None),
+        BotCommand::UseItemOnBlock(BlockPos::new(0, 64, 0), None, None),
         BotCommand::SwitchHotbarSlot(0),
         BotCommand::DropItem(0, 1),
         BotCommand::UseItem,
@@ -1352,10 +1352,6 @@ fn test_get_settings_works_offline_and_redacts_token() {
         "real token must never leak: {result}"
     );
     assert!(result.contains("\"online\": false"), "got: {result}");
-    assert!(
-        result.contains("\"config_path\":"),
-        "runtime block should include config_path: {result}"
-    );
 }
 
 /// `update_settings` with an invalid port fails with `InvalidParams` before
@@ -1376,22 +1372,10 @@ fn test_update_settings_invalid_port_rejected() {
     }
 }
 
-/// `update_settings` applies a valid partial update in memory and persists it
-/// to the real config path (the tool always uses it). The pre-existing config
-/// file — if any — is restored afterwards so the test never leaves the host's
-/// real settings clobbered.
+/// `update_settings` applies a valid partial update in memory (no file
+/// persistence — the environment-variable config source has no file I/O).
 #[test]
 fn test_update_settings_applies_valid_input() {
-    // Snapshot any pre-existing config so we can restore it after the test.
-    let cfg_path = minecraft_mcp_rs::config::config_path()
-        .expect("OS config dir should be discoverable on the test host");
-    let had_original = cfg_path.exists();
-    let original = if had_original {
-        Some(std::fs::read_to_string(&cfg_path).expect("read pre-existing config"))
-    } else {
-        None
-    };
-
     let state = make_offline_state();
     let input = minecraft_mcp_rs::mcp::tools_settings::UpdateSettingsInput {
         task_name: Some("itest-task".into()),
@@ -1405,20 +1389,15 @@ fn test_update_settings_applies_valid_input() {
         v["applied"]["task_name"], "itest-task",
         "response must report the applied field: {result}"
     );
-    assert_eq!(v["persisted"], true, "response must report persistence");
     assert_eq!(
         state.read_config().task_name,
         "itest-task",
         "in-memory config must reflect the applied update"
     );
-
-    // Restore the host's real config file (or remove the one we created).
-    match original {
-        Some(content) => std::fs::write(&cfg_path, content).expect("restore config"),
-        None => {
-            let _ = std::fs::remove_file(&cfg_path);
-        }
-    }
+    assert!(
+        !result.contains("\"persisted\""),
+        "response must not claim disk persistence: {result}"
+    );
 }
 
 /// `connect_bot` spawns a connection thread even while the bot is offline,
