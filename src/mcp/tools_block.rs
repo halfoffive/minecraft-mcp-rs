@@ -25,7 +25,11 @@ pub const CREATIVE_MODE_HINT: &str =
 pub const BREAK_BLOCK_DESCRIPTION: &str = "Break a block at the given position. By default (use_best_tool=true) runs the full compound mine flow (tool selection, movement, mining, verification) equivalent to act(Mine). In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
 
 /// Full description for the `place_block` MCP tool.
-pub const PLACE_BLOCK_DESCRIPTION: &str = "Place a block at the given position. In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
+///
+/// The placed block occupies exactly `(x, y, z)`. `y` must be in
+/// `-63..=320` — `y=-64` is rejected because the block is placed by
+/// right-clicking the cell below (`y-1`), which would be outside the world.
+pub const PLACE_BLOCK_DESCRIPTION: &str = "Place a block at the given position; the placed block occupies exactly (x, y, z), and y must be in -63..=320 (y=-64 is rejected — the clicked block would be at y=-65, outside the world). In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
 
 // ── break_block ────────────────────────────────────────────────────────────
 
@@ -94,6 +98,10 @@ pub async fn handle_break_block(
 // ── place_block ────────────────────────────────────────────────────────────
 
 /// Input for the `place_block` MCP tool.
+///
+/// The placed block occupies exactly `(x, y, z)`. `y` must be in `-63..=320`:
+/// `y=-64` is rejected because the block is placed by right-clicking the cell
+/// below (`y-1`), which would be outside the world.
 #[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct PlaceBlockInput {
     pub x: i32,
@@ -106,10 +114,14 @@ pub struct PlaceBlockInput {
 
 /// Handle `place_block` MCP tool.
 ///
-/// Validates coordinates and slot, checks online status, then sends
-/// [`BotCommand::PlaceBlock`] with the target position. The `item_slot`
-/// is encoded as `"slot:N"` in the block type field so the bot executor
-/// can resolve the actual block type from the player's inventory.
+/// Validates coordinates (including the `place_block`-specific `y in -63..=320`
+/// gate) and slot, checks online status, then sends
+/// [`BotCommand::PlaceBlock`] with the target position — the position the
+/// placed block occupies. The `item_slot` is encoded as `"slot:N"` in the
+/// block type field so the bot executor can resolve the actual block type
+/// from the player's inventory. The executor verifies the placement server
+/// side; on `success:false` its failure message is returned verbatim (never
+/// rewritten into a success-sounding sentence).
 ///
 /// In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.
 pub async fn handle_place_block(
@@ -117,7 +129,18 @@ pub async fn handle_place_block(
     sender: &BotCommandSender,
     input: PlaceBlockInput,
 ) -> Result<String, BotError> {
-    // Validate coordinates are within world bounds
+    // place_block-specific Y gate: the block occupies exactly (x, y, z), so
+    // the right-clicked block sits at y-1. y=-64 is impossible — the clicked
+    // block would be at y=-65, outside the world — so the valid range is
+    // -63..=320, one tighter than the generic -64..=320 block bounds.
+    if !(-63..=320).contains(&input.y) {
+        return Err(BotError::InvalidParams(format!(
+            "y coordinate {} out of range for place_block (must be between -63 and 320; y=-64 is impossible — the clicked block would be at y=-65, outside the world)",
+            input.y
+        )));
+    }
+
+    // Validate coordinates are within world bounds (x/z border, y ceiling)
     if let Err(e) = validate_block_pos(&BlockPos::new(input.x, input.y, input.z)) {
         return Err(BotError::InvalidParams(e));
     }
@@ -142,24 +165,29 @@ pub async fn handle_place_block(
     );
     match sender.send_command(cmd).await {
         Ok(mut result) => {
-            // The executor only knows the hotbar slot ("slot:N" encoding), so
-            // its message reads "Placed 3 at ..." — opaque to the LLM. Resolve
-            // the actual item id from the snapshot inventory here (the MCP
-            // layer has snapshot access; the executor does not) and rewrite
-            // the message to name the block. The executor's result message
-            // format is "Placed {} at {}", so we rebuild it with the item id.
-            let item_id = state
-                .read_snapshot()
-                .self_player
-                .inventory
-                .iter()
-                .find(|entry| entry.slot_index == input.item_slot)
-                .map(|entry| entry.item_id.clone())
-                .unwrap_or_else(|| "(empty slot)".to_string());
-            result.message = format!(
-                "Placed {} at ({}, {}, {})",
-                item_id, input.x, input.y, input.z
-            );
+            // Rewrite the executor's message ONLY on success: the executor
+            // now verifies the placement and returns honest `success:false`
+            // results whose message names the failure (e.g. target cell
+            // occupied, out of reach). Rewriting those would erase the
+            // failure reason (M-7). On success, the executor only knows the
+            // hotbar slot ("slot:N" encoding), so its message reads "Placed 3
+            // at ..." — opaque to the LLM. Resolve the actual item id from
+            // the snapshot inventory here (the MCP layer has snapshot access;
+            // the executor does not) and rewrite the message to name it.
+            if result.success {
+                let item_id = state
+                    .read_snapshot()
+                    .self_player
+                    .inventory
+                    .iter()
+                    .find(|entry| entry.slot_index == input.item_slot)
+                    .map(|entry| entry.item_id.clone())
+                    .unwrap_or_else(|| "(empty slot)".to_string());
+                result.message = format!(
+                    "Placed {} at ({}, {}, {})",
+                    item_id, input.x, input.y, input.z
+                );
+            }
             serde_json::to_string(&result)
                 .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
         }
@@ -595,6 +623,102 @@ mod tests {
                 .contains("(empty slot)"),
             "empty slot must be surfaced, got: {v}"
         );
+    }
+
+    /// RED (H-2 MCP side): `place_block` validates `y in -63..=320` — the
+    /// block occupies exactly (x, y, z), so the right-clicked block is at
+    /// y-1. `y=-64` would put the clicked block at y=-65, outside the world,
+    /// and must be rejected with a message explaining the limitation, while
+    /// `y=-63` (the lowest placeable cell) is accepted.
+    #[tokio::test]
+    async fn test_place_block_y_minus_64_rejected() {
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = PlaceBlockInput {
+            x: 0,
+            y: -64,
+            z: 0,
+            item_slot: 0,
+        };
+        let result = handle_place_block(&state, &sender, input).await;
+        match result {
+            Err(BotError::InvalidParams(msg)) => {
+                assert!(msg.contains("-64"), "msg should mention y=-64, got: {msg}");
+                assert!(
+                    msg.contains("world"),
+                    "msg should explain the world-boundary reason, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidParams for y=-64, got {other:?}"),
+        }
+
+        // y=-63 is the lowest placeable cell and must dispatch normally.
+        let (state2, sender2) = make_echo_channel();
+        make_online(&state2);
+        let input = PlaceBlockInput {
+            x: 0,
+            y: -63,
+            z: 0,
+            item_slot: 0,
+        };
+        let result = handle_place_block(&state2, &sender2, input)
+            .await
+            .expect("y=-63 must be accepted");
+        let _: Value = serde_json::from_str(&result).expect("valid JSON");
+    }
+
+    /// RED (M-7): the executor verifies placement and can return
+    /// `success:false` with a message naming the failure (e.g. target cell
+    /// occupied, out of reach). The MCP layer must NOT rewrite that message
+    /// into a success-sounding "Placed ... at ..." sentence — the failure
+    /// reason must survive verbatim.
+    #[tokio::test]
+    async fn test_place_block_failure_message_not_rewritten() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        make_online(&state);
+        // Give the snapshot a hotbar inventory so a rewrite WOULD have been
+        // possible — proving the rewrite is skipped, not just unresolved.
+        state.update_snapshot(crate::types::WorldSnapshot {
+            self_player: crate::types::SelfPlayer {
+                inventory: vec![crate::types::InventorySlot {
+                    slot_index: 3,
+                    item_id: "stone".into(),
+                    count: 64,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            wrapped
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: false,
+                    message: "cannot place: target cell occupied by stone".into(),
+                    data: None,
+                }))
+                .expect("should respond");
+        });
+
+        let input = PlaceBlockInput {
+            x: 5,
+            y: 65,
+            z: 10,
+            item_slot: 3,
+        };
+        let result = handle_place_block(&state, &sender, input)
+            .await
+            .expect("handler should return the executor's result");
+        let v: Value = serde_json::from_str(&result).expect("valid JSON");
+        assert_eq!(v["success"], false, "failure must stay a failure: {v}");
+        assert_eq!(
+            v["message"], "cannot place: target cell occupied by stone",
+            "failure message must survive verbatim, got: {v}"
+        );
+        responder.await.expect("responder finished");
     }
 
     // ── use_item_on_block ──────────────────────────────────────────
