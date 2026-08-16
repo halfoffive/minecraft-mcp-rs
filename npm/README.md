@@ -35,7 +35,7 @@ For Claude Desktop / Cursor, add to your MCP client config:
 > `-y` flag (bunx installs on demand without prompting).
 
 See the [root README](https://github.com/halfoffive/minecraft-mcp-rs#readme) for
-the full documentation (config file, MCP tools, CLI flags).
+the full documentation (environment variables, MCP tools, CLI flags).
 
 ## Platform packages
 
