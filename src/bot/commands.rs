@@ -39,6 +39,24 @@ pub(crate) trait BotActions {
     /// Start pathfinding to a block position and await completion (or timeout).
     async fn goto(&self, pos: &BlockPos) -> Result<(), BotError>;
 
+    /// Like [`Self::goto`], but bound by an explicit deadline instead of the
+    /// configured command timeout.
+    ///
+    /// The default implementation delegates to [`Self::goto`] so mock
+    /// implementations that do not model a real pathfinder stay untouched;
+    /// [`RealBotClient`] overrides it so an explicit timeout (e.g. the fly
+    /// timeout) actually reaches the pathfinder's wait-for-completion loop —
+    /// before this method existed, `fly_timeout_secs` only widened the outer
+    /// envelope while the inner `goto` was still bounded by
+    /// `command_timeout_secs` (audit M-1).
+    async fn goto_with_deadline(
+        &self,
+        pos: &BlockPos,
+        _deadline: Duration,
+    ) -> Result<(), BotError> {
+        self.goto(pos).await
+    }
+
     /// Stop the currently running pathfinder (if any).
     ///
     /// Used after a movement timeout so the bot does not keep walking toward
@@ -213,6 +231,38 @@ impl RealBotClient {
             sender,
         }
     }
+
+    /// Shared body of [`BotActions::goto`] and
+    /// [`BotActions::goto_with_deadline`]: start the pathfinder toward `pos`
+    /// and wait for completion bounded by `timeout_dur`.
+    ///
+    /// The wait/fallback loop is a free function so the 50ms fallback
+    /// semantics can be unit-tested with a mock `BotActions` implementation
+    /// (a real azalea `Client` cannot be constructed in tests).
+    async fn goto_inner(&self, pos: &BlockPos, timeout_dur: Duration) -> Result<(), BotError> {
+        let az_pos = azalea::BlockPos::new(pos.x, pos.y, pos.z);
+        let goal = BlockPosGoal(az_pos);
+        let timeout_secs = timeout_dur.as_secs();
+        let notify = self.state.goto_notify();
+
+        self.client.goto(goal).await;
+
+        match wait_for_goto_completion(self, &notify, timeout_dur).await {
+            Ok(()) => Ok(()),
+            Err(_elapsed) => {
+                // Deadline elapsed — stop the pathfinder and report failure.
+                self.client.stop_pathfinding();
+                Err(BotError::PathfindingFailed {
+                    target: BlockPos {
+                        x: pos.x,
+                        y: pos.y,
+                        z: pos.z,
+                    },
+                    reason: format!("pathfinding timed out after {timeout_secs}s"),
+                })
+            }
+        }
+    }
 }
 
 impl BotActions for RealBotClient {
@@ -232,37 +282,19 @@ impl BotActions for RealBotClient {
     }
 
     async fn goto(&self, pos: &BlockPos) -> Result<(), BotError> {
-        let az_pos = azalea::BlockPos::new(pos.x, pos.y, pos.z);
-        let goal = BlockPosGoal(az_pos);
-
-        // Honour the user-configured command timeout — read it through
-        // the sender so the value is in lock-step with the timeout
+        // Honour the user-configured command timeout — read it through the
+        // sender so the value is in lock-step with the timeout
         // `BotCommandSender::send_command` itself uses.
         let timeout_dur = self.sender.timeout();
-        let timeout_secs = timeout_dur.as_secs();
-        let notify = self.state.goto_notify();
+        self.goto_inner(pos, timeout_dur).await
+    }
 
-        self.client.goto(goal).await;
-
-        // Delegate the wait/fallback loop to a free function so the
-        // 50ms fallback semantics can be unit-tested with a mock
-        // `BotActions` implementation (real azalea `Client` cannot be
-        // constructed in tests).
-        match wait_for_goto_completion(self, &notify, timeout_dur).await {
-            Ok(()) => Ok(()),
-            Err(_elapsed) => {
-                // Deadline elapsed — stop the pathfinder and report failure.
-                self.client.stop_pathfinding();
-                Err(BotError::PathfindingFailed {
-                    target: BlockPos {
-                        x: pos.x,
-                        y: pos.y,
-                        z: pos.z,
-                    },
-                    reason: format!("pathfinding timed out after {timeout_secs}s"),
-                })
-            }
-        }
+    async fn goto_with_deadline(&self, pos: &BlockPos, deadline: Duration) -> Result<(), BotError> {
+        // M-1: same as `goto`, but the wait-for-completion loop is bounded by
+        // the EXPLICIT deadline (e.g. the fly timeout) instead of the
+        // configured command timeout — so long flights no longer give up at
+        // `command_timeout_secs`.
+        self.goto_inner(pos, deadline).await
     }
 
     fn stop_pathfinding(&self) {
@@ -722,7 +754,9 @@ impl<B: BotActions> CommandExecutor<B> {
 
             // ── Block interaction ─────────────────────────────────
             BotCommand::BreakBlock(pos) => self.handle_break_block(pos),
-            BotCommand::PlaceBlock(pos, block_type) => self.handle_place_block(pos, block_type),
+            BotCommand::PlaceBlock(pos, block_type) => {
+                self.handle_place_block(pos, block_type).await
+            }
             BotCommand::UseItemOnBlock(pos, item_slot, effect_pos) => {
                 self.handle_use_item_on_block(pos, item_slot, effect_pos)
                     .await
@@ -838,7 +872,15 @@ impl<B: BotActions> CommandExecutor<B> {
         // timeout in `BotCommandSender::send_command` abandons the response.
         let goto_window = timeout_dur.saturating_sub(MOVEMENT_REPLY_MARGIN);
         let start = self.state.read_snapshot().self_player.position;
-        match tokio::time::timeout(goto_window, self.bot.goto(&target)).await {
+        // Route through `goto_with_deadline` so the explicit timeout (e.g.
+        // the fly timeout) reaches the pathfinder's wait-for-completion loop
+        // — not just the outer envelope (audit M-1).
+        match tokio::time::timeout(
+            goto_window,
+            self.bot.goto_with_deadline(&target, timeout_dur),
+        )
+        .await
+        {
             Ok(result) => GotoOutcome::Completed(result),
             Err(_) => {
                 self.bot.stop_pathfinding();
@@ -864,7 +906,7 @@ impl<B: BotActions> CommandExecutor<B> {
         // are not supported by azalea's pathfinder and surface a clear error.
         match direction_to_vector(dir) {
             Some((dx, dy, dz)) => {
-                let current = self.state.read_snapshot().self_player.position;
+                let origin = self.state.read_snapshot().self_player.position;
                 // Clamp to i32 range so a malicious or malformed `distance`
                 // (u32 > i32::MAX) doesn't silently wrap to a negative
                 // offset, which would make the bot walk in the opposite
@@ -872,11 +914,33 @@ impl<B: BotActions> CommandExecutor<B> {
                 // arithmetic against overflow from extreme inputs.
                 let d = clamp_to_i32(distance);
                 let target = BlockPos::new(
-                    current.x.saturating_add(dx.saturating_mul(d)),
-                    current.y.saturating_add(dy.saturating_mul(d)),
-                    current.z.saturating_add(dz.saturating_mul(d)),
+                    origin.x.saturating_add(dx.saturating_mul(d)),
+                    origin.y.saturating_add(dy.saturating_mul(d)),
+                    origin.z.saturating_add(dz.saturating_mul(d)),
                 );
-                self.bot.goto(&target).await?;
+                // M-5: route through the margin wrapper so the executor
+                // replies BEFORE the `send_command` envelope fires. A bare
+                // `goto` raced the envelope (same timeout value, no margin),
+                // so a successful movement that hit the deadline was reported
+                // as Err(CommandTimeout). On the margin deadline the handler
+                // returns the structured partial result instead.
+                match self.goto_with_margin(target).await {
+                    GotoOutcome::TimedOut {
+                        start,
+                        current,
+                        timeout_secs,
+                    } => {
+                        return Ok(movement_timeout_result(
+                            "WalkDirection",
+                            target,
+                            start,
+                            current,
+                            timeout_secs,
+                        ));
+                    }
+                    GotoOutcome::Completed(Err(e)) => return Err(e),
+                    GotoOutcome::Completed(Ok(())) => {}
+                }
 
                 if !self.state.is_online() {
                     return Err(BotError::Offline("disconnected during movement".into()));
@@ -1000,8 +1064,46 @@ impl<B: BotActions> CommandExecutor<B> {
         })
     }
 
-    fn handle_place_block(&self, pos: BlockPos, block_type: String) -> Result<BotResult, BotError> {
+    /// Place a block that will occupy `pos`, verifying the placement landed.
+    ///
+    /// `pos` is the position the placed block is expected to OCCUPY. Because
+    /// azalea's `block_interact` fabricates an Up-face hit (AGENTS.md R-9),
+    /// the executor right-clicks the cell below (`pos − Up`) so the block
+    /// lands at `pos`. The handler:
+    ///
+    /// 1. Rejects `pos.y` outside `-63..=320` — the click target (`pos − Up`)
+    ///    would be out of the world below y=-64 (the MCP layer validates
+    ///    too; this is defense-in-depth for internal dispatchers).
+    /// 2. Pre-checks via the snapshot: the effect cell `pos` must be empty
+    ///    (air, or absent — production snapshots filter air entries, so
+    ///    absent == empty) and the click target `pos − Up` must be a loaded
+    ///    block (else `ChunkNotLoaded`). An occupied effect cell is an
+    ///    `InvalidParams` ("already occupied").
+    /// 3. Auto-approaches when the bot is farther than the 4.5-block
+    ///    survival reach — the server silently drops out-of-range
+    ///    interactions, the historical fake-success bug.
+    /// 4. Switches the hotbar slot, right-clicks `pos − Up`, then VERIFIES
+    ///    via [`wait_for_block_present`] that a block actually appeared at
+    ///    `pos`. A verification timeout returns an honest `success:false`
+    ///    naming the block and the cell — never an unconditional success.
+    async fn handle_place_block(
+        &self,
+        pos: BlockPos,
+        block_type: String,
+    ) -> Result<BotResult, BotError> {
         trace!(?pos, %block_type, "PlaceBlock");
+        // Defense-in-depth: the placed block occupies `pos`, so the click
+        // target is `pos − Up`. A `pos.y` of -64 would put the click target
+        // at y=-65, outside the world. `validate_command`'s bounds are
+        // -64..=320, so this narrower gate is reachable via dispatch for
+        // y=-64 — reject honestly (MCP layer validates too, contract H-2).
+        if pos.y < -63 || pos.y > 320 {
+            return Err(BotError::InvalidParams(format!(
+                "cannot place a block at {pos}: y must be in -63..=320 \
+                 (the click target below it would be out of the world)"
+            )));
+        }
+
         // The MCP layer encodes the hotbar slot as "slot:N" in the block_type
         // field (see tools_block::handle_place_block). Select that slot before
         // right-clicking so the correct block is placed.
@@ -1010,26 +1112,100 @@ impl<B: BotActions> CommandExecutor<B> {
         // failure or > 8) is a malformed internal encoding. Fail honestly with
         // `InvalidParams` instead of warn-and-continue-with-held-item, which
         // would place the WRONG block and still report success (F2-5).
-        if let Some(slot_str) = block_type.strip_prefix("slot:") {
-            let slot = match slot_str.parse::<u8>() {
+        let slot_switch = if let Some(slot_str) = block_type.strip_prefix("slot:") {
+            Some(match slot_str.parse::<u8>() {
                 Ok(s) if s <= 8 => s,
                 _ => {
                     return Err(BotError::InvalidParams(format!(
                         "invalid internal slot encoding: {block_type}"
                     )));
                 }
+            })
+        } else {
+            None
+        };
+        // Strip the internal "slot:N" prefix (if any) from the result message
+        // so the LLM sees a clean block type name rather than an opaque
+        // hotbar index like "Placed slot:3 at ...".
+        let display_type = block_type.strip_prefix("slot:").unwrap_or(&block_type);
+
+        // Pre-checks: the effect cell `pos` must be empty and the click
+        // target `pos − Up` must be a loaded block in the snapshot.
+        let click_target = BlockPos::new(pos.x, pos.y - 1, pos.z);
+        let snapshot = self.state.read_snapshot();
+        if !snapshot.block_index.contains_key(&click_target) {
+            return Err(BotError::ChunkNotLoaded(click_target));
+        }
+        if let Some(&idx) = snapshot.block_index.get(&pos) {
+            let occupant = snapshot.blocks[idx].block_type.clone();
+            // `"air"` is the mock/defensive fallback spelling; production
+            // snapshots never store air entries (audit L-4), so an entry
+            // that is present and non-air genuinely occupies the cell.
+            if !occupant.eq_ignore_ascii_case("air") {
+                return Err(BotError::InvalidParams(format!(
+                    "cannot place a block at {pos}: the cell is already occupied by {occupant}"
+                )));
+            }
+        }
+
+        // Auto-approach when out of interaction range. Minecraft's survival
+        // reach is 4.5 blocks; the server silently drops interactions beyond
+        // it (the historical fake-success bug).
+        const INTERACT_REACH: f64 = 4.5;
+        let player_pos = snapshot.self_player.position;
+        if distance_between(player_pos, pos) > INTERACT_REACH {
+            let fresh = self.state.read_snapshot();
+            let stand = match find_standable_neighbor(&fresh, click_target) {
+                Some(s) => s,
+                None => {
+                    return Err(BotError::Internal(format!(
+                        "no standable position adjacent to placement target {pos}"
+                    )));
+                }
             };
+            // Best-effort approach: a movement failure falls through to the
+            // (now honest) result below rather than aborting early.
+            let _ = self.goto_with_margin(stand).await;
+        }
+
+        // Switch to the hotbar slot and right-click the cell below `pos` so
+        // the block lands at `pos` (azalea's fabricated Up-face hit).
+        if let Some(slot) = slot_switch {
             self.bot.switch_hotbar_slot(slot);
         }
-        self.bot.block_interact(&pos);
-        // Strip the internal "slot:N" prefix (if any) from the result
-        // message so the LLM sees a clean block type name rather than
-        // an opaque hotbar index like "Placed slot:3 at ...".
-        let display_type = block_type.strip_prefix("slot:").unwrap_or(&block_type);
+        self.bot.block_interact(&click_target);
+
+        // Server-side confirmation: poll the snapshot until a block appears
+        // at `pos`. A timeout is an honest failure — never a fake success.
+        let budget = Duration::from_millis(self.state.read_config().snapshot_interval_ms + 250);
+        if wait_for_block_present(&self.state, pos, budget).await {
+            return Ok(BotResult {
+                success: true,
+                message: format!("Placed {display_type} at {pos}"),
+                data: Some(serde_json::json!({
+                    "verified": true,
+                    "position": pos,
+                })),
+            });
+        }
+        warn!(
+            ?pos,
+            ?click_target,
+            %display_type,
+            "place_block: no block appeared at the effect cell"
+        );
         Ok(BotResult {
-            success: true,
-            message: format!("Placed {} at {}", display_type, pos),
-            data: None,
+            success: false,
+            message: format!(
+                "place_block: {display_type} did not appear at {pos} within {} ms (clicked {click_target}); \
+                 the interaction was likely rejected by the server",
+                budget.as_millis()
+            ),
+            data: Some(serde_json::json!({
+                "verified": false,
+                "reason": "placement_not_observed",
+                "position": pos,
+            })),
         })
     }
 
@@ -1088,49 +1264,59 @@ impl<B: BotActions> CommandExecutor<B> {
             .map(|entry| entry.item_id.as_str())
             .unwrap_or("empty")
             .to_string();
+        // M-6: whether the used item is expected to place a block/fluid. The
+        // effect-cell occupancy pre-check AND the auto-approach only make
+        // sense for placement items — for flint-and-steel, a cauldron-filling
+        // bucket, etc. the "effect cell" is meaningless and a ceiling above
+        // the target caused a false `InvalidParams` (audit M-6).
+        let is_placement = item_has_placement_effect(&used_item);
 
         // Placement verification path (fluid buckets / placeable blocks).
         if let Some(effect) = effect_pos {
             // (1) Pre-check the interaction target exists in the snapshot
             // and the effect cell is currently empty (air or unknown).
-            if !snapshot.block_index.contains_key(&pos) {
-                return Err(BotError::ChunkNotLoaded(pos));
-            }
-            let effect_occupied = snapshot
-                .block_index
-                .get(&effect)
-                .map(|&idx| !snapshot.blocks[idx].block_type.eq_ignore_ascii_case("air"))
-                .unwrap_or(false);
-            if effect_occupied {
-                let occupant = snapshot
+            // Gated on the item being a placement item: non-placement items
+            // skip the occupancy gate entirely.
+            if is_placement {
+                if !snapshot.block_index.contains_key(&pos) {
+                    return Err(BotError::ChunkNotLoaded(pos));
+                }
+                let effect_occupied = snapshot
                     .block_index
                     .get(&effect)
-                    .map(|&idx| snapshot.blocks[idx].block_type.clone())
-                    .unwrap_or_default();
-                return Err(BotError::InvalidParams(format!(
-                    "cannot use item at {}: target cell {} is already occupied by {occupant} (a fluid bucket/block lands in the cell the used face opens into)",
-                    pos, effect
-                )));
-            }
+                    .map(|&idx| !snapshot.blocks[idx].block_type.eq_ignore_ascii_case("air"))
+                    .unwrap_or(false);
+                if effect_occupied {
+                    let occupant = snapshot
+                        .block_index
+                        .get(&effect)
+                        .map(|&idx| snapshot.blocks[idx].block_type.clone())
+                        .unwrap_or_default();
+                    return Err(BotError::InvalidParams(format!(
+                        "cannot use item at {}: target cell {} is already occupied by {occupant} (a fluid bucket/block lands in the cell the used face opens into)",
+                        pos, effect
+                    )));
+                }
 
-            // (2) Auto-approach when out of interaction range. Minecraft's
-            // survival reach is 4.5 blocks; the server silently drops
-            // interactions beyond it (the historical fake-success bug).
-            const INTERACT_REACH: f64 = 4.5;
-            let player_pos = snapshot.self_player.position;
-            if distance_between(player_pos, pos) > INTERACT_REACH {
-                let fresh = self.state.read_snapshot();
-                let stand = match find_standable_neighbor(&fresh, pos) {
-                    Some(s) => s,
-                    None => {
-                        return Err(BotError::Internal(format!(
-                            "no standable position adjacent to interaction target {pos}"
-                        )));
-                    }
-                };
-                // Best-effort approach: a movement failure falls through to
-                // the (now honest) result below rather than aborting early.
-                let _ = self.goto_with_margin(stand).await;
+                // (2) Auto-approach when out of interaction range. Minecraft's
+                // survival reach is 4.5 blocks; the server silently drops
+                // interactions beyond it (the historical fake-success bug).
+                const INTERACT_REACH: f64 = 4.5;
+                let player_pos = snapshot.self_player.position;
+                if distance_between(player_pos, pos) > INTERACT_REACH {
+                    let fresh = self.state.read_snapshot();
+                    let stand = match find_standable_neighbor(&fresh, pos) {
+                        Some(s) => s,
+                        None => {
+                            return Err(BotError::Internal(format!(
+                                "no standable position adjacent to interaction target {pos}"
+                            )));
+                        }
+                    };
+                    // Best-effort approach: a movement failure falls through to
+                    // the (now honest) result below rather than aborting early.
+                    let _ = self.goto_with_margin(stand).await;
+                }
             }
         }
 
@@ -1144,7 +1330,7 @@ impl<B: BotActions> CommandExecutor<B> {
         // cell turns non-air. Only placement items are verified; everything
         // else keeps the legacy report.
         if let Some(effect) = effect_pos
-            && item_has_placement_effect(&used_item)
+            && is_placement
         {
             let budget = Duration::from_millis(self.state.read_config().snapshot_interval_ms + 250);
             if wait_for_block_present(&self.state, effect, budget).await {
@@ -1854,7 +2040,21 @@ impl<B: BotActions> CommandExecutor<B> {
                     ));
                 }
                 GotoOutcome::Completed(goto_result) => {
-                    let current_pos = self.state.read_snapshot().self_player.position;
+                    // M-4: prefer the bot's LIVE position (zero-wait) over
+                    // the throttled snapshot for the reached check. The
+                    // snapshot can lag a long move by a whole idle interval
+                    // (5 s — `effective_snapshot_interval_ms` relaxes to 5 s
+                    // when no commands arrive), which made a physically-
+                    // completed move look unreached and smart_move falsely
+                    // reported an "obstacle". Falls back to the snapshot
+                    // when the position component is unavailable (offline /
+                    // before the first sync). Mirrors `handle_walk_direction`.
+                    let live_position = self.bot.position();
+                    let current_pos = live_position
+                        .map(|[x, y, z]| {
+                            BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32)
+                        })
+                        .unwrap_or_else(|| self.state.read_snapshot().self_player.position);
 
                     // Reached when the bot ends within one block of the target
                     // on every axis (the same margin the previous logic used).
@@ -2027,28 +2227,71 @@ impl<B: BotActions> CommandExecutor<B> {
             });
         }
 
+        // M-5: total movement budget = the command envelope minus the reply
+        // margin. Without the margin a raw `goto` races the envelope (same
+        // timeout value) and a success at the deadline is reported as
+        // CommandTimeout; a multi-target loop can exceed the envelope
+        // entirely and drop the visited count.
+        let total_budget = Duration::from_secs(self.state.read_config().command_timeout_secs)
+            .saturating_sub(MOVEMENT_REPLY_MARGIN);
+        let mut remaining_budget = total_budget;
         let mut visited: u32 = 0;
-        for target in item_targets {
-            // Walk to the item; auto-pickup occurs on proximity.
-            if self.bot.goto(&target).await.is_ok() {
-                // Brief pause for the server to process pickup.
-                sleep(Duration::from_millis(200)).await;
-                visited += 1;
+        let mut timed_out = false;
+        let item_count = item_targets.len();
+
+        for (i, target) in item_targets.iter().enumerate() {
+            // Split the remaining budget across the targets still to visit,
+            // with a 2-second floor so a single short hop never gets a
+            // sub-second window.
+            let remaining_targets = item_count - i;
+            let per_target = remaining_budget
+                .checked_div(remaining_targets as u32)
+                .map(|d| d.max(Duration::from_secs(2)))
+                .unwrap_or(Duration::from_secs(2));
+            match self
+                .goto_with_margin_with_timeout(*target, Some(per_target.as_secs().max(1)))
+                .await
+            {
+                GotoOutcome::TimedOut { .. } => {
+                    // Budget exhausted — stop so the reply still lands before
+                    // the envelope fires, and report the partial visit count
+                    // honestly below (never an Err, never a fake full count).
+                    timed_out = true;
+                    break;
+                }
+                GotoOutcome::Completed(Ok(())) => {
+                    // Brief pause for the server to process pickup.
+                    sleep(Duration::from_millis(200)).await;
+                    visited += 1;
+                }
+                GotoOutcome::Completed(Err(_)) => {
+                    // A pathfinding failure is not a budget problem — move on
+                    // to the next target (mirrors the old loop's is_ok()
+                    // skip).
+                }
             }
+            remaining_budget = remaining_budget.saturating_sub(per_target);
         }
 
         // Report the bot's END position: collect_items walks toward every
         // target, so callers must be able to detect the drift without a
         // separate get_self_info round-trip.
         let final_pos = self.state.read_snapshot().self_player.position;
+        let skipped = item_count as u32 - visited;
+        let message = if timed_out {
+            format!(
+                "Visited {visited} of {item_count} item drop location(s); remaining {skipped} skipped — movement budget exhausted"
+            )
+        } else {
+            format!("Visited {visited} item drop location(s); auto-pickup expected on proximity")
+        };
         Ok(BotResult {
-            success: true,
-            message: format!(
-                "Visited {visited} item drop location(s); auto-pickup expected on proximity"
-            ),
+            success: !timed_out,
+            message,
             data: Some(serde_json::json!({
                 "visited": visited,
                 "position": final_pos,
+                "timed_out": timed_out,
             })),
         })
     }
@@ -2126,15 +2369,21 @@ impl<B: BotActions> CommandExecutor<B> {
         // move as "did not arrive". `BotActions::position` is a zero-wait
         // live read; when it is unavailable (offline / before first sync)
         // the snapshot value is kept.
-        let mut snapshot = self.state.read_snapshot();
+        let snapshot = self.state.read_snapshot();
         let live_position = self.bot.position();
         let player_pos = live_position
             .map(|[x, y, z]| BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32))
             .unwrap_or(snapshot.self_player.position);
+        // L-15: build the ActResult's self_info from a CLONE of the small
+        // `SelfPlayer` with the live-position overrides applied — never
+        // `Arc::make_mut(&mut snapshot)`, which deep-clones the whole
+        // snapshot (blocks + block_index, potentially huge) on every act
+        // call because the Arc is shared by readers. The override stays
+        // local to this result; the shared snapshot is untouched.
+        let mut self_info = snapshot.self_player.clone();
         if let Some(live) = live_position {
-            let self_player = &mut Arc::make_mut(&mut snapshot).self_player;
-            self_player.position = player_pos;
-            self_player.position_precise = Some(live);
+            self_info.position = player_pos;
+            self_info.position_precise = Some(live);
         }
         // Per-call override (0..=32, validated upstream) or the configured
         // default. Small radii keep the ActResult payload tiny — the default
@@ -2177,7 +2426,7 @@ impl<B: BotActions> CommandExecutor<B> {
             reason,
             nearby_blocks,
             nearby_entities,
-            self_info: snapshot.self_player.clone(),
+            self_info,
         };
 
         Ok(BotResult {
@@ -2430,6 +2679,10 @@ mod tests {
     #[derive(Debug)]
     struct MockCallLog {
         goto_calls: Mutex<Vec<BlockPos>>,
+        /// Deadline durations passed to `goto_with_deadline` (M-1). Records
+        /// the per-call deadline so tests can assert the fly timeout actually
+        /// reaches the pathfinder's wait loop instead of the command timeout.
+        goto_with_deadline_calls: Mutex<Vec<(BlockPos, Duration)>>,
         goto_succeeds: AtomicBool,
         /// Number of upcoming goto attempts that must fail (transient-error
         /// simulation). Decremented per goto call.
@@ -2450,6 +2703,11 @@ mod tests {
         /// target / stalled pathfinder). Used to exercise the
         /// `goto_with_margin` timeout path. Default `false`.
         goto_hangs: AtomicBool,
+        /// When `> 0`, the Nth goto call never completes (like `goto_hangs`,
+        /// but only from a specific call onward). Lets tests simulate a
+        /// budget timeout mid-way through a multi-target loop (M-5). Default
+        /// `0` (disabled).
+        goto_hangs_after_n: AtomicUsize,
         jump_calls: AtomicUsize,
         hotbar_switch_calls: Mutex<Vec<u8>>,
         drop_item_calls: Mutex<Vec<(u8, u8)>>,
@@ -2460,6 +2718,16 @@ mod tests {
         crouch_calls: Mutex<Vec<bool>>,
         mine_calls: Mutex<Vec<BlockPos>>,
         interact_calls: Mutex<Vec<BlockPos>>,
+        /// When `true`, `block_interact` simulates a successful placement by
+        /// adding a "stone" block at the clicked cell **+ Up** — mirroring
+        /// azalea's fabricated Up-face hit (AGENTS.md R-9): right-clicking
+        /// `p` places the block at `p+Up`. `handle_place_block` relies on
+        /// exactly that convention (it clicks `pos − Up` to place at `pos`).
+        /// Default `false` — existing tests assert log-only interactions.
+        interact_places_block: AtomicBool,
+        /// SharedState mutated by `block_interact` when `interact_places_block`
+        /// is set (bound via [`MockBotClient::bind_state`], same as goto).
+        snapshot_for_interact: Mutex<Option<Arc<crate::state::SharedState>>>,
         container_open_calls: Mutex<Vec<BlockPos>>,
         inventory_calls: AtomicUsize,
         inventory: Mutex<Vec<Option<ItemStack>>>,
@@ -2481,12 +2749,14 @@ mod tests {
         fn new() -> Self {
             Self {
                 goto_calls: Mutex::new(Vec::new()),
+                goto_with_deadline_calls: Mutex::new(Vec::new()),
                 goto_succeeds: AtomicBool::new(true),
                 goto_failures_remaining: AtomicUsize::new(0),
                 goto_updates_snapshot: AtomicBool::new(false),
                 snapshot_for_goto: Mutex::new(None),
                 goto_target_unreached: AtomicBool::new(false),
                 goto_hangs: AtomicBool::new(false),
+                goto_hangs_after_n: AtomicUsize::new(0),
                 jump_calls: AtomicUsize::new(0),
                 hotbar_switch_calls: Mutex::new(Vec::new()),
                 drop_item_calls: Mutex::new(Vec::new()),
@@ -2497,6 +2767,8 @@ mod tests {
                 crouch_calls: Mutex::new(Vec::new()),
                 mine_calls: Mutex::new(Vec::new()),
                 interact_calls: Mutex::new(Vec::new()),
+                interact_places_block: AtomicBool::new(false),
+                snapshot_for_interact: Mutex::new(None),
                 container_open_calls: Mutex::new(Vec::new()),
                 inventory_calls: AtomicUsize::new(0),
                 inventory: Mutex::new(Vec::new()),
@@ -2525,9 +2797,12 @@ mod tests {
         }
 
         /// Make successful goto calls also update the shared snapshot's
-        /// player position (see `MockCallLog::goto_updates_snapshot`).
+        /// player position (see `MockCallLog::goto_updates_snapshot`), and
+        /// bind the state so `block_interact` can place blocks when
+        /// `interact_places_block` is enabled.
         fn bind_state(&self, state: Arc<crate::state::SharedState>) {
-            *self.log.snapshot_for_goto.lock().unwrap() = Some(state);
+            *self.log.snapshot_for_goto.lock().unwrap() = Some(state.clone());
+            *self.log.snapshot_for_interact.lock().unwrap() = Some(state);
             self.log.goto_updates_snapshot.store(true, Ordering::SeqCst);
         }
     }
@@ -2550,7 +2825,13 @@ mod tests {
 
         async fn goto(&self, pos: &BlockPos) -> Result<(), BotError> {
             self.log.goto_calls.lock().unwrap().push(*pos);
-            if self.log.goto_hangs.load(Ordering::SeqCst) {
+            // Hang-on-Nth-call simulation: when `goto_hangs_after_n` is set
+            // to a positive value, every goto from that call onward never
+            // completes (mirrors `goto_hangs`). Lets a multi-target loop hit
+            // its per-target budget timeout mid-way (M-5).
+            let hang_at = self.log.goto_hangs_after_n.load(Ordering::SeqCst);
+            let call_idx = self.log.goto_calls.lock().unwrap().len();
+            if self.log.goto_hangs.load(Ordering::SeqCst) || (hang_at > 0 && call_idx >= hang_at) {
                 // Simulate an unreachable target: the pathfinder never
                 // completes. The outer `goto_with_margin` timeout (or the
                 // command envelope) is what releases the caller.
@@ -2598,6 +2879,22 @@ mod tests {
 
         async fn jump(&self) {
             self.log.jump_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn goto_with_deadline(
+            &self,
+            pos: &BlockPos,
+            deadline: Duration,
+        ) -> Result<(), BotError> {
+            // M-1: record the deadline the handler passes through, then
+            // delegate to the plain `goto` behaviour (mock has no real
+            // pathfinder, so the deadline itself does not bound anything).
+            self.log
+                .goto_with_deadline_calls
+                .lock()
+                .unwrap()
+                .push((*pos, deadline));
+            self.goto(pos).await
         }
 
         fn switch_hotbar_slot(&self, slot: u8) {
@@ -2675,6 +2972,36 @@ mod tests {
 
         fn block_interact(&self, pos: &BlockPos) {
             self.log.interact_calls.lock().unwrap().push(*pos);
+            // H-2 placement simulation: mirror azalea's fabricated Up-face
+            // hit — right-clicking `p` places the block at `p + Up`, exactly
+            // what `handle_place_block` depends on (it clicks `pos − Up` so
+            // the placed block occupies `pos`). The placed entry is inserted
+            // into BOTH `blocks` and `block_index` so the post-place
+            // verification (`wait_for_block_present` → `block_index.get`)
+            // can find it.
+            if self.log.interact_places_block.load(Ordering::SeqCst)
+                && let Some(state) = self.log.snapshot_for_interact.lock().unwrap().clone()
+            {
+                let placed_at = BlockPos::new(pos.x, pos.y + 1, pos.z);
+                let mut snap = (*state.read_snapshot()).clone();
+                let exists = snap.blocks.iter().any(|b| b.position == placed_at);
+                if exists {
+                    for b in snap.blocks.iter_mut() {
+                        if b.position == placed_at {
+                            b.block_type = "stone".into();
+                        }
+                    }
+                } else {
+                    let new_idx = snap.blocks.len();
+                    snap.blocks.push(BlockEntry {
+                        position: placed_at,
+                        block_type: "stone".into(),
+                        block_state: None,
+                    });
+                    snap.block_index.insert(placed_at, new_idx);
+                }
+                state.update_snapshot(snap);
+            }
         }
 
         async fn open_container(&self, pos: &BlockPos) -> Result<(), BotError> {
@@ -2730,6 +3057,55 @@ mod tests {
         let log = mock.log().clone();
         let executor = CommandExecutor::new(mock, Arc::clone(&state), receiver, None);
         (executor, sender, state, log)
+    }
+
+    /// Like `make_executor`, but the mock's `block_interact` places a
+    /// "stone" block at the clicked cell + Up (simulating the server
+    /// applying azalea's fabricated Up-face hit) — needed by `place_block`
+    /// tests that exercise the verification-success path.
+    fn make_executor_with_interact_placement() -> (
+        CommandExecutor<MockBotClient>,
+        BotCommandSender,
+        Arc<SharedState>,
+        Arc<MockCallLog>,
+    ) {
+        let config = AppConfig::default();
+        let state = Arc::new(SharedState::new(config));
+        let (sender, receiver) = create_command_channel(16, Arc::clone(&state));
+        state.set_online(true);
+        let mock = MockBotClient::new();
+        mock.bind_state(Arc::clone(&state));
+        mock.log.interact_places_block.store(true, Ordering::SeqCst);
+        let log = mock.log().clone();
+        let executor = CommandExecutor::new(mock, Arc::clone(&state), receiver, None);
+        (executor, sender, state, log)
+    }
+
+    /// Seed the snapshot for a `place_block` test at `pos`: the player
+    /// standing right next to it (so the auto-approach is skipped), the
+    /// click target (`pos − Up`) present as a solid floor, and the effect
+    /// cell `pos` itself ABSENT (empty). `update_snapshot` stores the
+    /// snapshot as-is, so the `block_index` is seeded explicitly.
+    fn seed_placement_snapshot(state: &SharedState, pos: BlockPos) {
+        let click_target = BlockPos::new(pos.x, pos.y - 1, pos.z);
+        let mut snapshot = make_populated_snapshot_defaults();
+        // Standing one block away — inside the 4.5-block interaction reach,
+        // so the auto-approach is skipped and the test world needs no
+        // standable-neighbour scaffolding.
+        snapshot.self_player.position = BlockPos::new(pos.x - 1, pos.y, pos.z);
+        snapshot.self_player.inventory = Vec::new();
+        snapshot.blocks = vec![BlockEntry {
+            position: click_target,
+            block_type: "stone".into(),
+            block_state: None,
+        }];
+        snapshot.block_index = snapshot
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.position, i))
+            .collect();
+        state.update_snapshot(snapshot);
     }
 
     async fn send_and_await(
@@ -3135,6 +3511,42 @@ mod tests {
 
         drop(sender);
         handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_walk_direction_uses_margin_wrapper() {
+        // M-5: walk_direction previously ran a bare `goto` (same timeout as
+        // the envelope, no MOVEMENT_REPLY_MARGIN), so a movement that hit the
+        // deadline was reported by `send_command` as Err(CommandTimeout).
+        // Routing through `goto_with_margin` turns the deadline into a
+        // structured BotResult (reason: "timeout", position, distance).
+        let config = AppConfig {
+            command_timeout_secs: 1,
+            ..AppConfig::default()
+        };
+        let state = Arc::new(SharedState::new(config));
+        let (sender, receiver) = create_command_channel(16, Arc::clone(&state));
+        state.set_online(true);
+        let mock = MockBotClient::new();
+        mock.log.goto_hangs.store(true, Ordering::SeqCst);
+        let log = mock.log().clone();
+        let executor = CommandExecutor::new(mock, Arc::clone(&state), receiver, None);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::WalkDirection(Direction::North, 1)).await;
+        let br = result.expect("walk hitting the deadline returns a BotResult, not CommandTimeout");
+        assert!(!br.success, "timeout must report success=false");
+        let data = br.data.expect("timeout result carries structured data");
+        assert_eq!(data["reason"], "timeout");
+        assert!(data["target"].is_array());
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+        assert_eq!(
+            log.stop_pathfinding_calls.load(Ordering::SeqCst),
+            1,
+            "the pathfinder must be stopped after the timeout"
+        );
     }
 
     #[tokio::test]
@@ -4097,14 +4509,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_place_block() {
-        let (executor, sender, _state, log) = make_executor();
+        // H-2 semantics: `pos` is the cell the placed block OCCUPIES. The
+        // executor right-clicks the cell below (`pos − Up`, azalea's
+        // fabricated Up-face hit) and verifies the block appeared. With the
+        // mock's placement simulation the block lands at `pos` and the
+        // result is a verified success — never unconditional.
+        let (executor, sender, state, log) = make_executor_with_interact_placement();
+        let pos = BlockPos::new(10, 64, 20);
+        seed_placement_snapshot(&state, pos);
         let handle = spawn_executor(executor);
 
-        let pos = BlockPos::new(10, 64, 20);
         let result = send_and_await(&sender, BotCommand::PlaceBlock(pos, "stone".into())).await;
-        assert!(result.is_ok());
-        let br = result.unwrap();
-        assert!(br.success);
+        let br = result.expect("expected Ok(BotResult)");
+        assert!(br.success, "verified placement must succeed: {br:?}");
         assert!(br.message.contains("Placed stone at"));
         assert!(
             !br.message.contains("slot:"),
@@ -4117,7 +4534,9 @@ mod tests {
 
         let interacts = log.interact_calls.lock().unwrap();
         assert_eq!(interacts.len(), 1);
-        assert_eq!(interacts[0], pos);
+        // The clicked cell is BELOW `pos` — the Up-face convention puts the
+        // block at `pos`.
+        assert_eq!(interacts[0], BlockPos::new(10, 63, 20));
         // No slot: prefix → no hotbar switch.
         assert!(log.hotbar_switch_calls.lock().unwrap().is_empty());
     }
@@ -4127,14 +4546,14 @@ mod tests {
         // The MCP layer encodes the hotbar slot as "slot:N" in the block_type
         // field; the executor must select that slot before interacting.
         // The result message must strip the "slot:" prefix.
-        let (executor, sender, _state, log) = make_executor();
+        let (executor, sender, state, log) = make_executor_with_interact_placement();
+        let pos = BlockPos::new(10, 64, 20);
+        seed_placement_snapshot(&state, pos);
         let handle = spawn_executor(executor);
 
-        let pos = BlockPos::new(10, 64, 20);
         let result = send_and_await(&sender, BotCommand::PlaceBlock(pos, "slot:3".into())).await;
-        assert!(result.is_ok());
-        let br = result.unwrap();
-        assert!(br.success);
+        let br = result.expect("expected Ok(BotResult)");
+        assert!(br.success, "verified placement must succeed: {br:?}");
         assert!(br.message.contains("Placed 3 at"));
         assert!(
             !br.message.contains("slot:"),
@@ -4151,7 +4570,7 @@ mod tests {
 
         let interacts = log.interact_calls.lock().unwrap();
         assert_eq!(interacts.len(), 1);
-        assert_eq!(interacts[0], pos);
+        assert_eq!(interacts[0], BlockPos::new(10, 63, 20));
     }
 
     #[tokio::test]
@@ -4199,6 +4618,160 @@ mod tests {
 
         assert!(log.interact_calls.lock().unwrap().is_empty());
         assert!(log.hotbar_switch_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_place_block_verifies_effect_cell() {
+        // H-2: the executor must NEVER report unconditional success. With the
+        // mock's block_interact being a no-op (the server never confirms the
+        // placement), the result is an honest success:false naming the block
+        // type and the effect cell — the historical fake-success bug.
+        let (executor, sender, state, log) = make_executor();
+        let pos = BlockPos::new(5, 64, 0);
+        seed_placement_snapshot(&state, pos);
+        // Tiny verification budget so the timeout path is fast.
+        state.update_config(|c| c.snapshot_interval_ms = 1);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::PlaceBlock(pos, "stone".into())).await;
+        let br = result.expect("expected Ok(BotResult)");
+        assert!(
+            !br.success,
+            "no block appeared → honest failure, got: {br:?}"
+        );
+        assert!(
+            br.message.contains("stone"),
+            "message names the block: {}",
+            br.message
+        );
+        assert!(
+            br.message.contains("(5, 64, 0)"),
+            "message names the cell: {}",
+            br.message
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        let interacts = log.interact_calls.lock().unwrap();
+        assert_eq!(interacts.len(), 1, "the click must still have been sent");
+    }
+
+    #[tokio::test]
+    async fn test_place_block_occupied_target_rejected() {
+        // H-2: an occupied effect cell is rejected as InvalidParams before
+        // any interaction — the historical fire-and-forget success is gone.
+        let (executor, sender, state, log) = make_executor();
+        let pos = BlockPos::new(5, 64, 0);
+        let mut snapshot = make_populated_snapshot_defaults();
+        snapshot.self_player.position = BlockPos::new(4, 64, 0);
+        snapshot.blocks = vec![
+            BlockEntry {
+                position: BlockPos::new(5, 63, 0),
+                block_type: "stone".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: pos,
+                block_type: "dirt".into(),
+                block_state: None,
+            },
+        ];
+        snapshot.block_index = snapshot
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.position, i))
+            .collect();
+        state.update_snapshot(snapshot);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::PlaceBlock(pos, "stone".into())).await;
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("occupied")),
+            "expected InvalidParams 'already occupied', got: {result:?}"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+        assert!(
+            log.interact_calls.lock().unwrap().is_empty(),
+            "no interact may be issued when the target cell is occupied"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_place_block_clicks_cell_below() {
+        // H-2: because azalea's block_interact fabricates an Up-face hit, the
+        // executor must right-click `pos − Up` so the placed block lands at
+        // `pos`. The recorded interact position must be the cell below.
+        let (executor, sender, state, log) = make_executor();
+        let pos = BlockPos::new(5, 64, 0);
+        seed_placement_snapshot(&state, pos);
+        state.update_config(|c| c.snapshot_interval_ms = 1);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::PlaceBlock(pos, "stone".into())).await;
+        assert!(result.is_ok(), "result: {result:?}");
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        let interacts = log.interact_calls.lock().unwrap();
+        assert_eq!(interacts.len(), 1);
+        assert_eq!(
+            interacts[0],
+            BlockPos::new(5, 63, 0),
+            "must click pos − Up, not pos itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_place_block_success_when_block_appears() {
+        // H-2: when the server (simulated by the mock placing a block at the
+        // clicked cell + Up) confirms the placement, the result is an honest
+        // success:true with the block type and position in the message.
+        let (executor, sender, state, _log) = make_executor_with_interact_placement();
+        let pos = BlockPos::new(5, 64, 0);
+        seed_placement_snapshot(&state, pos);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::PlaceBlock(pos, "stone".into())).await;
+        let br = result.expect("expected Ok(BotResult)");
+        assert!(br.success, "placement confirmed → success: {br:?}");
+        assert!(
+            br.message.contains("Placed stone at (5, 64, 0)"),
+            "message: {}",
+            br.message
+        );
+        let data = br.data.expect("success result carries verification data");
+        assert_eq!(data["verified"], true);
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_place_block_rejects_y_below_floor() {
+        // H-2 defense-in-depth: `pos.y = -64` would put the click target
+        // (`pos − Up`) at y=-65, outside the world. `validate_command`
+        // accepts y=-64 (its bounds are -64..=320), so the handler must
+        // reject it — the MCP layer validates too, but internal dispatchers
+        // must not wedge the bot.
+        let (executor, sender, _state, log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        let pos = BlockPos::new(0, -64, 0);
+        let result = send_and_await(&sender, BotCommand::PlaceBlock(pos, "stone".into())).await;
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("-63") || msg.contains("below")),
+            "y=-64 must be rejected by the handler, got: {result:?}"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+        assert!(log.interact_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -4349,6 +4922,120 @@ mod tests {
 
         drop(sender);
         handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_use_item_non_placement_skips_occupancy_check() {
+        // M-6: the effect-cell occupancy pre-check (and the auto-approach)
+        // only apply to PLACEMENT items. Flint-and-steel has no placement
+        // effect, so a ceiling above the click target must NOT produce a
+        // false `InvalidParams("target cell already occupied")` — the
+        // interaction proceeds and reports the legacy "Used flint_and_steel"
+        // success.
+        let (executor, sender, state, log) = make_executor();
+        let mut snapshot = make_populated_snapshot_defaults();
+        snapshot.self_player.held_item_slot = 0;
+        snapshot.self_player.position = BlockPos::new(4, 64, 0); // inside reach
+        snapshot.self_player.inventory = vec![InventorySlot {
+            slot_index: 0,
+            item_id: "flint_and_steel".into(),
+            count: 1,
+        }];
+        // The click target (5,64,0) AND the "effect" cell above it (5,65,0)
+        // are both solid — the old unconditional pre-check rejected this.
+        snapshot.blocks = vec![
+            BlockEntry {
+                position: BlockPos::new(5, 64, 0),
+                block_type: "stone".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(5, 65, 0),
+                block_type: "stone".into(),
+                block_state: None,
+            },
+        ];
+        snapshot.block_index = snapshot
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.position, i))
+            .collect();
+        state.update_snapshot(snapshot);
+        let handle = spawn_executor(executor);
+
+        let pos = BlockPos::new(5, 64, 0);
+        let effect = BlockPos::new(5, 65, 0);
+        let result = send_and_await(
+            &sender,
+            BotCommand::UseItemOnBlock(pos, Some(0), Some(effect)),
+        )
+        .await;
+        let br = result
+            .expect("non-placement item with an occupied effect cell must NOT be rejected (M-6)");
+        assert!(br.success, "interaction proceeds: {br:?}");
+        assert!(
+            br.message.contains("flint_and_steel"),
+            "message names the item: {}",
+            br.message
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+        assert_eq!(log.interact_calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_use_item_placement_item_occupied_effect_still_rejected() {
+        // M-6 guard: gating the occupancy pre-check on
+        // `item_has_placement_effect` must NOT disable it for genuine
+        // placement items — a stone "block" used on a solid effect cell is
+        // still rejected before any interaction.
+        let (executor, sender, state, log) = make_executor();
+        let mut snapshot = make_populated_snapshot_defaults();
+        snapshot.self_player.held_item_slot = 0;
+        snapshot.self_player.position = BlockPos::new(4, 64, 0);
+        snapshot.self_player.inventory = vec![InventorySlot {
+            slot_index: 0,
+            item_id: "stone".into(),
+            count: 1,
+        }];
+        snapshot.blocks = vec![
+            BlockEntry {
+                position: BlockPos::new(5, 64, 0),
+                block_type: "stone".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(5, 65, 0),
+                block_type: "stone".into(),
+                block_state: None,
+            },
+        ];
+        snapshot.block_index = snapshot
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.position, i))
+            .collect();
+        state.update_snapshot(snapshot);
+        let handle = spawn_executor(executor);
+
+        let pos = BlockPos::new(5, 64, 0);
+        let effect = BlockPos::new(5, 65, 0);
+        let result = send_and_await(
+            &sender,
+            BotCommand::UseItemOnBlock(pos, Some(0), Some(effect)),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("occupied")),
+            "placement item with an occupied effect cell must be rejected, got: {result:?}"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+        assert!(log.interact_calls.lock().unwrap().is_empty());
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -4723,6 +5410,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_smart_move_uses_live_position() {
+        // M-4: the reached computation must use the bot's LIVE position
+        // (zero-wait), not the throttled snapshot — which can lag a long
+        // move by a whole idle interval (5 s) and made a physically-
+        // completed move look unreached, so smart_move reported a false
+        // "obstacle". The snapshot player stays at (0,64,0) while the live
+        // client position says the bot already arrived at the target.
+        let (executor, sender, state, log) = make_executor();
+        make_populated_snapshot(&state);
+        *log.live_position.lock().unwrap() = Some([5.0, 64.0, 5.0]);
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(5, 64, 5);
+        let result = send_and_await(&sender, BotCommand::SmartMove(target)).await;
+        let br = result.expect("expected Ok(BotResult): {result:?}");
+        assert!(
+            br.success,
+            "live position at the target must count as reached: {br:?}"
+        );
+        let data = br.data.expect("data present");
+        assert_eq!(data.get("reached"), Some(&serde_json::json!(true)));
+        assert_eq!(data.get("position"), Some(&serde_json::json!([5, 64, 5])));
+        assert_eq!(data.get("retried"), Some(&serde_json::json!(false)));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
     async fn test_smart_move_retries_once_and_reaches_target() {
         // Transient-obstacle regression: the first goto attempt fails with a
         // pathfinding error, the single retry succeeds and lands the snapshot
@@ -4882,6 +5598,59 @@ mod tests {
         assert!(log.chat_calls.lock().unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn test_fly_to_inner_goto_honours_fly_timeout() {
+        // M-1: `fly_timeout_secs` must reach the pathfinder's
+        // wait-for-completion loop (via `goto_with_deadline`), not just the
+        // outer envelope. Configure a LONG fly timeout and a SHORT command
+        // timeout; the recorded `goto_with_deadline` deadline must be the
+        // fly-based value — flights needing > command_timeout_secs of path
+        // search were previously killed at `command_timeout_secs`.
+        let config = AppConfig {
+            command_timeout_secs: 2,
+            fly_timeout_secs: 8,
+            ..AppConfig::default()
+        };
+        let state = Arc::new(SharedState::new(config));
+        let (sender, receiver) = create_command_channel(16, Arc::clone(&state));
+        state.set_online(true);
+        state.update_snapshot(crate::types::WorldSnapshot {
+            self_player: SelfPlayer {
+                position: BlockPos::new(0, 64, 0),
+                gamemode: GameMode::Creative,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let mock = MockBotClient::new();
+        let log = mock.log().clone();
+        let executor = CommandExecutor::new(mock, Arc::clone(&state), receiver, None);
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(10, 70, 0);
+        let result = send_and_await(&sender, BotCommand::FlyTo(target)).await;
+        assert!(result.is_ok(), "fly_to should succeed: {result:?}");
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        // The horizontal leg's goto_with_deadline must have received the fly
+        // timeout (8 s), NOT the command timeout (2 s).
+        let calls = log.goto_with_deadline_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "one horizontal-leg goto");
+        let (pos, deadline) = calls[0];
+        assert_eq!(
+            pos,
+            BlockPos::new(10, 64, 0),
+            "horizontal leg keeps current Y"
+        );
+        assert_eq!(
+            deadline.as_secs(),
+            8,
+            "inner goto must be bounded by fly_timeout_secs (8s), not command_timeout_secs (2s)"
+        );
+    }
+
     #[test]
     fn test_is_collectible_item_entity_exact_match_only() {
         assert!(is_collectible_item_entity("item"));
@@ -4998,6 +5767,60 @@ mod tests {
         handle.await.expect("executor should finish");
 
         assert!(log.goto_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_collect_items_partial_visits_reported() {
+        // M-5: collect_items with several targets must not race the whole
+        // command envelope (the raw `goto` loop could exceed it entirely, and
+        // a success at the deadline was misreported as CommandTimeout). A
+        // per-target budget — the remaining envelope budget split across the
+        // remaining targets, floored at 2 s — stops the loop on the first
+        // timeout and reports the partial visit count honestly: an Ok result,
+        // not an Err, and not a fake "visited all".
+        let config = AppConfig {
+            command_timeout_secs: 2,
+            ..AppConfig::default()
+        };
+        let state = Arc::new(SharedState::new(config));
+        let (sender, receiver) = create_command_channel(16, Arc::clone(&state));
+        state.set_online(true);
+        let mock = MockBotClient::new();
+        // First goto succeeds; the SECOND hangs → the per-target budget
+        // times out mid-loop.
+        mock.log.goto_hangs_after_n.store(2, Ordering::SeqCst);
+        let executor = CommandExecutor::new(mock, Arc::clone(&state), receiver, None);
+        snapshot_with_entities(
+            &state,
+            vec![
+                item_entity(BlockPos::new(2, 64, 1)),
+                item_entity(BlockPos::new(3, 64, 2)),
+                item_entity(BlockPos::new(4, 64, 3)),
+            ],
+        );
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::CollectItems(5)).await;
+        let br =
+            result.expect("collect_items budget timeout returns Ok(BotResult), not an error (M-5)");
+        assert!(
+            !br.success,
+            "budget exhausted before all targets → honest failure: {br:?}"
+        );
+        let data = br.data.expect("data present");
+        assert_eq!(
+            data["visited"], 1,
+            "first target visited, then the per-target budget ran out"
+        );
+        assert!(br.message.contains("Visited 1"), "message: {}", br.message);
+        assert!(
+            br.message.contains("budget") || br.message.contains("skipped"),
+            "message notes the skipped targets: {}",
+            br.message
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -5357,6 +6180,66 @@ mod tests {
 
         drop(sender);
         handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_act_result_carries_live_position_without_snapshot_mutation() {
+        // L-15: `handle_act` used to `Arc::make_mut` the whole snapshot to
+        // override `self_player.position` — deep-cloning blocks + block_index
+        // (potentially huge) on every act call because the Arc is shared
+        // (the MCP/UI layers hold their own loads). The snapshot Arc must be
+        // untouched, and the result must still carry the live position.
+        let (executor, sender, state, log) = make_executor();
+        let mut snapshot = make_populated_snapshot_defaults();
+        snapshot.self_player.position = BlockPos::new(0, 64, 0);
+        snapshot.self_player.position_precise = None;
+        state.update_snapshot(snapshot);
+        let snap_before = state.read_snapshot();
+        // Live client position: the bot already arrived at (40.5, -60, -16.5).
+        *log.live_position.lock().unwrap() = Some([40.5, -60.0, -16.5]);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(
+            &sender,
+            BotCommand::Act(
+                ActAction::Move {
+                    target: BlockPos::new(40, -60, -16),
+                },
+                Some(0),
+            ),
+        )
+        .await
+        .expect("act should succeed");
+        let act: ActResult = serde_json::from_value(result.data.expect("data present"))
+            .expect("data is a serialized ActResult");
+        assert_eq!(
+            act.self_info.position,
+            BlockPos::new(40, -60, -17),
+            "self_info must carry the live position, not the stale snapshot"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        let snap_after = state.read_snapshot();
+        assert!(
+            Arc::ptr_eq(&snap_before, &snap_after),
+            "handle_act must not replace the snapshot Arc (L-15): Arc::make_mut \
+             would deep-clone the whole snapshot (blocks + block_index) on \
+             every act call"
+        );
+        // The live-position override must NOT leak into the shared snapshot —
+        // other readers (MCP tools, the UI) must keep seeing the throttled
+        // world state, not a per-call act override.
+        assert_eq!(
+            snap_after.self_player.position,
+            BlockPos::new(0, 64, 0),
+            "the stored snapshot must be unmutated by handle_act"
+        );
+        assert_eq!(
+            snap_after.self_player.position_precise, None,
+            "the stored snapshot's precise position must stay untouched"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════
