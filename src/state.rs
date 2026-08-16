@@ -14,7 +14,8 @@ use azalea::container::ContainerHandle;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::sync::{Arc, LazyLock, Mutex, RwLock, RwLockReadGuard};
+use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -130,6 +131,26 @@ pub struct WorldViewCache {
     /// multi-content response (centre coords, radius, scale, yaw,
     /// timestamp). Stored so a cache hit can return both image + text
     /// without re-running the renderer.
+    pub annotation_json: String,
+}
+
+/// Cheap view of [`WorldViewCache`] WITHOUT the (potentially ~700 KB at
+/// `scale=8`) base64 PNG payload (M-11).
+///
+/// The UI preview panel reads this every frame to decide whether the
+/// texture must be rebuilt; cloning the whole [`WorldViewCache`] — including
+/// `png_base64` — every frame was the M-11 hotspot. The full cache is
+/// fetched (via [`SharedState::get_world_view_cache`]) only when a rebuild
+/// is actually needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldViewCacheMeta {
+    /// `WorldSnapshot::snapshot_seq` of the snapshot the render came from.
+    pub snapshot_seq: u64,
+    /// Half-extent of the cached render.
+    pub radius: u8,
+    /// Pixel-per-block scale of the cached render.
+    pub scale: u8,
+    /// The annotation JSON (centre coords, radius, scale, yaw, timestamp).
     pub annotation_json: String,
 }
 
@@ -277,12 +298,14 @@ pub struct SharedState {
     /// by `get_server_info` (and other query tools) so clients can tell that
     /// a `force` snapshot refresh may return pre-command state.
     executor_busy: AtomicBool,
-    /// Epoch-millis timestamp of the last dispatched bot command
-    /// (0 = never). The snapshot updater reads this to relax its rebuild
-    /// interval while the bot is idle.
+    /// Monotonic stamp of the last dispatched bot command: nanoseconds
+    /// elapsed since the process-start [`ACTIVITY_ANCHOR`] (0 = never).
+    /// The snapshot updater reads this to relax its rebuild interval while
+    /// the bot is idle.
     last_command_at: AtomicU64,
-    /// Epoch-millis timestamp of the last MCP *request* (initialize /
-    /// ping / list_tools / call_tool). Semantically independent of
+    /// Monotonic stamp of the last MCP *request* (initialize / ping /
+    /// list_tools / call_tool): nanoseconds elapsed since the process-start
+    /// [`ACTIVITY_ANCHOR`] (0 = never). Semantically independent of
     /// `last_command_at`: the headless idle watchdog keys on MCP activity,
     /// because a client host may hold a connection open and send requests
     /// while never dispatching a bot command (e.g. ZCode's per-session
@@ -295,6 +318,27 @@ pub struct SharedState {
     /// [`WorldSnapshot::snapshot_seq`] so `get_world_view` can invalidate its
     /// cache with sub-second precision.
     next_snapshot_seq: AtomicU64,
+}
+
+// ---------------------------------------------------------------------------
+// Monotonic activity probes (L-23)
+// ---------------------------------------------------------------------------
+
+/// Process-start anchor for the monotonic activity stamps.
+///
+/// Every activity stamp stores nanoseconds elapsed since this anchor
+/// (via [`activity_elapsed_nanos`]) instead of wall-clock epoch millis.
+/// Monotonic time is immune to NTP jumps: a backward jump can no longer
+/// make `now - last` saturate to 0 (which kept the fast snapshot interval
+/// forever — "perpetually active"), and a forward jump cannot fire the
+/// headless idle watchdog early.
+static ACTIVITY_ANCHOR: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// Nanoseconds elapsed since the process-start [`ACTIVITY_ANCHOR`].
+///
+/// Fits comfortably in a [`u64`] (wraps only after ~584 years of uptime).
+fn activity_elapsed_nanos() -> u64 {
+    ACTIVITY_ANCHOR.elapsed().as_nanos() as u64
 }
 
 impl SharedState {
@@ -786,41 +830,47 @@ impl SharedState {
         self.executor_busy.load(Ordering::Relaxed)
     }
 
-    /// Record that a bot command was dispatched right now (epoch millis).
+    /// Record that a bot command was dispatched right now (monotonic).
     ///
     /// Called by the command executor on every dispatch; the snapshot
     /// updater keeps the fast rebuild interval only while commands keep
-    /// arriving.
+    /// arriving. The stamp is elapsed monotonic time since the process
+    /// start anchor (L-23), so wall-clock NTP jumps cannot affect the
+    /// activity decision.
     pub fn mark_command_activity(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        self.last_command_at.store(now, Ordering::Relaxed);
+        self.last_command_at
+            .store(activity_elapsed_nanos(), Ordering::Relaxed);
     }
 
-    /// Epoch-millis timestamp of the last dispatched command (0 = never).
-    pub fn last_command_at_ms(&self) -> u64 {
-        self.last_command_at.load(Ordering::Relaxed)
+    /// Monotonic [`Instant`] of the last dispatched command, or `None` if
+    /// no command has ever been dispatched.
+    ///
+    /// Age is measured with [`Instant::elapsed`] — never by comparing
+    /// wall-clock epoch values.
+    pub fn last_command_at(&self) -> Option<Instant> {
+        let nanos = self.last_command_at.load(Ordering::Relaxed);
+        (nanos != 0).then(|| *ACTIVITY_ANCHOR + Duration::from_nanos(nanos))
     }
 
-    /// Record that an MCP request was received right now (epoch millis).
+    /// Record that an MCP request was received right now (monotonic).
     ///
     /// Called at the entry of every `ServerHandler` request method
     /// (initialize / ping / list_tools / call_tool). The headless idle
     /// watchdog uses this instead of [`mark_command_activity`](Self::mark_command_activity)
     /// so a connected-but-commandless client session is never judged idle.
     pub fn mark_mcp_activity(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        self.mcp_activity_at.store(now, Ordering::Relaxed);
+        self.mcp_activity_at
+            .store(activity_elapsed_nanos(), Ordering::Relaxed);
     }
 
-    /// Epoch-millis timestamp of the last MCP request (0 = never).
-    pub fn mcp_activity_at_ms(&self) -> u64 {
-        self.mcp_activity_at.load(Ordering::Relaxed)
+    /// Monotonic [`Instant`] of the last MCP request, or `None` if no
+    /// request has ever been received.
+    ///
+    /// Age is measured with [`Instant::elapsed`] — never by comparing
+    /// wall-clock epoch values.
+    pub fn mcp_activity_at(&self) -> Option<Instant> {
+        let nanos = self.mcp_activity_at.load(Ordering::Relaxed);
+        (nanos != 0).then(|| *ACTIVITY_ANCHOR + Duration::from_nanos(nanos))
     }
 
     /// Store the last error message reported by the bot/MCP layer.
@@ -937,6 +987,26 @@ impl SharedState {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         guard.clone()
+    }
+
+    /// Read the cached `get_world_view` entry's cheap metadata WITHOUT
+    /// cloning the (potentially ~700 KB) `png_base64` payload (M-11).
+    ///
+    /// Returns the snapshot sequence, radius, scale and annotation JSON —
+    /// everything the UI preview panel needs to decide whether to rebuild
+    /// its texture — without paying for a full [`WorldViewCache`] clone on
+    /// every frame. Returns `None` when no render has been cached.
+    pub fn world_view_cache_meta(&self) -> Option<WorldViewCacheMeta> {
+        let guard = self
+            .last_world_view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|c| WorldViewCacheMeta {
+            snapshot_seq: c.snapshot_seq,
+            radius: c.radius,
+            scale: c.scale,
+            annotation_json: c.annotation_json.clone(),
+        })
     }
 
     /// Store a freshly-rendered `get_world_view` response, overwriting any
@@ -1449,20 +1519,33 @@ mod tests {
     }
 
     #[test]
-    fn test_mark_mcp_activity_stamps_timestamp() {
-        // The headless idle watchdog keys on MCP-request activity; the stamp
-        // must advance after a request arrives.
+    fn test_activity_probes_monotonic() {
+        // L-23: activity probes must come from a monotonic clock, so a
+        // wall-clock (NTP) jump can neither keep the bot "perpetually
+        // active" (backward jump: `now - last` saturates to 0) nor fire the
+        // headless idle watchdog early (forward jump). The probes return an
+        // `Instant` (None before the first mark) whose age is measured by
+        // elapsed monotonic time — never by comparing epoch values.
         let state = SharedState::new(AppConfig::default());
-        assert_eq!(state.mcp_activity_at_ms(), 0, "never touched → 0");
-        state.mark_mcp_activity();
-        let stamped = state.mcp_activity_at_ms();
-        assert!(stamped > 0, "mark must stamp a non-zero epoch millis");
-        // A second mark must advance (or at least not go backwards).
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        state.mark_mcp_activity();
+
+        // Never touched → no stamp at all (the old code reported 0).
+        assert!(state.last_command_at().is_none());
+        assert!(state.mcp_activity_at().is_none());
+
+        // A mark stamps an instant in the (monotonic) present, so the
+        // stamp's age is tiny — regardless of what the wall clock says.
+        state.mark_command_activity();
+        let command_at = state.last_command_at().expect("marked → Some");
         assert!(
-            state.mcp_activity_at_ms() >= stamped,
-            "activity stamp must be monotonic"
+            command_at.elapsed() < std::time::Duration::from_secs(1),
+            "command stamp must be in the recent monotonic past"
+        );
+
+        state.mark_mcp_activity();
+        let mcp_at = state.mcp_activity_at().expect("marked → Some");
+        assert!(
+            mcp_at.elapsed() < std::time::Duration::from_secs(1),
+            "mcp stamp must be in the recent monotonic past"
         );
     }
 
@@ -1769,5 +1852,46 @@ mod tests {
             .expect("trivial thread should join cleanly");
         // Second take returns None (the handle was moved out).
         assert!(state.take_bot_thread_handle().is_none());
+    }
+
+    // -- World view cache meta (M-11) ---------------------------------------
+
+    /// The cheap meta accessor returns the cache's key fields WITHOUT the
+    /// (potentially ~700 KB at scale=8) base64 PNG payload. The preview
+    /// panel calls this every frame; cloning the whole `WorldViewCache`
+    /// (including `png_base64`) every frame was the M-11 hotspot.
+    #[test]
+    fn test_world_view_cache_meta_excludes_png() {
+        let state = SharedState::new(AppConfig::default());
+        state.set_world_view_cache(WorldViewCache {
+            snapshot_seq: 7,
+            radius: 8,
+            scale: 4,
+            png_base64: "A".repeat(100_000),
+            block_count: 3,
+            entity_count: 2,
+            annotation_json: "ann".into(),
+        });
+
+        let meta = state.world_view_cache_meta().expect("meta must be present");
+        assert_eq!(meta.snapshot_seq, 7);
+        assert_eq!(meta.radius, 8);
+        assert_eq!(meta.scale, 4);
+        assert_eq!(meta.annotation_json, "ann");
+
+        // The full cache (with the PNG) remains available on demand — the
+        // meta path must not have disturbed it.
+        let full = state.get_world_view_cache().expect("full cache present");
+        assert_eq!(full.png_base64.len(), 100_000);
+        assert_eq!(full.block_count, 3);
+        assert_eq!(full.entity_count, 2);
+    }
+
+    /// No cached render → no meta (the preview panel treats this as
+    /// "clear the stale texture").
+    #[test]
+    fn test_world_view_cache_meta_none_when_empty() {
+        let state = SharedState::new(AppConfig::default());
+        assert!(state.world_view_cache_meta().is_none());
     }
 }
