@@ -94,6 +94,15 @@ const STANDABLE_OFFSETS_XZ: [(i32, i32); 8] = [
 /// solid (non-air). Returns `None` if no such position exists in the
 /// snapshot.
 ///
+/// **Fluids are never standable floors** (audit M-13): a floor of `water`,
+/// `lava`, or `bubble_column` is treated as NOT solid — the bot would sink
+/// (or burn) instead of standing. The pathfinder may therefore reject a
+/// pool-adjacent target entirely rather than stand on a fluid.
+///
+/// **Candidates above the build limit are skipped** (audit M-14): a cell at
+/// y > 320 (the world height in 1.18+) is never returned, even when it has a
+/// solid floor below it. The same clamp applies below y = -64.
+///
 /// Scans 8 horizontal neighbours (4 orthogonal + 4 diagonal) × 3 Y levels
 /// (priority: same Y first, then y+1, then y-1). Diagonals are necessary
 /// when the target is wedged in a 1-block gap where only a diagonal cell
@@ -103,6 +112,11 @@ pub fn find_standable_neighbor(
     snapshot: &crate::types::WorldSnapshot,
     target: crate::types::BlockPos,
 ) -> Option<crate::types::BlockPos> {
+    // World Y bounds (Minecraft 1.18+): -64 ..= 320. Candidates outside
+    // this range are unreachable / invalid and must be skipped.
+    const MIN_Y: i32 = -64;
+    const MAX_Y: i32 = 320;
+
     // Check 8 horizontal neighbours at 3 Y levels (same Y, y+1, y-1).
     // Priority: same Y first, then y+1 (step up), then y-1 (step down).
     let offsets_y: [i32; 3] = [0, 1, -1];
@@ -112,6 +126,13 @@ pub fn find_standable_neighbor(
             let pos = crate::types::BlockPos::new(target.x + dx, target.y + dy, target.z + dz);
             let below = crate::types::BlockPos::new(pos.x, pos.y - 1, pos.z);
 
+            // M-14: skip candidates outside the world's Y range — a cell at
+            // y=321 (or y=-65) is never a valid place to stand, regardless of
+            // what supports it.
+            if !(MIN_Y..=MAX_Y).contains(&pos.y) {
+                continue;
+            }
+
             // A position is standable if it is air (or absent from the
             // snapshot, which we treat as air) and the block below it is
             // solid (non-air). Use the O(1) `block_index` instead of a
@@ -119,11 +140,12 @@ pub fn find_standable_neighbor(
             //
             // NOTE: This is a simplified solidity check — "not air" is
             // treated as "solid". Real Minecraft has non-air, non-solid
-            // blocks (e.g. water, tall grass, torches) that would fail
-            // this check. For pathfinding purposes this is conservative
-            // (the bot may reject some actually-standable positions)
-            // but never unsafe (it will never try to stand above air
-            // or a non-solid block).
+            // blocks (e.g. tall grass, torches) that would fail this check.
+            // For pathfinding purposes this is conservative (the bot may
+            // reject some actually-standable positions) but never unsafe.
+            //
+            // M-13 (audit): fluids (water, lava, bubble_column) are excluded
+            // from "solid" — the bot must never be asked to stand on them.
             let pos_is_clear = snapshot
                 .block_index
                 .get(&pos)
@@ -132,7 +154,10 @@ pub fn find_standable_neighbor(
             let below_is_solid = snapshot
                 .block_index
                 .get(&below)
-                .map(|&idx| !snapshot.blocks[idx].block_type.eq_ignore_ascii_case("air"))
+                .map(|&idx| {
+                    let ty = &snapshot.blocks[idx].block_type;
+                    !ty.eq_ignore_ascii_case("air") && !is_fluid_block_type(ty)
+                })
                 .unwrap_or(false);
 
             if pos_is_clear && below_is_solid {
@@ -141,6 +166,14 @@ pub fn find_standable_neighbor(
         }
     }
     None
+}
+
+/// Returns `true` when the block type is a fluid that can never serve as a
+/// standable floor (audit M-13): water, lava, and bubble columns.
+fn is_fluid_block_type(block_type: &str) -> bool {
+    block_type.eq_ignore_ascii_case("water")
+        || block_type.eq_ignore_ascii_case("lava")
+        || block_type.eq_ignore_ascii_case("bubble_column")
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -217,6 +250,14 @@ impl MineBlockOperation {
 ///
 /// Lifecycle:
 /// Idle → EquippingTool → MovingToTarget → ExecutingAction → Completed
+///
+/// `BotCommand::PlaceBlock` semantics (wave-2, H-2): the placed block
+/// OCCUPIES the command's `pos`. The executor right-clicks `pos − Up`
+/// (azalea's fabricated Up-face hit) so the block lands at `pos`, then
+/// verifies the placement via `wait_for_block_present`. Consumers of this
+/// machine (and their snapshot fixtures) must seed a loaded block at
+/// `pos − Up` as the click target and treat `pos` as the effect cell —
+/// never the cell that is right-clicked.
 pub struct PlaceBlockOperation {
     pub target: BlockPos,
     pub block_type: String,
@@ -573,6 +614,140 @@ mod tests {
         assert_eq!(
             find_standable_neighbor(&snapshot, target),
             Some(BlockPos::new(1, 64, 0))
+        );
+    }
+
+    // ── M-13 (audit): fluid floors are NOT standable ─────────────
+
+    /// M-13 (audit): a candidate whose floor is WATER must be rejected —
+    /// the bot cannot stand on a fluid. The old `below_is_solid = !air`
+    /// check counted water as solid, so the bot pathfound onto water and
+    /// sank. Fluids are never standable floors.
+    #[test]
+    fn test_standable_neighbor_rejects_water_floor() {
+        use crate::types::BlockEntry;
+
+        let target = BlockPos::new(0, 64, 0);
+        // The ONLY candidate is (1, 64, 0) with a water floor below.
+        let snapshot = make_snapshot_with_blocks(vec![
+            BlockEntry {
+                position: target,
+                block_type: "stone".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(1, 64, 0),
+                block_type: "air".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(1, 63, 0),
+                block_type: "water".into(),
+                block_state: None,
+            },
+        ]);
+
+        assert_eq!(find_standable_neighbor(&snapshot, target), None);
+    }
+
+    /// M-13 (audit): same as the water test but for LAVA — the bot must
+    /// never pathfind onto a lava floor either.
+    #[test]
+    fn test_standable_neighbor_rejects_lava_floor() {
+        use crate::types::BlockEntry;
+
+        let target = BlockPos::new(0, 64, 0);
+        let snapshot = make_snapshot_with_blocks(vec![
+            BlockEntry {
+                position: target,
+                block_type: "stone".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(1, 64, 0),
+                block_type: "air".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(1, 63, 0),
+                block_type: "lava".into(),
+                block_state: None,
+            },
+        ]);
+
+        assert_eq!(find_standable_neighbor(&snapshot, target), None);
+    }
+
+    /// M-13 (audit): bubble columns (air-like but lethal) must also never
+    /// count as a standable floor, even though they are non-air entries.
+    #[test]
+    fn test_standable_neighbor_rejects_bubble_column_floor() {
+        use crate::types::BlockEntry;
+
+        let target = BlockPos::new(0, 64, 0);
+        let snapshot = make_snapshot_with_blocks(vec![
+            BlockEntry {
+                position: target,
+                block_type: "stone".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(1, 64, 0),
+                block_type: "air".into(),
+                block_state: None,
+            },
+            BlockEntry {
+                position: BlockPos::new(1, 63, 0),
+                block_type: "bubble_column".into(),
+                block_state: None,
+            },
+        ]);
+
+        assert_eq!(find_standable_neighbor(&snapshot, target), None);
+    }
+
+    // ── M-14 (audit): no candidate above the build limit ─────────
+
+    /// M-14 (audit): a target at the build limit (y=320) must never return
+    /// a standable candidate at y=321 (above the world height). The same-Y
+    /// ring is fully blocked and the ONLY standable-looking cell is at
+    /// y+1 with a solid floor at y=320 — the function must skip it.
+    #[test]
+    fn test_standable_neighbor_no_position_above_build_limit() {
+        use crate::types::BlockEntry;
+
+        let target = BlockPos::new(0, 320, 0);
+        let mut blocks = vec![BlockEntry {
+            position: target,
+            block_type: "stone".into(),
+            block_state: None,
+        }];
+        // Block the entire same-Y ring so y=0 finds nothing.
+        for (dx, dz) in STANDABLE_OFFSETS_XZ.iter().copied() {
+            blocks.push(BlockEntry {
+                position: BlockPos::new(target.x + dx, target.y, target.z + dz),
+                block_type: "stone".into(),
+                block_state: None,
+            });
+        }
+        // The ONLY "standable" cell: air at (1, 321, 0) with a solid
+        // floor at (1, 320, 0). y=321 is above the build limit.
+        blocks.push(BlockEntry {
+            position: BlockPos::new(1, 321, 0),
+            block_type: "air".into(),
+            block_state: None,
+        });
+        blocks.push(BlockEntry {
+            position: BlockPos::new(1, 320, 0),
+            block_type: "stone".into(),
+            block_state: None,
+        });
+
+        let snapshot = make_snapshot_with_blocks(blocks);
+        let result = find_standable_neighbor(&snapshot, target);
+        assert!(
+            result.is_none() || result.unwrap().y <= 320,
+            "standable neighbor must never exceed the build limit (y=320), got {result:?}"
         );
     }
 
