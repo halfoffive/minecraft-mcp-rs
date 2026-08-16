@@ -1,48 +1,4 @@
-# Changelog
-
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [1.3.1-rc.4] - 2026-08-16
-
-### Fixed
-
-- **`execute_command` rejection detection survives a full chat queue:**
-  the feedback diff used the deque length as its baseline, so once the
-  queue hit its cap every new message looked "before the baseline" and
-  rejected commands were reported as successes (real sessions always had a
-  full queue; unit tests never did). Chat messages now carry monotonic
-  sequence numbers and the baseline is a cursor, so the scan is correct
-  even when the deque is full. The chat cap was raised from 10 to 50.
-- **`teleport` actually teleports (via `/tp`):** it previously mutated the
-  local ECS `Position` component and reported success, but the server
-  re-syncs the authoritative position every tick, so the bot never moved.
-  It now sends `/tp x y z` and verifies the server reply — a rejected
-  command (no OP) surfaces `CommandRejected` instead of a fake success.
-  `fly_to`'s vertical landing leg uses the same server-authoritative
-  teleport instead of the local position mutation.
-- **`get_world_view` annotation counts are view-scoped:** `block_count` /
-  `entity_count` reported the whole snapshot (hundreds of thousands of
-  blocks for a 9-block viewport). The renderer now returns the distinct
-  visible block columns and in-radius entities it actually drew, and the
-  cache stores them so a cache hit returns the same numbers.
-- **`place_block` names the placed block:** the result message previously
-  read `Placed 3 at ...` (the hotbar slot). The MCP layer now resolves the
-  item id from the inventory snapshot and reports `Placed stone at ...`;
-  an empty slot is reported honestly as `(empty slot)`.
-- **Headless idle watchdog keys on MCP requests, not bot commands:** a
-  client host that spawns per-session connections and sends
-  initialize/list_tools without ever dispatching a bot command (e.g. ZCode
-  probe connections) was killed after 600 s, surfacing as "MCP server
-  connection closed unexpectedly". `initialize` / `ping` / `list_tools` /
-  `call_tool` now stamp MCP-request activity and the watchdog uses that.
-- **`act` with `perception_radius=0` returns no nearby context:** the
-  `<= 0` filter previously kept entities/blocks sharing the player's own
-  cell, contradicting the documented "0 returns no nearby context at all".
-
-## [1.3.1-rc.3] - 2026-08-15
+## [1.3.1] - 2026-08-16
 
 ### Added
 
@@ -60,46 +16,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raw look angle could grow unboundedly as the bot keeps turning (observed
   `-767.1°` in the annotation); it is now folded into Minecraft's
   `[-180, 180)` range at the snapshot write point.
-
-### Fixed
-
-- **`execute_command` rejection detection now scans every reply message:**
-  Minecraft reports a rejected command as TWO System chat messages (the
-  error title, e.g. `Unknown or incomplete command. See below for error`,
-  plus the command echo with a `<--[HERE]` marker). The old newest-only
-  selection returned fake `success:true` whenever the echo landed last.
-  `rejection_feedback_after` now checks every System message in the
-  feedback window and returns the newest one matching a rejection pattern.
-- **`give_item` no longer misfires "Permission denied":** the gate trusted
-  the cached snapshot's `commands_enabled`, which can be a stale
-  `PermissionLevel` heuristic right after a reconnect. `give_item` now
-  re-probes command availability live via `/seed` (the same single source
-  of truth `get_server_info` uses) and rejects only when the probe itself
-  confirms commands are unavailable; the probe is also cleared on
-  disconnect so it never crosses sessions.
-- **`act` results report the bot's live position:** `self_info.position`
-  previously came from the throttled snapshot, which can lag a just-finished
-  move by up to one interval (5 s when idle) — an LLM client misread a
-  successful move as "did not arrive". The result now prefers a zero-wait
-  live read of the player's position and falls back to the snapshot only
-  when unavailable.
-- **Fluid bucket placement fails with a targeted error:** azalea 0.15.1's
-  fabricated interaction hit (block centre, fixed Up face) is rejected by
-  the vanilla server for bucket `UseItemOn`, so water/lava buckets cannot
-  be placed through `use_item_on_block`. The verification timeout now
-  returns `success:false` with `reason: "bucket_placement_unsupported"`
-  and the working `/setblock` / `/fill` alternative instead of a generic
-  "interaction was likely rejected".
-- **Stdio server exits when the client's pipe breaks:** a failed response
-  write (EPIPE) previously only logged and the process kept waiting for an
-  input EOF that may never arrive. The patched rmcp serve loop now treats a
-  transport write failure as a shutdown reason (`QuitReason::TransportWriteError`),
-  so a headless stdio process dies the moment its MCP client disappears.
-
-## [1.3.1-rc.2] - 2026-08-15
-
-### Added
-
 - **Environment-variable configuration (config file removed):** settings are
   now read exclusively from `MINECRAFT_MCP_*` environment variables
   (12-factor style, like cargo); the `config.json` file, `--config <path>`
@@ -143,6 +59,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `attack_entity` now include `position` in `data` so callers can detect
   the drift caused by auto-approach / item-walking without a separate
   `get_self_info` round-trip.
+- **`walk_direction` reports the end position:** the result `data` now
+  carries `position` (live player-position read preferred, snapshot
+  fallback) so callers can tell where a successful walk actually ended.
+- **`get_chat_history` documentation matches the 50-message retention cap:**
+  the tool description and the desktop UI chat-log label now say 50 (the
+  queue already retains 50 after the 2026-08 round-2 cursor fix) instead of
+  the stale "up to 10".
+- **`give_item` tool description updated:** the MCP tools/list description
+  no longer calls the tool a smoke-test fallback and documents that rejected
+  `/give` commands (e.g. an unknown item id) return `command_rejected`.
 - **Help mode never claims to start the MCP server:** the "Minecraft MCP
   server starting" log line moved after mode resolution; a bare
   `minecraft-mcp-rs` invocation prints help and exits without starting the
@@ -151,6 +77,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change) and `update_settings` no longer persists to disk.
 - **MCP `instructions` advertise the supported Minecraft version:** Java
   Edition 1.21.11 (the only version supported by azalea 0.15.1).
+
+- **CLI migrated to clap:** `src/cli.rs` now parses `--headless` /
+  `--gui` / `--stdio` / `--config <path>` with clap 4.6 (derive) instead
+  of the hand-rolled parser. Flags and precedence are unchanged
+  (`--headless` wins over `--gui`, `--stdio` alone implies headless,
+  `--config` alone runs the GUI); `-h/--help` and the new
+  `-V/--version` print to **stderr** and exit 0, usage errors print to
+  stderr and exit 2 — stdout stays reserved for the MCP transport. Help text
+  is now generated by clap from the flag doc comments.
+- **CI split (compile-time budget):** the run-once checks (fmt → clippy →
+  test) live on `develop` — a PR targeting develop runs lint ONLY (the
+  multi-platform matrix build is skipped), and the develop push runs lint +
+  the full dev matrix once per merged change. `release.yml` now performs
+  ONLY `--release` builds + publish (the duplicate lint job was removed;
+  `release`/npm-publish depend on `[build, mode]`), so the release and
+  pre-release paths never re-compile the test target matrix.
+- **`build.yml` runs on `develop` only:** the push trigger moved from
+  `master` to `develop`, and the `pull_request` trigger is now scoped to
+  PRs targeting `develop` — master is stable-only and covered by the
+  release pipeline.
 
 ### Removed
 
@@ -161,6 +107,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`execute_command` rejection detection now scans every reply message:**
+  Minecraft reports a rejected command as TWO System chat messages (the
+  error title, e.g. `Unknown or incomplete command. See below for error`,
+  plus the command echo with a `<--[HERE]` marker). The old newest-only
+  selection returned fake `success:true` whenever the echo landed last.
+  `rejection_feedback_after` now checks every System message in the
+  feedback window and returns the newest one matching a rejection pattern.
+- **`give_item` no longer misfires "Permission denied":** the gate trusted
+  the cached snapshot's `commands_enabled`, which can be a stale
+  `PermissionLevel` heuristic right after a reconnect. `give_item` now
+  re-probes command availability live via `/seed` (the same single source
+  of truth `get_server_info` uses) and rejects only when the probe itself
+  confirms commands are unavailable; the probe is also cleared on
+  disconnect so it never crosses sessions.
+- **`give_item` no longer fakes success for unknown item ids:** Minecraft
+  rejects `/give` with an invalid id via `Unknown item '...'` (followed by
+  the keywordless `<--[HERE]` command echo). The command-rejection scan now
+  matches `unknown item` / `no such item`, so `give_item` returns
+  `command_rejected` instead of `Gave N x nonexistent_item`.
+- **`act` results report the bot's live position:** `self_info.position`
+  previously came from the throttled snapshot, which can lag a just-finished
+  move by up to one interval (5 s when idle) — an LLM client misread a
+  successful move as "did not arrive". The result now prefers a zero-wait
+  live read of the player's position and falls back to the snapshot only
+  when unavailable.
+- **Fluid bucket placement fails with a targeted error:** azalea 0.15.1's
+  fabricated interaction hit (block centre, fixed Up face) is rejected by
+  the vanilla server for bucket `UseItemOn`, so water/lava buckets cannot
+  be placed through `use_item_on_block`. The verification timeout now
+  returns `success:false` with `reason: "bucket_placement_unsupported"`
+  and the working `/setblock` / `/fill` alternative instead of a generic
+  "interaction was likely rejected".
+- **Stdio server exits when the client's pipe breaks:** a failed response
+  write (EPIPE) previously only logged and the process kept waiting for an
+  input EOF that may never arrive. The patched rmcp serve loop now treats a
+  transport write failure as a shutdown reason (`QuitReason::TransportWriteError`),
+  so a headless stdio process dies the moment its MCP client disappears.
 - **World-view cache key now uses a monotonic snapshot revision:** the
   cache used the seconds-granularity `WorldSnapshot::timestamp`, so two
   500 ms snapshot builds in the same second could share a timestamp and
@@ -192,30 +175,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`get_nearby_blocks` enforces `max_blocks` at runtime:** values outside
   `1..=10000` now return `InvalidParams` instead of silently truncating or
   trying to return everything.
-
-## [1.3.1-rc.1] - 2026-08-15
-
-### Changed
-
-- **CLI migrated to clap:** `src/cli.rs` now parses `--headless` /
-  `--gui` / `--stdio` / `--config <path>` with clap 4.6 (derive) instead
-  of the hand-rolled parser. Flags and precedence are unchanged
-  (`--headless` wins over `--gui`, `--stdio` alone implies headless,
-  `--config` alone runs the GUI); `-h/--help` and the new
-  `-V/--version` print to **stderr** and exit 0, usage errors print to
-  stderr and exit 2 — stdout stays reserved for the MCP transport. Help text
-  is now generated by clap from the flag doc comments.
-- **CI split (compile-time budget):** the run-once checks (fmt → clippy →
-  test) live on `develop` — a PR targeting develop runs lint ONLY (the
-  multi-platform matrix build is skipped), and the develop push runs lint +
-  the full dev matrix once per merged change. `release.yml` now performs
-  ONLY `--release` builds + publish (the duplicate lint job was removed;
-  `release`/npm-publish depend on `[build, mode]`), so the release and
-  pre-release paths never re-compile the test target matrix.
-- **`build.yml` runs on `develop` only:** the push trigger moved from
-  `master` to `develop`, and the `pull_request` trigger is now scoped to
-  PRs targeting `develop` — master is stable-only and covered by the
-  release pipeline.
+- **`execute_command` rejection detection survives a full chat queue:**
+  the feedback diff used the deque length as its baseline, so once the
+  queue hit its cap every new message looked "before the baseline" and
+  rejected commands were reported as successes (real sessions always had a
+  full queue; unit tests never did). Chat messages now carry monotonic
+  sequence numbers and the baseline is a cursor, so the scan is correct
+  even when the deque is full. The chat cap was raised from 10 to 50.
+- **`teleport` actually teleports (via `/tp`):** it previously mutated the
+  local ECS `Position` component and reported success, but the server
+  re-syncs the authoritative position every tick, so the bot never moved.
+  It now sends `/tp x y z` and verifies the server reply — a rejected
+  command (no OP) surfaces `CommandRejected` instead of a fake success.
+  `fly_to`'s vertical landing leg uses the same server-authoritative
+  teleport instead of the local position mutation.
+- **`get_world_view` annotation counts are view-scoped:** `block_count` /
+  `entity_count` reported the whole snapshot (hundreds of thousands of
+  blocks for a 9-block viewport). The renderer now returns the distinct
+  visible block columns and in-radius entities it actually drew, and the
+  cache stores them so a cache hit returns the same numbers.
+- **`place_block` names the placed block:** the result message previously
+  read `Placed 3 at ...` (the hotbar slot). The MCP layer now resolves the
+  item id from the inventory snapshot and reports `Placed stone at ...`;
+  an empty slot is reported honestly as `(empty slot)`.
+- **Headless idle watchdog keys on MCP requests, not bot commands:** a
+  client host that spawns per-session connections and sends
+  initialize/list_tools without ever dispatching a bot command (e.g. ZCode
+  probe connections) was killed after 600 s, surfacing as "MCP server
+  connection closed unexpectedly". `initialize` / `ping` / `list_tools` /
+  `call_tool` now stamp MCP-request activity and the watchdog uses that.
+- **`act` with `perception_radius=0` returns no nearby context:** the
+  `<= 0` filter previously kept entities/blocks sharing the player's own
+  cell, contradicting the documented "0 returns no nearby context at all".
 
 ## [1.3.0] - 2026-08-15
 

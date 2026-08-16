@@ -106,7 +106,7 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::SuccessRate => "Success rate:",
 
         // ── Chat log section ───────────────────────────────────────────
-        TextKey::ChatLog => "Chat Log (last 10)",
+        TextKey::ChatLog => "Chat Log (last 50)",
         TextKey::NoChatMessages => "No chat messages received yet.",
 
         // ── MCP config panel ───────────────────────────────────────────

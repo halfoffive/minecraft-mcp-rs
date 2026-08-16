@@ -69,9 +69,12 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
   **多模态模型的 AI 视觉** —— `get_world_view` 可渲染附近方块的俯视 PNG 图并以 base64 返回。
 
 - **Smart movement & flight** — `smart_move` auto-jumps over 1-block gaps and
-  stops on larger obstacles; `fly_to` flies to a target in creative mode
+  stops on larger obstacles; `fly_to` flies to a target in creative mode.
+  Moving tools (`move_to` / `walk_direction` / `smart_move` / `fly_to` /
+  `collect_items` / `attack_entity`) report the bot's end `position` in their
+  result
 
-  **智能移动与飞行** —— `smart_move` 可自动跳过 1 格宽的缺口，遇到更大障碍会停下；`fly_to` 可在创造模式下飞向目标。
+  **智能移动与飞行** —— `smart_move` 可自动跳过 1 格宽的缺口，遇到更大障碍会停下；`fly_to` 可在创造模式下飞向目标。会移动机器人的工具（`move_to` / `walk_direction` / `smart_move` / `fly_to` / `collect_items` / `attack_entity`）都会在结果中报告结束 `position`。
 
 - **Desktop UI** (egui/eframe) — status panel with live stats, settings panel
   to configure connection, bot parameters, and MCP transport, plus an MCP
@@ -113,12 +116,13 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 - **Command feedback verification** — `execute_command` reads the server's
   chat reply after sending: every System message in the feedback window is
   scanned, so a rejected command (e.g. `Incorrect argument for command ...`,
-  or Minecraft's two-line "Unknown or incomplete command …<--[HERE]" pair)
-  returns a `CommandRejected` error (-32009) with the server's verbatim
-  feedback instead of a fake "Executed command" success. `drop_item`
-  verifies the inventory actually changed after the click.
+  `Unknown item '...'` from an invalid `/give` id, or Minecraft's two-line
+  "Unknown or incomplete command …<--[HERE]" pair) returns a
+  `CommandRejected` error (-32009) with the server's verbatim feedback
+  instead of a fake "Executed command" success. `drop_item` verifies the
+  inventory actually changed after the click.
 
-  **命令反馈校验** —— `execute_command` 在发送后会读取服务器的聊天回复：反馈窗口内的**每一条** System 消息都会被扫描，因此被拒绝的命令（如 `Incorrect argument for command ...`，或 Minecraft 的"Unknown or incomplete command …<--[HERE]" 两行式拒绝）会返回 `CommandRejected` 错误（-32009）并附上服务器的原始反馈，而不是伪造的"已执行"。`drop_item` 会在点击后校验背包确实发生了变化。
+  **命令反馈校验** —— `execute_command` 在发送后会读取服务器的聊天回复：反馈窗口内的**每一条** System 消息都会被扫描，因此被拒绝的命令（如 `Incorrect argument for command ...`、`/give` 无效物品 ID 的 `Unknown item '...'`，或 Minecraft 的"Unknown or incomplete command …<--[HERE]" 两行式拒绝）会返回 `CommandRejected` 错误（-32009）并附上服务器的原始反馈，而不是伪造的"已执行"。`drop_item` 会在点击后校验背包确实发生了变化。
 
 - **Fresh state on demand** — `get_self_info` / `get_inventory` accept
   `force=true` (default) to trigger an immediate snapshot rebuild before
