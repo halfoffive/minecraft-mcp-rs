@@ -255,6 +255,8 @@ mod tests {
             radius: 8,
             scale: 2,
             png_base64: "x".into(),
+            block_count: 0,
+            entity_count: 0,
             annotation_json: "ann".into(),
         });
         assert!(should_rebuild(&cache, &None));
@@ -268,6 +270,8 @@ mod tests {
             radius: 8,
             scale: 2,
             png_base64: "x".into(),
+            block_count: 0,
+            entity_count: 0,
             annotation_json: "ann".into(),
         });
         assert!(!should_rebuild(&cache, &Some("ann".into())));
@@ -281,6 +285,8 @@ mod tests {
             radius: 8,
             scale: 2,
             png_base64: "x".into(),
+            block_count: 0,
+            entity_count: 0,
             annotation_json: "new-ann".into(),
         });
         assert!(should_rebuild(&cache, &Some("old-ann".into())));

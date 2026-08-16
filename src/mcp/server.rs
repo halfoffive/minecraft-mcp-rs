@@ -15,9 +15,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use rmcp::{
-    ServerHandler, ServiceExt,
-    handler::server::wrapper::Parameters,
-    model::{Implementation, ServerCapabilities, ServerInfo},
+    ErrorData, ServerHandler, ServiceExt,
+    handler::server::{tool::ToolCallContext, wrapper::Parameters},
+    model::{
+        CallToolRequestParams, CallToolResult, Implementation, InitializeRequestParams,
+        InitializeResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
+    },
     tool, tool_handler, tool_router,
     transport::io::stdio,
     transport::streamable_http_server::{
@@ -263,7 +266,9 @@ impl McpBotServer {
         crate::mcp::tools_movement::handle_jump(&self.state, &self.sender, input).await
     }
 
-    #[tool(description = "Teleport the bot to a position (requires Creative mode)")]
+    #[tool(
+        description = "Teleport the bot to a position via /tp (requires Creative mode and operator/command access)"
+    )]
     async fn teleport(
         &self,
         Parameters(input): Parameters<TeleportInput>,
@@ -539,6 +544,57 @@ impl ServerHandler for McpBotServer {
         );
         info
     }
+
+    // The four request entry points below stamp MCP-request activity so the
+    // headless idle watchdog keys on "client is alive and talking to us"
+    // rather than "client dispatched a bot command". ZCode spawns per-session
+    // probe connections that send initialize/list_tools but never a bot
+    // command — keying the watchdog on command activity killed those
+    // sessions after 600 s ("MCP server connection closed unexpectedly").
+    // The `#[tool_handler]` macro skips generating a method when the impl
+    // already defines it (`has_method` guard), so these overrides delegate to
+    // the same logic the macro would have generated.
+
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<InitializeResult, ErrorData> {
+        self.state.mark_mcp_activity();
+        context.peer.set_peer_info(request);
+        Ok(self.get_info())
+    }
+
+    async fn ping(
+        &self,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<(), ErrorData> {
+        self.state.mark_mcp_activity();
+        Ok(())
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.state.mark_mcp_activity();
+        let tcc = ToolCallContext::new(self, request, context);
+        Self::tool_router().call(tcc).await
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        self.state.mark_mcp_activity();
+        Ok(ListToolsResult {
+            tools: Self::tool_router().list_all(),
+            meta: None,
+            next_cursor: None,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -556,8 +612,8 @@ impl ServerHandler for McpBotServer {
 /// `headless` enables the idle watchdog: a headless `--stdio` session whose
 /// MCP client has gone away (stdin EOF never arrives on Windows, and the
 /// client may hold both pipe ends open) would otherwise linger forever.
-/// With the watchdog the process exits once no bot command has been
-/// dispatched for [`HEADLESS_IDLE_TIMEOUT`] — see [`is_headless_idle`].
+/// With the watchdog the process exits once no MCP request has been received
+/// for [`HEADLESS_IDLE_TIMEOUT`] — see [`is_headless_idle`].
 pub async fn serve_stdio(
     state: Arc<SharedState>,
     sender: BotCommandSender,
@@ -597,7 +653,7 @@ pub async fn serve_stdio(
                     info!("Ctrl+C received — shutting down MCP stdio server");
                 }
                 _ = headless_idle_watchdog(Arc::clone(&state_for_status), started_at_ms), if headless => {
-                    info!("headless idle watchdog fired — no bot command for {:?}, shutting down", HEADLESS_IDLE_TIMEOUT);
+                    info!("headless idle watchdog fired — no MCP request for {:?}, shutting down", HEADLESS_IDLE_TIMEOUT);
                 }
             }
         }
@@ -612,14 +668,20 @@ pub async fn serve_stdio(
     state_for_status.set_mcp_server_status(McpServerStatus::Stopped);
 }
 
-/// How long a headless `--stdio` MCP session may go without any bot command
+/// How long a headless `--stdio` MCP session may go without any MCP request
 /// before the process shuts itself down.
 ///
 /// Covers the lingering-process failure seen on Windows: a client host that
 /// spawns one process per session and abandons the session without closing
 /// the pipe leaves the process alive forever, because stdin EOF never
-/// arrives and stdout writes may never fail. Ten minutes with zero command
-/// activity is a strong signal the session is abandoned.
+/// arrives and stdout writes may never fail. Ten minutes with zero MCP
+/// request activity is a strong signal the session is abandoned.
+///
+/// The activity probe is MCP-request activity ([`SharedState::mcp_activity_at_ms`]),
+/// NOT bot-command activity: ZCode spawns per-session probe connections
+/// that send initialize/list_tools but never dispatch a bot command.
+/// Keying the watchdog on command activity killed those healthy sessions
+/// after 600 s ("MCP server connection closed unexpectedly").
 const HEADLESS_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Poll period for the headless idle watchdog.
@@ -636,29 +698,30 @@ fn now_epoch_ms() -> u64 {
 /// Pure headless-idle decision, unit-testable without a running server.
 ///
 /// Idle means BOTH the session has been alive for at least `timeout` (a
-/// fresh process gets the full grace period before its first command) AND
-/// no bot command has been dispatched within `timeout`.
+/// fresh process gets the full grace period before its first request) AND
+/// no MCP request has been received within `timeout`.
 fn is_headless_idle(
     now_ms: u64,
-    last_command_ms: u64,
+    last_activity_ms: u64,
     started_at_ms: u64,
     timeout: Duration,
 ) -> bool {
     let timeout_ms = timeout.as_millis() as u64;
     now_ms.saturating_sub(started_at_ms) >= timeout_ms
-        && now_ms.saturating_sub(last_command_ms) >= timeout_ms
+        && now_ms.saturating_sub(last_activity_ms) >= timeout_ms
 }
 
-/// Resolve once the headless stdio session has been idle (no bot command
-/// dispatched) for [`HEADLESS_IDLE_TIMEOUT`]. Polls [`SharedState`] at a
-/// coarse cadence; command activity is recorded by
-/// [`SharedState::mark_command_activity`] on every executor dispatch.
+/// Resolve once the headless stdio session has been idle (no MCP request
+/// received) for [`HEADLESS_IDLE_TIMEOUT`]. Polls [`SharedState`] at a
+/// coarse cadence; request activity is recorded by
+/// [`SharedState::mark_mcp_activity`] at the entry of every
+/// `ServerHandler` request method.
 async fn headless_idle_watchdog(state: Arc<SharedState>, started_at_ms: u64) {
     loop {
         tokio::time::sleep(HEADLESS_IDLE_POLL).await;
         if is_headless_idle(
             now_epoch_ms(),
-            state.last_command_at_ms(),
+            state.mcp_activity_at_ms(),
             started_at_ms,
             HEADLESS_IDLE_TIMEOUT,
         ) {

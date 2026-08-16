@@ -72,9 +72,6 @@ pub(crate) trait BotActions {
     /// Perform a single jump.
     async fn jump(&self);
 
-    /// Teleport by mutating the player's Position component.
-    fn teleport(&self, pos: &BlockPos);
-
     /// Switch to a hotbar slot (0–8).
     fn switch_hotbar_slot(&self, slot: u8);
 
@@ -278,24 +275,6 @@ impl BotActions for RealBotClient {
         // previous 100ms cut the jump short before the bot left the ground.
         sleep(Duration::from_millis(300)).await;
         self.client.set_jumping(false);
-    }
-
-    fn teleport(&self, pos: &BlockPos) {
-        // Entity positions are continuous (block corners at integers); place
-        // the player at the block centre on the XZ plane so they don't end up
-        // straddling the north-west corner of the target block.
-        let new_pos = azalea::entity::Position::new(azalea::Vec3 {
-            x: pos.x as f64 + 0.5,
-            y: pos.y as f64,
-            z: pos.z as f64 + 0.5,
-        });
-        // Insert the new Position component on the player entity.
-        // azalea 0.15.1 uses parking_lot::Mutex for ecs, so .lock() not .write().
-        self.client
-            .ecs
-            .lock()
-            .entity_mut(self.client.entity)
-            .insert(new_pos);
     }
 
     fn switch_hotbar_slot(&self, slot: u8) {
@@ -739,7 +718,7 @@ impl<B: BotActions> CommandExecutor<B> {
                 self.handle_walk_direction(dir, distance).await
             }
             BotCommand::Jump => self.handle_jump().await,
-            BotCommand::Teleport(pos) => self.handle_teleport(pos),
+            BotCommand::Teleport(pos) => self.handle_teleport(pos).await,
 
             // ── Block interaction ─────────────────────────────────
             BotCommand::BreakBlock(pos) => self.handle_break_block(pos),
@@ -933,13 +912,49 @@ impl<B: BotActions> CommandExecutor<B> {
         })
     }
 
-    fn handle_teleport(&self, pos: BlockPos) -> Result<BotResult, BotError> {
+    async fn handle_teleport(&self, pos: BlockPos) -> Result<BotResult, BotError> {
         trace!(?pos, "Teleport");
-        self.bot.teleport(&pos);
+        self.teleport_via_command(pos).await
+    }
+
+    /// Teleport via the server-authoritative `/tp` command.
+    ///
+    /// The previous implementation mutated the player's local ECS `Position`
+    /// component and reported success, but the server re-syncs the
+    /// authoritative position every tick, so the bot never actually moved —
+    /// the tool reported a fake success. `/tp` is the only reliable path, and
+    /// it needs operator permissions (creative mode alone is not enough on a
+    /// vanilla server). The command is verified against the chat feedback
+    /// exactly like `handle_execute_command`: a rejection (no OP) surfaces
+    /// `CommandRejected` instead of a fake success.
+    async fn teleport_via_command(&self, pos: BlockPos) -> Result<BotResult, BotError> {
+        trace!(?pos, "TeleportViaCommand");
+        let command = format!("/tp {} {} {}", pos.x, pos.y, pos.z);
+        let baseline_seq = self.state.chat_cursor();
+        self.bot.chat(&command);
+
+        // Give the server a short window to reply with rejection feedback.
+        sleep(Duration::from_millis(COMMAND_FEEDBACK_WAIT_MS)).await;
+
+        if let Some(rejection) = self.rejection_feedback_after(baseline_seq) {
+            return Err(BotError::CommandRejected {
+                command,
+                feedback: rejection,
+            });
+        }
+
+        // No rejection — the tp was accepted; attach the newest system
+        // feedback (e.g. "Teleported X to ...") so the client sees the
+        // server-confirmed destination.
+        let feedback = self.server_feedback_after(baseline_seq);
+        let message = match &feedback {
+            Some(fb) => format!("Teleported to {} (server: {fb})", pos),
+            None => format!("Teleported to {}", pos),
+        };
         Ok(BotResult {
             success: true,
-            message: format!("Teleported to {}", pos),
-            data: None,
+            message,
+            data: feedback.map(|fb| serde_json::json!({ "feedback": fb })),
         })
     }
 
@@ -1678,7 +1693,11 @@ impl<B: BotActions> CommandExecutor<B> {
         // normalises the leading `/`, so `cmd` is passed straight to chat.
         // Re-prepending here would produce `//command`, which Minecraft
         // treats as a normal chat message rather than a command.
-        let baseline_len = self.state.get_chat_messages().len();
+        // The baseline is a monotonic chat cursor, NOT a list length: the
+        // chat deque is capped, so when it is full a length baseline is
+        // always the cap and an index-based diff skips every new message
+        // (rejection detection silently stopped working in real sessions).
+        let baseline_seq = self.state.chat_cursor();
         self.bot.chat(&cmd);
 
         // Give the server a short window to reply with rejection feedback.
@@ -1688,7 +1707,7 @@ impl<B: BotActions> CommandExecutor<B> {
         // reports a rejection as TWO messages (the error title plus the
         // command echo with a `<--[HERE]` marker), so checking only the
         // newest one would miss the rejection whenever the echo lands last.
-        if let Some(rejection) = self.rejection_feedback_after(baseline_len) {
+        if let Some(rejection) = self.rejection_feedback_after(baseline_seq) {
             return Err(BotError::CommandRejected {
                 command: cmd.clone(),
                 feedback: rejection,
@@ -1698,7 +1717,7 @@ impl<B: BotActions> CommandExecutor<B> {
         // No rejection detected — report success, attaching the newest system
         // feedback (if any) so clients can still see e.g. the result of the
         // command ("Teleported X to ...", "Seed: [...]").
-        let feedback = self.server_feedback_after(baseline_len);
+        let feedback = self.server_feedback_after(baseline_seq);
         let message = match &feedback {
             Some(fb) => format!("Executed command: {} (server: {fb})", cmd),
             None => format!("Executed command: {}", cmd),
@@ -1710,19 +1729,18 @@ impl<B: BotActions> CommandExecutor<B> {
         })
     }
 
-    /// Collect system chat messages that arrived after `baseline_len`
+    /// Collect system chat messages that arrived after `baseline_seq`
     /// (strictly after the pre-command baseline), returning the newest one.
-    fn server_feedback_after(&self, baseline_len: usize) -> Option<String> {
+    fn server_feedback_after(&self, baseline_seq: u64) -> Option<String> {
         self.state
-            .get_chat_messages()
+            .chat_messages_since(baseline_seq)
             .iter()
-            .skip(baseline_len)
-            .filter(|(sender, _)| sender.eq_ignore_ascii_case("System"))
-            .map(|(_, message)| message.clone())
+            .filter(|(_, sender, _)| sender.eq_ignore_ascii_case("System"))
+            .map(|(_, _, message)| message.clone())
             .next_back()
     }
 
-    /// Return the newest System message after `baseline_len` that matches a
+    /// Return the newest System message after `baseline_seq` that matches a
     /// known command-rejection pattern, if any.
     ///
     /// The rejection scan checks **every** message in the window, not just
@@ -1732,15 +1750,14 @@ impl<B: BotActions> CommandExecutor<B> {
     /// `<--[HERE]` marker). `server_feedback_after`'s newest-only selection
     /// is correct for success feedback but misses rejections whose echo
     /// lands last.
-    fn rejection_feedback_after(&self, baseline_len: usize) -> Option<String> {
+    fn rejection_feedback_after(&self, baseline_seq: u64) -> Option<String> {
         self.state
-            .get_chat_messages()
+            .chat_messages_since(baseline_seq)
             .iter()
-            .skip(baseline_len)
-            .filter(|(sender, message)| {
+            .filter(|(_, sender, message)| {
                 sender.eq_ignore_ascii_case("System") && is_command_rejection(message)
             })
-            .map(|(_, message)| message.clone())
+            .map(|(_, _, message)| message.clone())
             .next_back()
     }
 
@@ -1880,10 +1897,10 @@ impl<B: BotActions> CommandExecutor<B> {
     /// the player's Y beyond a 1-block jump, so the flight is split in two:
     /// (1) path horizontally to the target XZ at the current Y via
     /// [`BotActions::goto`], then (2) complete the vertical delta (and any
-    /// residual horizontal offset) by directly updating the player's position
-    /// through [`BotActions::teleport`]. Creative flight has no fall damage
-    /// and no collision concern for the bot's own body, so the direct position
-    /// update is safe and deterministic.
+    /// residual horizontal offset) with a server-authoritative `/tp`
+    /// ([`teleport_via_command`]). Creative flight has no fall damage, so the
+    /// teleport is safe; the previous local-ECS position mutation was silently
+    /// reverted by the server every tick.
     async fn handle_fly_to(&self, target: BlockPos) -> Result<BotResult, BotError> {
         trace!(?target, "FlyTo");
         let snapshot = self.state.read_snapshot();
@@ -1936,18 +1953,27 @@ impl<B: BotActions> CommandExecutor<B> {
                         })),
                     })
                 }
-                // Horizontal leg reached: complete the vertical delta by
-                // moving straight to the exact target.
+                // Horizontal leg reached: complete the vertical delta (and
+                // any residual horizontal offset) with a server-authoritative
+                // /tp — the local-ECS position mutation was silently reverted
+                // by the server every tick, so the bot never actually landed
+                // at the target.
                 Ok(()) => {
-                    self.bot.teleport(&target);
+                    let tp_result = self.teleport_via_command(target).await?;
+                    let mut data = serde_json::json!({
+                        "reached": true,
+                        "reason": "reached",
+                        "position": [target.x, target.y, target.z],
+                    });
+                    if let Some(fb) = tp_result.data {
+                        data.as_object_mut()
+                            .expect("data is an object")
+                            .insert("feedback".into(), fb);
+                    }
                     Ok(BotResult {
                         success: true,
-                        message: format!("FlyTo {target}: reached"),
-                        data: Some(serde_json::json!({
-                            "reached": true,
-                            "reason": "reached",
-                            "position": [target.x, target.y, target.z],
-                        })),
+                        message: format!("FlyTo {}: reached", target),
+                        data: Some(data),
                     })
                 }
             },
@@ -2104,27 +2130,34 @@ impl<B: BotActions> CommandExecutor<B> {
             .map(|r| r as i32)
             .unwrap_or_else(|| self.state.read_config().block_perception_radius as i32);
 
-        let nearby_blocks: Vec<_> = snapshot
-            .blocks
-            .iter()
-            .filter(|b| {
-                (b.position.x - player_pos.x).abs() <= perception_radius
-                    && (b.position.y - player_pos.y).abs() <= perception_radius
-                    && (b.position.z - player_pos.z).abs() <= perception_radius
-            })
-            .cloned()
-            .collect();
-
-        let nearby_entities: Vec<_> = snapshot
-            .entities
-            .iter()
-            .filter(|e| {
-                (e.position.x - player_pos.x).abs() <= perception_radius
-                    && (e.position.y - player_pos.y).abs() <= perception_radius
-                    && (e.position.z - player_pos.z).abs() <= perception_radius
-            })
-            .cloned()
-            .collect();
+        // radius=0 must return NO nearby context at all (the tool contract
+        // says "0 returns no nearby context at all"). The `<= 0` filter below
+        // would otherwise keep entities/blocks sharing the player's own cell.
+        let (nearby_blocks, nearby_entities): (Vec<_>, Vec<_>) = if perception_radius == 0 {
+            (Vec::new(), Vec::new())
+        } else {
+            let blocks: Vec<_> = snapshot
+                .blocks
+                .iter()
+                .filter(|b| {
+                    (b.position.x - player_pos.x).abs() <= perception_radius
+                        && (b.position.y - player_pos.y).abs() <= perception_radius
+                        && (b.position.z - player_pos.z).abs() <= perception_radius
+                })
+                .cloned()
+                .collect();
+            let entities: Vec<_> = snapshot
+                .entities
+                .iter()
+                .filter(|e| {
+                    (e.position.x - player_pos.x).abs() <= perception_radius
+                        && (e.position.y - player_pos.y).abs() <= perception_radius
+                        && (e.position.z - player_pos.z).abs() <= perception_radius
+                })
+                .cloned()
+                .collect();
+            (blocks, entities)
+        };
 
         let act_result = ActResult {
             action_result,
@@ -2403,7 +2436,6 @@ mod tests {
         /// `goto_with_margin` timeout path. Default `false`.
         goto_hangs: AtomicBool,
         jump_calls: AtomicUsize,
-        teleport_calls: Mutex<Vec<BlockPos>>,
         hotbar_switch_calls: Mutex<Vec<u8>>,
         drop_item_calls: Mutex<Vec<(u8, u8)>>,
         use_item_calls: AtomicUsize,
@@ -2441,7 +2473,6 @@ mod tests {
                 goto_target_unreached: AtomicBool::new(false),
                 goto_hangs: AtomicBool::new(false),
                 jump_calls: AtomicUsize::new(0),
-                teleport_calls: Mutex::new(Vec::new()),
                 hotbar_switch_calls: Mutex::new(Vec::new()),
                 drop_item_calls: Mutex::new(Vec::new()),
                 use_item_calls: AtomicUsize::new(0),
@@ -2552,11 +2583,6 @@ mod tests {
 
         async fn jump(&self) {
             self.log.jump_calls.fetch_add(1, Ordering::SeqCst);
-        }
-
-        fn teleport(&self, pos: &BlockPos) {
-            self.log.teleport_calls.lock().unwrap().push(*pos);
-            *self.log.position.lock().unwrap() = *pos;
         }
 
         fn switch_hotbar_slot(&self, slot: u8) {
@@ -3191,19 +3217,54 @@ mod tests {
 
     #[tokio::test]
     async fn test_teleport() {
+        // Teleport now routes through the server-authoritative `/tp` command
+        // (the old local-ECS position mutation was silently reverted by the
+        // server every tick). The mock records the chat command.
         let (executor, sender, _state, log) = make_executor();
         let handle = spawn_executor(executor);
 
         let pos = BlockPos::new(50, 70, 100);
         let result = send_and_await(&sender, BotCommand::Teleport(pos)).await;
-        assert!(result.is_ok());
+        let br = result.expect("teleport via /tp reports success");
+        assert!(br.success);
+        assert!(
+            br.message.contains("Teleported to (50, 70, 100)"),
+            "message: {}",
+            br.message
+        );
 
         drop(sender);
         handle.await.expect("executor should finish");
 
-        let tps = log.teleport_calls.lock().unwrap();
-        assert_eq!(tps.len(), 1);
-        assert_eq!(tps[0], pos);
+        let chats = log.chat_calls.lock().unwrap();
+        assert_eq!(chats.as_slice(), &["/tp 50 70 100"]);
+    }
+
+    #[tokio::test]
+    async fn test_teleport_rejected_without_op() {
+        // The server rejects /tp when the bot lacks operator permissions —
+        // the executor must surface `CommandRejected` instead of a fake
+        // success (the old implementation always reported success even
+        // though the server reverted the position every tick).
+        let (executor, _sender, state, log) = make_executor();
+        let state2 = Arc::clone(&state);
+        let sim = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            state2.add_chat_message(
+                "System".into(),
+                "You do not have permission to use this command".into(),
+            );
+            state2.add_chat_message("System".into(), "/tp 50 70 100<--[HERE]".into());
+        });
+
+        let result = executor.handle_teleport(BlockPos::new(50, 70, 100)).await;
+        assert!(
+            matches!(result, Err(BotError::CommandRejected { ref feedback, .. }) if feedback.contains("do not have permission")),
+            "expected CommandRejected, got: {result:?}"
+        );
+        sim.await.expect("simulation task should finish");
+        let chats = log.chat_calls.lock().unwrap();
+        assert_eq!(chats.as_slice(), &["/tp 50 70 100"]);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -3557,6 +3618,71 @@ mod tests {
         assert!(
             !br.message.contains("server:"),
             "player chat must not be treated as server feedback, got: {}",
+            br.message
+        );
+        sim.await.expect("simulation task should finish");
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_rejection_detected_full_chat_queue() {
+        // Regression: the rejection diff used to be index-based
+        // (`skip(baseline_len)`), so once the chat deque was full a length
+        // baseline always equalled the cap and the post-command scan skipped
+        // every new message — rejected commands were reported as successes in
+        // real sessions (unit tests with an empty deque never caught it).
+        // The cursor-based diff must still see the rejection.
+        let (executor, _sender, state, log) = make_executor();
+        // Pre-fill the deque past the cap with a mix of player/System chat so
+        // the length-based baseline would have been saturated at 50.
+        for i in 0..60 {
+            state.add_chat_message(format!("User{i}"), format!("chat message {i}"));
+        }
+
+        let state2 = Arc::clone(&state);
+        let sim = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            state2.add_chat_message(
+                "System".into(),
+                "Unknown or incomplete command. See below for error".into(),
+            );
+            state2.add_chat_message("System".into(), "nosuchcmd test<--[HERE]".into());
+        });
+
+        let result = executor
+            .handle_execute_command("/nosuchcmd test".into())
+            .await;
+        assert!(
+            matches!(result, Err(BotError::CommandRejected { ref feedback, .. }) if feedback.contains("Unknown or incomplete command")),
+            "rejection must be detected even with a full chat queue, got: {result:?}"
+        );
+        sim.await.expect("simulation task should finish");
+        let chats = log.chat_calls.lock().unwrap();
+        assert_eq!(chats.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_success_feedback_full_chat_queue() {
+        // Same full-queue pressure, but the success path: the newest System
+        // feedback after the cursor must still be attached.
+        let (executor, _sender, state, _log) = make_executor();
+        for i in 0..60 {
+            state.add_chat_message(format!("User{i}"), format!("chat message {i}"));
+        }
+
+        let state2 = Arc::clone(&state);
+        let sim = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            state2.add_chat_message("System".into(), "Teleported AI_Bot to 5.5, -58, 5.5".into());
+        });
+
+        let result = executor
+            .handle_execute_command("/tp @s 5 -58 5".into())
+            .await;
+        let br = result.expect("accepted command reports success with a full queue");
+        assert!(br.success);
+        assert!(
+            br.message.contains("server: Teleported"),
+            "server feedback must be attached with a full queue, got: {}",
             br.message
         );
         sim.await.expect("simulation task should finish");
@@ -4589,12 +4715,12 @@ mod tests {
         drop(sender);
         handle.await.expect("executor should finish");
 
-        // Horizontal leg keeps Y at 64; the vertical leg teleports to the
-        // exact target.
+        // Horizontal leg keeps Y at 64; the vertical leg issues a
+        // server-authoritative `/tp` to the exact target.
         let gotos = log.goto_calls.lock().unwrap();
         assert_eq!(gotos.as_slice(), &[BlockPos::new(10, 64, 0)]);
-        let teles = log.teleport_calls.lock().unwrap();
-        assert_eq!(teles.as_slice(), &[target]);
+        let chats = log.chat_calls.lock().unwrap();
+        assert_eq!(chats.as_slice(), &["/tp 10 70 0"]);
     }
 
     #[tokio::test]
@@ -4624,8 +4750,8 @@ mod tests {
         drop(sender);
         handle.await.expect("executor should finish");
 
-        // No teleport must have been issued past the obstacle.
-        assert!(log.teleport_calls.lock().unwrap().is_empty());
+        // No /tp must have been issued past the obstacle.
+        assert!(log.chat_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -4654,9 +4780,9 @@ mod tests {
         drop(sender);
         handle.await.expect("executor should finish");
 
-        // No movement or teleport must have been attempted.
+        // No movement or /tp must have been attempted.
         assert!(log.goto_calls.lock().unwrap().is_empty());
-        assert!(log.teleport_calls.lock().unwrap().is_empty());
+        assert!(log.chat_calls.lock().unwrap().is_empty());
     }
 
     #[test]
