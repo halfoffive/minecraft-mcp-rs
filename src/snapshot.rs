@@ -1,7 +1,7 @@
 //! World snapshot with dirty-region optimization.
 //!
 //! The [`WorldSnapshot`] type lives in `crate::types`; this module adds
-//! incremental-update helpers and radius-query methods.
+//! incremental-update helpers (`DirtyTracker`, `SnapshotBuilder`).
 
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -204,46 +204,6 @@ impl SnapshotBuilder {
             // callers (tests) do not need a non-zero value.
             snapshot_seq: 0,
         }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// WorldSnapshot radius queries
-// ═══════════════════════════════════════════════════════════════
-
-impl WorldSnapshot {
-    /// Return all blocks within `radius` blocks (Euclidean distance) of
-    /// `center`.
-    pub fn blocks_in_radius(&self, center: BlockPos, radius: u32) -> Vec<BlockEntry> {
-        let r = radius as f64;
-        let r_sq = r * r;
-        self.blocks
-            .iter()
-            .filter(|b| {
-                let dx = (b.position.x - center.x) as f64;
-                let dy = (b.position.y - center.y) as f64;
-                let dz = (b.position.z - center.z) as f64;
-                dx * dx + dy * dy + dz * dz <= r_sq
-            })
-            .cloned()
-            .collect()
-    }
-
-    /// Return all entities within `radius` blocks (Euclidean distance) of
-    /// `center`.
-    pub fn entities_in_radius(&self, center: BlockPos, radius: u32) -> Vec<EntityEntry> {
-        let r = radius as f64;
-        let r_sq = r * r;
-        self.entities
-            .iter()
-            .filter(|e| {
-                let dx = (e.position.x - center.x) as f64;
-                let dy = (e.position.y - center.y) as f64;
-                let dz = (e.position.z - center.z) as f64;
-                dx * dx + dy * dy + dz * dz <= r_sq
-            })
-            .cloned()
-            .collect()
     }
 }
 
@@ -649,82 +609,5 @@ mod tests {
         old.commands_enabled = Some(true);
         let new = SnapshotBuilder::from_old(old.clone()).build();
         assert_eq!(new.commands_enabled, Some(true));
-    }
-
-    // ── Radius query tests ──────────────────────────────────
-
-    #[test]
-    fn test_blocks_in_radius_empty() {
-        let snapshot = make_snapshot(vec![], vec![]);
-        let found = snapshot.blocks_in_radius(BlockPos::new(0, 0, 0), 10);
-        assert!(found.is_empty());
-    }
-
-    #[test]
-    fn test_blocks_in_radius_exact_match() {
-        let snapshot = make_snapshot(
-            vec![
-                block(BlockPos::new(0, 0, 0), "origin"),
-                block(BlockPos::new(3, 0, 0), "three_x"),
-                block(BlockPos::new(0, 4, 0), "four_y"),
-            ],
-            vec![],
-        );
-        let found = snapshot.blocks_in_radius(BlockPos::new(0, 0, 0), 5);
-        assert_eq!(found.len(), 3);
-    }
-
-    #[test]
-    fn test_blocks_in_radius_excludes_outside() {
-        let snapshot = make_snapshot(
-            vec![
-                block(BlockPos::new(0, 0, 0), "origin"),
-                block(BlockPos::new(10, 0, 0), "far"),
-            ],
-            vec![],
-        );
-        let found = snapshot.blocks_in_radius(BlockPos::new(0, 0, 0), 5);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].block_type, "origin");
-    }
-
-    #[test]
-    fn test_blocks_in_radius_3d_diagonal() {
-        // Distance from (0,0,0) to (3,3,3) = sqrt(27) ≈ 5.196
-        let snapshot = make_snapshot(vec![block(BlockPos::new(3, 3, 3), "diagonal")], vec![]);
-        let found = snapshot.blocks_in_radius(BlockPos::new(0, 0, 0), 5);
-        assert!(found.is_empty()); // 5.196 > 5
-        let found = snapshot.blocks_in_radius(BlockPos::new(0, 0, 0), 6);
-        assert_eq!(found.len(), 1);
-    }
-
-    #[test]
-    fn test_entities_in_radius() {
-        let snapshot = make_snapshot(
-            vec![],
-            vec![
-                entity(1, BlockPos::new(0, 0, 0), "zombie"),
-                entity(2, BlockPos::new(100, 0, 0), "skeleton"),
-            ],
-        );
-        let found = snapshot.entities_in_radius(BlockPos::new(0, 0, 0), 50);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].id, 1);
-    }
-
-    #[test]
-    fn test_entities_in_radius_zero_radius() {
-        let snapshot = make_snapshot(vec![], vec![entity(1, BlockPos::new(0, 0, 0), "zombie")]);
-        let found = snapshot.entities_in_radius(BlockPos::new(0, 0, 0), 0);
-        // Distance is exactly 0, so it should match
-        assert_eq!(found.len(), 1);
-    }
-
-    #[test]
-    fn test_blocks_in_radius_negative_coords() {
-        let snapshot = make_snapshot(vec![block(BlockPos::new(-5, 0, -5), "neg")], vec![]);
-        let found = snapshot.blocks_in_radius(BlockPos::new(0, 0, 0), 8);
-        // Distance = sqrt(50) ≈ 7.07 < 8
-        assert_eq!(found.len(), 1);
     }
 }

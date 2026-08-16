@@ -130,7 +130,7 @@ pub fn render_topdown(snapshot: &WorldSnapshot, radius: u8) -> Result<Vec<u8>, B
     let player_colour = Rgba([220, 0, 0, 255]);
     img.put_pixel(r as u32, r as u32, player_colour);
 
-    encode_png(&img)
+    encode_png(img)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -160,8 +160,9 @@ pub const MIN_BUILD_Y: i32 = -64;
 ///
 /// This is the enhanced variant of [`render_topdown`]:
 ///
-/// - `scale` (1/2/4/8) makes each block occupy `scale×scale` pixels, so a
-///   `radius=8` render at `scale=4` is `68×68` blocks → `272×272` pixels.
+/// - `scale` (1/2/4/8) makes each block occupy `scale×scale` pixels. The
+///   view spans `2*radius+1` blocks per side, so a `radius=8` render covers
+///   `17×17` blocks → `17*4 = 68×68` pixels at `scale=4`.
 ///   Values outside `[1, 2, 4, 8]` are clamped to [`DEFAULT_SCALE`].
 /// - When `SelfPlayer::position_precise` is `Some`, the centre pixel is
 ///   computed by rounding the floating-point coords (sub-block precision),
@@ -173,7 +174,7 @@ pub const MIN_BUILD_Y: i32 = -64;
 ///   shifting the underlying block identity.
 /// - When `SelfPlayer::yaw` is `Some`, a 3-pixel-wide arrow is drawn at the
 ///   player's centre pixel, pointing in the direction the bot is facing
-///   (Minecraft yaw convention: 0 = +Z/south, +π/2 = -X/west).
+///   (Minecraft yaw convention, degrees: 0 = +Z/south, +90° = -X/west).
 ///
 /// `render_topdown(snapshot, radius)` is equivalent to
 /// `render_topdown_enhanced(snapshot, radius, 1)` minus the Y-modulation
@@ -305,7 +306,7 @@ pub fn render_topdown_enhanced(
         draw_yaw_arrow(&mut img, cx, cy, yaw, scale);
     }
 
-    encode_png(&img).map(|png| (png, visible_columns, visible_entities))
+    encode_png(img).map(|png| (png, visible_columns, visible_entities))
 }
 
 /// Multiply each colour channel of `colour` by `factor` (alpha untouched).
@@ -338,24 +339,27 @@ fn paint_square(img: &mut RgbaImage, x: u32, y: u32, size: u32, colour: Rgba<u8>
 }
 
 /// Draw a 3-pixel-wide heading arrow at `(cx, cy)` pointing in the
-/// direction `yaw`.
-///
-/// Minecraft yaw convention:
+/// direction `yaw` (DEGREES, Minecraft convention):
 /// - `0`     → facing +Z (south, downward on the image since +Z is down)
-/// - `+π/2`  → facing -X (west, leftward on the image since +X is right)
-/// - `±π`    → facing -Z (north, upward)
-/// - `-π/2`  → facing +X (east, rightward)
+/// - `+90°`  → facing -X (west, leftward on the image since +X is right)
+/// - `±180°` → facing -Z (north, upward)
+/// - `-90°`  → facing +X (east, rightward)
 ///
 /// The arrow is `scale * 3` pixels long and ends in a small triangular
 /// head. It is drawn in a contrasting bright colour (white) so it stands
 /// out against the red player marker.
 fn draw_yaw_arrow(img: &mut RgbaImage, cx: u32, cy: u32, yaw: f32, scale: u8) {
+    // `SelfPlayer::yaw` is stored in degrees (Minecraft convention,
+    // [-180, 180)); sin/cos need radians. Before the unit fix this value was
+    // fed straight into sin/cos, so every non-zero yaw pointed the arrow the
+    // wrong way (e.g. 90° "radians" ≈ 1.57 rad pointed up-left, not west).
+    let yaw_rad = yaw.to_radians();
     // Convert yaw → (dx, dz) screen-space direction.
     // Minecraft yaw 0 = +Z (down on image), so:
-    //   dx_screen = -sin(yaw)  (yaw=0 → dx=0; yaw=+π/2 → dx=-1 west)
-    //   dy_screen =  cos(yaw)  (yaw=0 → dy=+1 south/down)
-    let dir_x = -yaw.sin();
-    let dir_y = yaw.cos();
+    //   dx_screen = -sin(yaw_rad)  (yaw=0 → dx=0; yaw=+90° → dx=-1 west)
+    //   dy_screen =  cos(yaw_rad)  (yaw=0 → dy=+1 south/down)
+    let dir_x = -yaw_rad.sin();
+    let dir_y = yaw_rad.cos();
 
     let length = (scale as u32).max(1) * 3;
     let arrow_colour = Rgba([255, 255, 255, 255]);
@@ -887,13 +891,15 @@ pub fn color_map(block_type: &str) -> Rgba<u8> {
     }
 }
 
-/// Encode an RGBA image buffer as PNG bytes.
+/// Encode an RGBA image buffer as PNG bytes (takes ownership so the buffer
+/// is moved into the `DynamicImage` wrapper instead of being cloned — both
+/// call sites own their freshly-rendered image).
 ///
 /// Returns an error if the underlying PNG encoder fails (which should not
 /// happen for an in-memory `RgbaImage`).
-pub fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, BotError> {
+pub fn encode_png(img: RgbaImage) -> Result<Vec<u8>, BotError> {
     let mut buf = Vec::new();
-    DynamicImage::ImageRgba8(img.clone())
+    DynamicImage::ImageRgba8(img)
         .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
         .map_err(|e| BotError::Internal(format!("PNG encode failed: {e}")))?;
     Ok(buf)
@@ -1555,6 +1561,70 @@ mod tests {
             "yaw arrow should paint white pixels; with-yaw={count_with}, without={count_without}"
         );
         assert!(count_with > 0, "yaw arrow should paint at least one pixel");
+    }
+
+    /// A non-zero yaw must point the arrow in the correct direction.
+    ///
+    /// `SelfPlayer::yaw` is stored in DEGREES (Minecraft convention, −180..180):
+    /// yaw = 90° means facing −X (west, left on the image). The arrow must be
+    /// horizontal (no vertical drift off the 3-pixel-wide cross around the
+    /// centre row) and must extend leftward from the player centre. Before the
+    /// unit fix the renderer consumed the value as radians, so sin(90°≈1.57
+    /// "radians") pointed the arrow up-left instead of straight left.
+    #[test]
+    fn test_render_yaw_arrow_direction_nonzero() {
+        let snap = WorldSnapshot {
+            blocks: Vec::new(),
+            entities: Vec::new(),
+            self_player: SelfPlayer {
+                uuid: "player".into(),
+                username: "TestBot".into(),
+                position: BlockPos::new(0, 64, 0),
+                health: 20.0,
+                hunger: 20,
+                gamemode: GameMode::Survival,
+                held_item_slot: 0,
+                inventory: Vec::new(),
+                position_precise: None,
+                yaw: Some(90.0),
+            },
+            timestamp: 0,
+            chunk_summary: Vec::new(),
+            commands_enabled: None,
+            ..Default::default()
+        };
+
+        let (bytes, _, _) = render_topdown_enhanced(&snap, 4, 4).expect("render");
+        let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        // radius=4, scale=4 → 36×36 image; centre = (16, 16).
+        let (cx, cy) = (16u32, 16u32);
+
+        let white = Rgba([255, 255, 255, 255]);
+        let arrow: Vec<(u32, u32)> = img
+            .pixels()
+            .enumerate()
+            .filter(|(_, p)| **p == white)
+            .map(|(i, _)| (i as u32 % img.width(), i as u32 / img.width()))
+            .collect();
+        assert!(!arrow.is_empty(), "yaw arrow should paint white pixels");
+
+        // Facing west: the arrow must stay on the horizontal centre band
+        // (the arrow is drawn as a 3-pixel-wide cross around the centre row).
+        for &(px, py) in &arrow {
+            assert!(
+                py >= cy.saturating_sub(1) && py <= cy + 1,
+                "arrow pixel ({px},{py}) drifted off the horizontal band around y={cy} — yaw is being treated as radians"
+            );
+            assert!(
+                px <= cx,
+                "arrow pixel ({px},{py}) lies right of the centre — yaw 90° should point west/left"
+            );
+        }
+        // The arrow must actually extend leftward, not just touch the centre.
+        assert!(
+            arrow.iter().any(|&(px, _)| px + 5 <= cx),
+            "arrow does not extend left from the centre"
+        );
     }
 
     /// The returned counts must describe what the image actually shows: the

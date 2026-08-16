@@ -3,6 +3,13 @@
 //! [`SnapshotUpdater`] encapsulates the throttled world-state collection
 //! logic: reading bot position/health/gamemode, scanning dirty blocks,
 //! and atomically updating [`SharedState`] via [`WorldSnapshot`].
+//!
+//! # Snapshot invariants
+//!
+//! Production snapshots **never contain air entries** — a broken block is
+//! simply absent from `blocks`/`block_index`. Both refresh paths (dirty-block
+//! single reads and dirty-chunk full scans) apply the same `is_air()` filter,
+//! so the same world state always produces the same snapshot shape.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -238,6 +245,16 @@ async fn build_snapshot_inner(
             }
             let az_pos = azalea::core::position::BlockPos::new(pos.x, pos.y, pos.z);
             if let Some(block_state) = world_guard.get_block_state(az_pos) {
+                // Invariant: production snapshots never contain air entries —
+                // a broken block is simply absent (same filter as the
+                // dirty-chunk scan below, so both paths produce identical
+                // snapshot shapes for the same world state). No consumer
+                // depends on air entries: `wait_for_block_gone`/`wait_for_block_present`
+                // treat absent == air, `find_standable_neighbor` treats
+                // absent as free, and `get_nearby_blocks` had to filter them.
+                if block_state.is_air() {
+                    continue;
+                }
                 let block_name = block_state_to_name(block_state);
                 new_blocks.push(BlockEntry {
                     position: *pos,
@@ -640,6 +657,86 @@ mod tests {
     }
 
     // ── Retention pruning ────────────────────────────────────
+
+    /// A block that the server reports as air (e.g. after being broken) must
+    /// disappear from the snapshot entirely: production snapshots never
+    /// contain air entries — a broken block is simply absent. The dirty-block
+    /// single-read path previously stored air entries while the dirty-chunk
+    /// scan path skipped them, so the same world state produced different
+    /// snapshot shapes depending on which path refreshed it.
+    #[tokio::test]
+    async fn test_dirty_block_update_to_air_removes_entry() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let tracker = Arc::new(Mutex::new(DirtyTracker::new()));
+
+        // Old snapshot: a stone block at P.
+        let p = BlockPos::new(5, 64, 5);
+        state.update_snapshot(WorldSnapshot {
+            blocks: vec![BlockEntry {
+                position: p,
+                block_type: "stone".into(),
+                block_state: None,
+            }],
+            ..Default::default()
+        });
+
+        // Underlying world: chunk (0,0) loaded and entirely air.
+        let mut chunk_storage = azalea::world::ChunkStorage::new(384, -64);
+        let chunk = Arc::new(parking_lot::RwLock::new(azalea::world::Chunk::default()));
+        chunk_storage.map.insert(
+            azalea::core::position::ChunkPos::new(0, 0),
+            Arc::downgrade(&chunk),
+        );
+        let instance = Arc::new(parking_lot::RwLock::new(azalea::world::Instance::from(
+            chunk_storage,
+        )));
+
+        let mut world = bevy_ecs::world::World::new();
+        let bot_entity = world.spawn(()).id();
+        world.entity_mut(bot_entity).insert((
+            azalea::entity::Position::new(azalea::core::position::Vec3::new(0.5, 64.0, 0.5)),
+            azalea::entity::metadata::Health(20.0),
+            azalea::local_player::Hunger::default(),
+            azalea::local_player::LocalGameMode::from(azalea::core::game_type::GameMode::Survival),
+            azalea::player::GameProfileComponent(azalea::auth::game_profile::GameProfile::new(
+                uuid::Uuid::new_v4(),
+                "AI_Bot".to_string(),
+            )),
+            azalea::local_player::InstanceHolder {
+                instance: instance.clone(),
+                partial_instance: Arc::new(parking_lot::RwLock::new(
+                    azalea::world::PartialInstance::default(),
+                )),
+            },
+            azalea::entity::inventory::Inventory::default(),
+        ));
+        let bot = azalea::Client::new(bot_entity, Arc::new(parking_lot::Mutex::new(world)));
+
+        // Mark P dirty; the world now reports air there (default chunk).
+        tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_block_dirty(p);
+
+        let snapshot = build_snapshot_inner(&bot, &state, &tracker)
+            .await
+            .expect("build should succeed");
+
+        // Invariant: a broken block is absent — no air entry, no index slot.
+        assert!(
+            !snapshot.blocks.iter().any(|b| b.position == p),
+            "air entry for {p:?} must be filtered out, got: {:?}",
+            snapshot
+                .blocks
+                .iter()
+                .filter(|b| b.position == p)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !snapshot.block_index.contains_key(&p),
+            "block_index must not contain the removed block at {p:?}"
+        );
+    }
 
     #[test]
     fn test_block_within_chunk_radius_prunes_far_chunks() {
