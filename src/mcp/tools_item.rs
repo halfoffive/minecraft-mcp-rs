@@ -357,16 +357,17 @@ pub struct GiveItemInput {
 
 /// Handle `give_item` MCP tool.
 ///
-/// Packages the smoke-test's command fallback as a standard operation: runs
-/// `/give <bot> <item> <count>`; when `target` is "hotbar" it follows with
+/// Gives the bot an item by running `/give <bot> <item> <count>`; when
+/// `target` is "hotbar" it follows with
 /// `/item replace entity <bot> hotbar.<slot> with <item> <count>` and, if the
 /// server rejects `/item replace`, falls back to the swap-click
 /// [`BotCommand::MoveItemToHotbar`] path (reliable wherever the item already
-/// landed in the inventory). Requires server commands (op) — command
-/// availability is verified live via a `/seed` probe, and only a
-/// probe-confirmed rejection yields `PermissionDenied` (the cached snapshot's
-/// `commands_enabled` can be a stale `PermissionLevel` heuristic right after
-/// a reconnect).
+/// landed in the inventory). A rejection of the initial `/give` (for example
+/// an unknown item id) is propagated as [`BotError::CommandRejected`] instead
+/// of a fake success. Requires server commands (op) — command availability
+/// is verified live via a `/seed` probe, and only a probe-confirmed rejection
+/// yields `PermissionDenied` (the cached snapshot's `commands_enabled` can be
+/// a stale `PermissionLevel` heuristic right after a reconnect).
 pub async fn handle_give_item(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
@@ -997,6 +998,44 @@ mod tests {
         assert_eq!(parsed["success"], true);
         assert_eq!(parsed["data"]["target"], "inventory");
         assert_eq!(parsed["data"]["method"], "give");
+        responder.await.expect("responder finished");
+    }
+
+    #[tokio::test]
+    async fn test_give_item_inventory_command_rejected_propagates() {
+        // Regression: /give for an unknown item id must surface
+        // CommandRejected (from the executor's rejection scan) instead of the
+        // fake "Gave N x nonexistent_item" success observed in the field.
+        let state = make_give_state();
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            consume_probe(&mut receiver).await;
+            let give = receiver.recv().await.expect("give command");
+            assert!(matches!(
+                give.command,
+                BotCommand::ExecuteCommand(ref c)
+                    if c == "/give TestBot minecraft:nonexistent_item_xyz 1"
+            ));
+            give.respond_to
+                .send(Err(BotError::CommandRejected {
+                    command: "/give TestBot minecraft:nonexistent_item_xyz 1".into(),
+                    feedback: "Unknown item 'minecraft:nonexistent_item_xyz'".into(),
+                }))
+                .unwrap();
+        });
+
+        let input = GiveItemInput {
+            item_id: "nonexistent_item_xyz".into(),
+            count: None,
+            target: None,
+            hotbar_slot: None,
+        };
+        let result = handle_give_item(&state, &sender, input).await;
+        assert!(
+            matches!(result, Err(BotError::CommandRejected { ref feedback, .. }) if feedback.contains("Unknown item")),
+            "give_item must propagate the /give rejection, got: {result:?}"
+        );
         responder.await.expect("responder finished");
     }
 

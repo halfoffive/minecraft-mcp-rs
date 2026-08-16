@@ -89,8 +89,10 @@ pub struct WalkDirectionInput {
 
 /// Handle `walk_direction` MCP tool.
 ///
-/// Parses the direction string, validates distance > 0, checks online status,
-/// then sends [`BotCommand::WalkDirection`].
+/// Parses the direction string, validates distance (1-1000), checks online
+/// status, then sends [`BotCommand::WalkDirection`]. On success the JSON
+/// response carries the requested `distance` and the bot's end `position`
+/// (in the executor's `data` payload).
 pub async fn handle_walk_direction(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,

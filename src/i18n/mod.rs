@@ -234,7 +234,7 @@ pub enum TextKey {
     SuccessRate,
 
     // ── Chat log section ───────────────────────────────────────────
-    /// "Chat Log (last 10)" collapsible header.
+    /// "Chat Log (last 50)" collapsible header.
     ChatLog,
     /// "No chat messages received yet." placeholder.
     NoChatMessages,

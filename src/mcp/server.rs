@@ -181,7 +181,7 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Returns recent chat messages (up to 10). Each message has sender and message fields.",
+        description = "Returns recent chat messages (up to 50). Each message has sender and message fields.",
         annotations(read_only_hint = true)
     )]
     async fn get_chat_history(&self) -> Result<String, BotError> {
@@ -253,7 +253,9 @@ impl McpBotServer {
         crate::mcp::tools_movement::handle_move_to(&self.state, &self.sender, input).await
     }
 
-    #[tool(description = "Walk the bot in a cardinal direction")]
+    #[tool(
+        description = "Walk the bot a number of blocks in a horizontal direction (north/south/east/west or a diagonal). Returns the requested distance and the bot's end position."
+    )]
     async fn walk_direction(
         &self,
         Parameters(input): Parameters<WalkDirectionInput>,
@@ -377,7 +379,7 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Give the bot an item via server commands (requires OP). Runs /give, and for target=hotbar also /item replace (falling back to a swap-click move if /item replace is rejected). The smoke-test command fallback packaged as one tool.",
+        description = "Give the bot an item via server commands (requires OP). Runs /give <bot> <item> <count>; target=hotbar additionally runs /item replace (with a swap-click fallback if /item replace is rejected). Rejected commands, such as an unknown item id, return a command_rejected error instead of a fake success.",
         annotations(destructive_hint = true)
     )]
     async fn give_item(
