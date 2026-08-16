@@ -460,6 +460,7 @@ AI agents can distinguish "bot is gone, retry later" from "input is invalid":
 | -32007 | `ContainerTimeout` | `container_timeout` | true |
 | -32008 | `PathfindingFailed` | `pathfinding_failed` | false |
 | -32009 | `CommandRejected` | `command_rejected` | true |
+| -32010 | `ContainerNotOpen` | `container_not_open` | false |
 | -32600 | `PermissionDenied` | `permission_denied` | false |
 | -32602 | `ToolNotFound` / `TooFar` / `InvalidParams` | `tool_not_found` / `too_far` / `invalid_params` | false |
 | -32603 | `Internal` | `internal_error` | false |
