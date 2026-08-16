@@ -66,6 +66,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `attack_entity` now include `position` in `data` so callers can detect
   the drift caused by auto-approach / item-walking without a separate
   `get_self_info` round-trip.
+- **`walk_direction` reports the end position:** the result `data` now
+  carries `position` (live player-position read preferred, snapshot
+  fallback) so callers can tell where a successful walk actually ended.
+- **`get_chat_history` documentation matches the 50-message retention cap:**
+  the tool description and the desktop UI chat-log label now say 50 (the
+  queue already retains 50 after the 2026-08 round-2 cursor fix) instead of
+  the stale "up to 10".
+- **`give_item` tool description updated:** the MCP tools/list description
+  no longer calls the tool a smoke-test fallback and documents that rejected
+  `/give` commands (e.g. an unknown item id) return `command_rejected`.
 - **Help mode never claims to start the MCP server:** the "Minecraft MCP
   server starting" log line moved after mode resolution; a bare
   `minecraft-mcp-rs` invocation prints help and exits without starting the
@@ -98,6 +108,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of truth `get_server_info` uses) and rejects only when the probe itself
   confirms commands are unavailable; the probe is also cleared on
   disconnect so it never crosses sessions.
+- **`give_item` no longer fakes success for unknown item ids:** Minecraft
+  rejects `/give` with an invalid id via `Unknown item '...'` (followed by
+  the keywordless `<--[HERE]` command echo). The command-rejection scan now
+  matches `unknown item` / `no such item`, so `give_item` returns
+  `command_rejected` instead of `Gave N x nonexistent_item`.
 - **`act` results report the bot's live position:** `self_info.position`
   previously came from the throttled snapshot, which can lag a just-finished
   move by up to one interval (5 s when idle) — an LLM client misread a
