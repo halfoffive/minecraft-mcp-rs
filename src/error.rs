@@ -84,6 +84,14 @@ pub enum BotError {
     /// Waiting for a container to open timed out.
     ContainerTimeout,
 
+    /// No container is currently open (a runtime-state error: the caller
+    /// must `open_container` first).
+    ///
+    /// Distinguished from [`InvalidParams`](Self::InvalidParams) — the
+    /// parameters were fine; the *state* is wrong. Maps to its own JSON-RPC
+    /// code (-32010) so MCP clients can branch on it (audit L-9).
+    ContainerNotOpen,
+
     /// The operation was denied due to insufficient permissions.
     PermissionDenied(String),
 
@@ -160,6 +168,7 @@ impl Display for BotError {
             }
             BotError::ContainerAlreadyOpen => write!(f, "A container is already open"),
             BotError::ContainerTimeout => write!(f, "Container open timed out"),
+            BotError::ContainerNotOpen => write!(f, "No container is currently open"),
             BotError::PermissionDenied(msg) => write!(f, "Permission denied: {msg}"),
             BotError::InvalidParams(msg) => write!(f, "Invalid parameter: {msg}"),
             BotError::CommandRejected { command, feedback } => {
@@ -202,6 +211,7 @@ impl Display for BotError {
 // | -32007 | `CODE_CONTAINER_TIMEOUT`         | `ContainerTimeout`     | `container_timeout`  | true      | —                                    |
 // | -32008 | `CODE_PATHFINDING_FAILED`        | `PathfindingFailed`    | `pathfinding_failed` | false     | `x`, `y`, `z` (target), `detail`     |
 // | -32009 | `CODE_COMMAND_REJECTED`          | `CommandRejected`      | `command_rejected`   | true      | `command`, `feedback`                |
+// | -32010 | `CODE_CONTAINER_NOT_OPEN`        | `ContainerNotOpen`     | `container_not_open` | false     | —                                    |
 // | -32600 | `ErrorCode::INVALID_REQUEST`     | `PermissionDenied`     | `permission_denied`  | false     | —                                    |
 // | -32602 | `ErrorCode::INVALID_PARAMS`      | `ToolNotFound`         | `tool_not_found`     | false     | `tool_type`, `material`, `alternatives` |
 // | -32602 | `ErrorCode::INVALID_PARAMS`      | `TooFar`               | `too_far`            | false     | `target`, `current`, `max_distance`  |
@@ -220,6 +230,7 @@ const CODE_CONTAINER_ALREADY_OPEN: i32 = -32006;
 const CODE_CONTAINER_TIMEOUT: i32 = -32007;
 const CODE_PATHFINDING_FAILED: i32 = -32008;
 const CODE_COMMAND_REJECTED: i32 = -32009;
+const CODE_CONTAINER_NOT_OPEN: i32 = -32010;
 
 impl From<BotError> for ErrorData {
     fn from(err: BotError) -> Self {
@@ -356,6 +367,17 @@ impl From<BotError> for ErrorData {
                 serde_json::json!({
                     "reason": "container_timeout",
                     "retryable": true,
+                }),
+            ),
+
+            BotError::ContainerNotOpen => (
+                // L-9: distinct runtime-state code so clients can branch on
+                // `error.code` alone — "open a container first" is not an
+                // invalid parameter.
+                ErrorCode(CODE_CONTAINER_NOT_OPEN),
+                serde_json::json!({
+                    "reason": "container_not_open",
+                    "retryable": false,
                 }),
             ),
 
@@ -543,6 +565,12 @@ mod tests {
     fn test_display_container_timeout() {
         let err = BotError::ContainerTimeout;
         assert_eq!(err.to_string(), "Container open timed out");
+    }
+
+    #[test]
+    fn test_display_container_not_open() {
+        let err = BotError::ContainerNotOpen;
+        assert_eq!(err.to_string(), "No container is currently open");
     }
 
     #[test]
@@ -788,6 +816,18 @@ mod tests {
     }
 
     #[test]
+    fn test_into_mcp_error_container_not_open() {
+        let err = BotError::ContainerNotOpen;
+        let mcp: ErrorData = err.into();
+        // L-9: "no container is currently open" is a RUNTIME state error, not
+        // a parameter error — it gets a distinct code (-32010) so MCP clients
+        // can distinguish "open a container first" from "your input is
+        // invalid" (which shares -32602 with other parameter errors).
+        assert_eq!(mcp.code.0, -32010);
+        assert_contract(&mcp, "container_not_open", false);
+    }
+
+    #[test]
     fn test_into_mcp_error_permission_denied() {
         let err = BotError::PermissionDenied("no access".into());
         let mcp: ErrorData = err.into();
@@ -860,6 +900,7 @@ mod tests {
             CODE_CONTAINER_TIMEOUT,
             CODE_PATHFINDING_FAILED,
             CODE_COMMAND_REJECTED,
+            CODE_CONTAINER_NOT_OPEN,
         ];
         for (i, code) in codes.iter().enumerate() {
             assert!(

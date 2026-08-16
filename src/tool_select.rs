@@ -14,6 +14,12 @@ pub struct ToolSelection {
     pub hotbar_slot: Option<u8>,
     pub needs_move_to_hotbar: bool,
     pub required_harvest_level: Option<u8>,
+    /// The `item_id` (e.g. `"iron_pickaxe"`) of the matched inventory entry.
+    ///
+    /// Populated in BOTH the hotbar and main-inventory branches so the
+    /// compound-op executor can issue a `MoveItemToHotbar` for a
+    /// main-inventory tool (audit H-1). `None` for a `Hand` selection.
+    pub item_id: Option<String>,
 }
 
 impl ToolSelection {
@@ -25,6 +31,7 @@ impl ToolSelection {
             hotbar_slot: None,
             needs_move_to_hotbar: false,
             required_harvest_level: None,
+            item_id: None,
         }
     }
 }
@@ -120,31 +127,41 @@ pub fn select_tool_for_block(block_type: &str, inventory: &[Option<ItemStack>]) 
     if let Some((material, slot)) =
         find_tool_in_inventory(&required_tool, hotbar_slice, required_harvest_level)
     {
+        let item_id = hotbar_slice
+            .get(slot as usize)
+            .and_then(|opt| opt.as_ref())
+            .map(|stack| stack.item_id.clone());
         return ToolSelection {
             tool_type: required_tool,
             material: Some(material),
             hotbar_slot: Some(slot),
             needs_move_to_hotbar: false,
             required_harvest_level,
+            item_id,
         };
     }
 
     // Search main inventory (slots 9-35).
     // A tool found here can't be switched to directly — SwitchHotbarSlot only
     // accepts hotbar indices (0-8) — so we surface the tool type/material but
-    // leave `hotbar_slot` as None. The caller will mine with whatever is
-    // currently held (or Hand) rather than sending an invalid slot.
+    // leave `hotbar_slot` as None, and mark `needs_move_to_hotbar` so the
+    // compound-op executor issues a `MoveItemToHotbar` before mining (H-1).
     if inventory.len() > 9 {
         let main_slice = &inventory[9..inventory.len().min(36)];
-        if let Some((material, _slot)) =
+        if let Some((material, slot)) =
             find_tool_in_inventory(&required_tool, main_slice, required_harvest_level)
         {
+            let item_id = main_slice
+                .get(slot as usize)
+                .and_then(|opt| opt.as_ref())
+                .map(|stack| stack.item_id.clone());
             return ToolSelection {
                 tool_type: required_tool,
                 material: Some(material),
                 hotbar_slot: None,
                 needs_move_to_hotbar: true,
                 required_harvest_level,
+                item_id,
             };
         }
     }
@@ -159,13 +176,15 @@ pub fn select_tool_for_block(block_type: &str, inventory: &[Option<ItemStack>]) 
 ///
 /// Returns a vector of strings like `["Iron Pickaxe"]` suggesting the minimum
 /// tier tool that meets the harvest level requirement. Returns an empty vec
-/// when no specific tool is required (level 0 / unknown block).
+/// when no specific tool is required (level 0 / unknown block) — level 0
+/// means "any tool (or hand) works", so there is no tool to suggest.
 pub fn build_tool_alternatives(
     tool_type: ToolType,
     required_harvest_level: Option<u8>,
 ) -> Vec<String> {
     let mut alts = Vec::new();
     if let Some(level) = required_harvest_level
+        && level > 0
         && let Some(mat) = minimum_material_for_harvest_level(level)
     {
         alts.push(format!("{mat} {tool_type}"));
@@ -202,11 +221,59 @@ mod tests {
             hotbar_slot: Some(3),
             needs_move_to_hotbar: false,
             required_harvest_level: None,
+            item_id: Some("diamond_pickaxe".into()),
         };
         assert_eq!(sel.tool_type, ToolType::Pickaxe);
         assert_eq!(sel.material, Some(MaterialTier::Diamond));
         assert_eq!(sel.hotbar_slot, Some(3));
         assert!(!sel.needs_move_to_hotbar);
+        assert_eq!(sel.item_id.as_deref(), Some("diamond_pickaxe"));
+    }
+
+    // ── ToolSelection.item_id (audit H-1) ───────────────────
+
+    #[test]
+    fn test_tool_selection_item_id_from_hotbar_match() {
+        let inv = vec![
+            Some(ItemStack {
+                item_id: "iron_pickaxe".to_string(),
+                count: 1,
+            }),
+            Some(ItemStack {
+                item_id: "dirt".to_string(),
+                count: 1,
+            }),
+        ];
+        let sel = select_tool_for_block("stone", &inv);
+        assert_eq!(sel.tool_type, ToolType::Pickaxe);
+        assert_eq!(sel.hotbar_slot, Some(0));
+        assert!(!sel.needs_move_to_hotbar);
+        assert_eq!(sel.item_id.as_deref(), Some("iron_pickaxe"));
+    }
+
+    #[test]
+    fn test_tool_selection_item_id_from_main_inventory_match() {
+        // Iron pickaxe in the MAIN inventory (slot 15): the selection must
+        // carry the matched entry's item_id so the compound-op executor can
+        // dispatch `MoveItemToHotbar` (audit H-1). `hotbar_slot` stays None.
+        let mut inv: Vec<Option<ItemStack>> = vec![None; 36];
+        inv[15] = Some(ItemStack {
+            item_id: "iron_pickaxe".to_string(),
+            count: 1,
+        });
+        let sel = select_tool_for_block("stone", &inv);
+        assert_eq!(sel.tool_type, ToolType::Pickaxe);
+        assert_eq!(sel.material, Some(MaterialTier::Iron));
+        assert_eq!(sel.hotbar_slot, None);
+        assert!(sel.needs_move_to_hotbar);
+        assert_eq!(sel.item_id.as_deref(), Some("iron_pickaxe"));
+    }
+
+    #[test]
+    fn test_tool_selection_item_id_none_for_hand() {
+        let sel = select_tool_for_block("stone", &[]);
+        assert_eq!(sel.tool_type, ToolType::Hand);
+        assert_eq!(sel.item_id, None);
     }
 
     // ── material_from_item_name (re-export) ─────────────────
@@ -695,5 +762,51 @@ mod tests {
         // Tool at first main-inventory slot (9) — can't be selected directly.
         assert_eq!(sel.hotbar_slot, None);
         assert!(sel.needs_move_to_hotbar);
+        // H-1: item_id must be populated from the main-inventory match too.
+        assert_eq!(sel.item_id.as_deref(), Some("iron_axe"));
+    }
+
+    // ── build_tool_alternatives (audit L-33 coverage) ──────────
+
+    #[test]
+    fn test_build_tool_alternatives_maps_level_to_tier() {
+        // Level 2 → Iron. The string is the minimum material + tool type in
+        // LLM-readable form ("iron pickaxe").
+        assert_eq!(
+            build_tool_alternatives(ToolType::Pickaxe, Some(2)),
+            vec!["iron pickaxe"]
+        );
+        assert_eq!(
+            build_tool_alternatives(ToolType::Pickaxe, Some(3)),
+            vec!["diamond pickaxe"]
+        );
+        assert_eq!(
+            build_tool_alternatives(ToolType::Pickaxe, Some(1)),
+            vec!["stone pickaxe"]
+        );
+        assert_eq!(
+            build_tool_alternatives(ToolType::Pickaxe, Some(4)),
+            vec!["netherite pickaxe"]
+        );
+    }
+
+    #[test]
+    fn test_build_tool_alternatives_no_requirement_is_empty() {
+        // Level 0 / unknown → no alternative tool is suggested.
+        assert!(build_tool_alternatives(ToolType::Pickaxe, None).is_empty());
+        assert!(build_tool_alternatives(ToolType::Pickaxe, Some(0)).is_empty());
+        // Out-of-range levels map to no material → empty too.
+        assert!(build_tool_alternatives(ToolType::Pickaxe, Some(5)).is_empty());
+    }
+
+    #[test]
+    fn test_build_tool_alternatives_string_format() {
+        // Format is "{material} {tool_type}" (Display of MaterialTier +
+        // ToolType), e.g. "stone pickaxe" — matching the historical
+        // LLM-facing "use an Iron Pickaxe" guidance style.
+        let alts = build_tool_alternatives(ToolType::Shovel, Some(2));
+        assert_eq!(alts, vec!["iron shovel"]);
+        let alts = build_tool_alternatives(ToolType::Axe, Some(1));
+        assert_eq!(alts, vec!["stone axe"]);
     }
 }

@@ -410,28 +410,40 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
 /// The snapshot rebuild interval to use right now.
 ///
 /// The configured interval applies while the bot processed a command within
-/// the last [`ACTIVITY_WINDOW_MS`] — an active agent wants fresh world
-/// state. Otherwise the bot is idle (no MCP tools being called), so the
-/// interval relaxes to at least [`IDLE_INTERVAL_MS`], cutting the snapshot
+/// the last [`within_activity_window`] window — an active agent wants fresh
+/// world state. Otherwise the bot is idle (no MCP tools being called), so
+/// the interval relaxes to at least `IDLE_INTERVAL_MS`, cutting the snapshot
 /// cost of a parked bot by an order of magnitude. Force-refresh requests
 /// bypass the throttle gate entirely and are unaffected.
+///
+/// The activity probe is monotonic (L-23): the decision uses elapsed
+/// monotonic time since the last command, never wall-clock epoch values,
+/// so an NTP jump can neither keep the fast interval forever nor relax it
+/// early.
 fn effective_snapshot_interval_ms(state: &SharedState, configured: u64) -> u64 {
-    /// Commands within this window keep the fast configured interval.
-    const ACTIVITY_WINDOW_MS: u64 = 3_000;
     /// Relaxed interval once the bot has been idle for a while.
     const IDLE_INTERVAL_MS: u64 = 5_000;
 
-    let last = state.last_command_at_ms();
-    if last != 0 {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        if now.saturating_sub(last) <= ACTIVITY_WINDOW_MS {
-            return configured;
-        }
+    if within_activity_window(state.last_command_at(), Instant::now()) {
+        return configured;
     }
     configured.max(IDLE_INTERVAL_MS)
+}
+
+/// Pure activity-window check: is `now` within the R-13 activity window of
+/// the last activity stamp?
+///
+/// `None` (no activity ever) is never "within". Extracted as a pure helper
+/// so the relaxation decision is unit-testable with injected instants
+/// instead of sleeping past the window.
+fn within_activity_window(last_activity: Option<Instant>, now: Instant) -> bool {
+    /// Commands within this window keep the fast configured interval.
+    const ACTIVITY_WINDOW: Duration = Duration::from_millis(3_000);
+
+    match last_activity {
+        Some(t) => now.saturating_duration_since(t) <= ACTIVITY_WINDOW,
+        None => false,
+    }
 }
 
 async fn handle_tick(bot: Client, state: BotState) {
@@ -677,6 +689,42 @@ mod tests {
             last.elapsed() >= Duration::from_millis(state.snapshot_interval_ms)
         };
         assert!(should_update);
+    }
+
+    // -- Idle snapshot relaxation (L-23 monotonic probes) -------------------
+
+    #[test]
+    fn test_within_activity_window_uses_elapsed_time() {
+        // The relaxation decision must be based on elapsed monotonic time
+        // since the activity mark — never on wall-clock epoch values (a
+        // backward NTP jump previously made `now - last` saturate to 0,
+        // keeping the fast interval forever).
+        let now = Instant::now();
+        assert!(
+            within_activity_window(Some(now - Duration::from_millis(500)), now),
+            "recent activity → fast interval"
+        );
+        assert!(
+            !within_activity_window(Some(now - Duration::from_secs(4)), now),
+            "stale activity → relax interval"
+        );
+        assert!(
+            !within_activity_window(None, now),
+            "no activity ever → relax interval"
+        );
+    }
+
+    #[test]
+    fn test_effective_snapshot_interval_follows_activity() {
+        // End-to-end through SharedState: a just-marked command keeps the
+        // configured fast interval; a never-marked state relaxes to
+        // max(configured, 5000).
+        let state = SharedState::new(crate::config::AppConfig::default());
+        assert_eq!(effective_snapshot_interval_ms(&state, 500), 5_000);
+        assert_eq!(effective_snapshot_interval_ms(&state, 3_000), 5_000);
+        state.mark_command_activity();
+        assert_eq!(effective_snapshot_interval_ms(&state, 500), 500);
+        assert_eq!(effective_snapshot_interval_ms(&state, 3_000), 3_000);
     }
 
     // -- Tick task lifecycle -------------------------------------------------

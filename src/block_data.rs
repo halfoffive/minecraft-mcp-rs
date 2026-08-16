@@ -356,11 +356,6 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
     m.insert("deepslate_redstone_ore", 4.5);
     m.insert("deepslate_copper_ore", 4.5);
 
-    // Deepslate variants
-    m.insert("deepslate_emerald_ore", 4.5);
-    m.insert("deepslate_lapis_ore", 4.5);
-    m.insert("deepslate_redstone_ore", 4.5);
-
     // Nether / End
     m.insert("netherrack", 0.4);
     m.insert("nether_quartz_ore", 3.0);
@@ -495,12 +490,12 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
 
 /// Material tier priority order — from best (index 0) to worst (index N).
 ///
-/// Used by [`find_best_tool_in_inventory`] to select the highest-tier tool.
-/// This is the reverse of the `Ord` derive on [`MaterialTier`] (whose variant
-/// order is `Wood < Gold < Stone < Iron < Diamond < Netherite`), so the
-/// highest-`Ord` tier is preferred. Gold ranks above Wood (it has the same
-/// mining level but higher speed), and below Stone (lower durability and
-/// mining level).
+/// Used by [`crate::tool_select::find_tool_in_inventory`] to select the
+/// highest-tier tool. This is the reverse of the `Ord` derive on
+/// [`MaterialTier`] (whose variant order is
+/// `Wood < Gold < Stone < Iron < Diamond < Netherite`), so the highest-`Ord`
+/// tier is preferred. Gold ranks above Wood (it has the same mining level but
+/// higher speed), and below Stone (lower durability and mining level).
 pub static MATERIAL_PRIORITY: &[MaterialTier] = &[
     MaterialTier::Netherite,
     MaterialTier::Diamond,
@@ -638,7 +633,6 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
         "calcite",
         "netherrack",
         "nether_quartz_ore",
-        "nether_gold_ore",
         "end_stone",
         "purpur_block",
         "purpur_pillar",
@@ -672,6 +666,11 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
 
     // Level 2: needs iron+ (gold, diamond, emerald ores; deepslate variants;
     // iron/diamond/blocks; anvils; obsidian-adjacent blocks).
+    //
+    // `nether_gold_ore` lives here too (audit H-3): vanilla 1.21 requires an
+    // iron+ pickaxe to drop it, and the old level-1 entry let a stone
+    // pickaxe "mine" it for nothing. Nether gold is a rare ore — refusing
+    // stone here is the conservative, vanilla-accurate choice.
     for &block in &[
         "gold_ore",
         "deepslate_gold_ore",
@@ -681,6 +680,7 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
         "deepslate_diamond_ore",
         "emerald_ore",
         "deepslate_emerald_ore",
+        "nether_gold_ore",
         "iron_block",
         "gold_block",
         "diamond_block",
@@ -757,18 +757,6 @@ pub fn material_from_item_name(name: &str) -> Option<(ToolType, MaterialTier)> {
         }
         _ => None,
     }
-}
-
-/// Finds the best available tool of the given type in an inventory.
-///
-/// Returns the slot index of the best tool (highest material priority), or
-/// `None` if no matching tool is found.
-#[deprecated(note = "use tool_select::find_tool_in_inventory instead")]
-pub fn find_best_tool_in_inventory(
-    tool_type: &ToolType,
-    inventory: &[Option<ItemStack>],
-) -> Option<u8> {
-    crate::tool_select::find_tool_in_inventory(tool_type, inventory, None).map(|(_, slot)| slot)
 }
 
 // ---------------------------------------------------------------------------
@@ -953,7 +941,8 @@ mod tests {
     // canonical implementation lives in `mining_calc` (with the 1.5× factor)
     // and its tests are in `mining_calc.rs`.
 
-    // --- find_best_tool_in_inventory ---
+    // --- tool_select::find_tool_in_inventory (delegation target of the
+    // deleted find_best_tool_in_inventory shim, audit L-25) ---
 
     #[test]
     fn test_find_best_tool_empty_inventory() {
@@ -1125,6 +1114,56 @@ mod tests {
         assert_eq!(harvest_level_of(MaterialTier::Netherite), 4);
     }
 
+    // ── minimum_material_for_harvest_level (audit L-33 coverage) ──
+
+    #[test]
+    fn test_minimum_material_for_harvest_level_maps_each_level() {
+        // Level 0 → Wood (anything works; Wood is the weakest known tier).
+        assert_eq!(
+            minimum_material_for_harvest_level(0),
+            Some(MaterialTier::Wood)
+        );
+        // Level 1 → Stone (covers Gold, which shares Stone's level 1).
+        assert_eq!(
+            minimum_material_for_harvest_level(1),
+            Some(MaterialTier::Stone)
+        );
+        assert_eq!(
+            minimum_material_for_harvest_level(2),
+            Some(MaterialTier::Iron)
+        );
+        assert_eq!(
+            minimum_material_for_harvest_level(3),
+            Some(MaterialTier::Diamond)
+        );
+        assert_eq!(
+            minimum_material_for_harvest_level(4),
+            Some(MaterialTier::Netherite)
+        );
+    }
+
+    #[test]
+    fn test_minimum_material_for_harvest_level_out_of_range() {
+        // Levels above the highest known tier (Netherite = 4) have no
+        // material that meets them.
+        assert_eq!(minimum_material_for_harvest_level(5), None);
+        assert_eq!(minimum_material_for_harvest_level(255), None);
+    }
+
+    #[test]
+    fn test_minimum_material_matches_harvest_level_roundtrip() {
+        // A material returned for a level must itself have exactly that
+        // harvest level (the mapping is the inverse of harvest_level_of).
+        for level in 0..=4u8 {
+            let mat = minimum_material_for_harvest_level(level).unwrap();
+            assert_eq!(
+                harvest_level_of(mat),
+                level,
+                "minimum material for level {level} must itself be level {level}"
+            );
+        }
+    }
+
     // --- HARVEST_LEVEL table ---
 
     #[test]
@@ -1167,5 +1206,50 @@ mod tests {
     #[test]
     fn test_harvest_level_unknown_block_defaults_zero() {
         assert_eq!(HARVEST_LEVEL.get("not_a_block").copied(), None);
+    }
+
+    // ── H-3 (audit): nether_gold_ore requires iron+ ─────────────────
+
+    /// H-3 (audit): vanilla 1.21 requires an IRON+ pickaxe (harvest level 2)
+    /// to drop nether_gold_ore — not stone (level 1). The old table listed it
+    /// at level 1, so a stone pickaxe was "accepted" and the bot mined the
+    /// ore for nothing. Assert the corrected level AND the tool-selector
+    /// consequences: level 2 rejects a stone pickaxe and accepts an iron one.
+    ///
+    /// Conservative deviations from vanilla (level 0, hand-mineable):
+    /// `coal_ore`, `netherrack`, `end_stone`, `purpur_block`/`purpur_pillar`,
+    /// `deepslate`, and `nether_quartz_ore` are deliberately listed at
+    /// level 1 so a wood-only bot refuses to mine them (wood mining is so
+    /// slow the bot should prefer not to). These are documented, deliberate
+    /// OVER-requirements, NOT vanilla-accurate values.
+    #[test]
+    fn test_harvest_level_nether_gold_ore_requires_iron() {
+        assert_eq!(
+            HARVEST_LEVEL.get("nether_gold_ore").copied(),
+            Some(2),
+            "nether_gold_ore must require iron+ (harvest level 2), not stone (1)"
+        );
+
+        // find_tool_in_inventory with required level 2 must reject a stone
+        // pickaxe (level 1 < 2) and accept an iron pickaxe (level 2).
+        let stone_inv = vec![Some(ItemStack {
+            item_id: "stone_pickaxe".to_string(),
+            count: 1,
+        })];
+        assert_eq!(
+            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &stone_inv, Some(2)),
+            None,
+            "stone pickaxe (level 1) must be rejected for nether_gold_ore"
+        );
+
+        let iron_inv = vec![Some(ItemStack {
+            item_id: "iron_pickaxe".to_string(),
+            count: 1,
+        })];
+        assert_eq!(
+            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &iron_inv, Some(2)),
+            Some((MaterialTier::Iron, 0)),
+            "iron pickaxe (level 2) must be accepted for nether_gold_ore"
+        );
     }
 }

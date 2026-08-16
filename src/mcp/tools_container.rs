@@ -16,11 +16,14 @@ use crate::types::{BlockPos, BotCommand};
 // ── Container state helpers ─────────────────────────────────────────────────
 
 /// Ensure a container is currently open, returning a [`BotError`] otherwise.
+///
+/// The "no container open" case is a runtime *state* error, not a parameter
+/// error — it maps to the dedicated [`BotError::ContainerNotOpen`] variant
+/// (-32010, `reason: container_not_open`) so MCP clients can distinguish
+/// "open a container first" from malformed input (audit L-9).
 fn check_container_open(state: &SharedState) -> Result<(), BotError> {
     if !state.has_container_open() {
-        return Err(BotError::InvalidParams(
-            "No container is currently open".to_string(),
-        ));
+        return Err(BotError::ContainerNotOpen);
     }
     Ok(())
 }
@@ -306,6 +309,25 @@ mod tests {
         assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
+    #[tokio::test]
+    async fn test_take_from_container_no_container_open_returns_container_not_open() {
+        // L-9: with no container open (but the bot online and the params
+        // valid), `check_container_open` must return the dedicated
+        // `ContainerNotOpen` runtime-state variant — NOT `InvalidParams`,
+        // which is reserved for malformed input.
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = TakeFromContainerInput {
+            slot: 0,
+            count: Some(1),
+        };
+        let result = handle_take_from_container(&state, &sender, input).await;
+        assert!(
+            matches!(result, Err(BotError::ContainerNotOpen)),
+            "no open container is a runtime state error (L-9), got: {result:?}"
+        );
+    }
+
     // ── put_into_container ──────────────────────────────────────
 
     #[tokio::test]
@@ -328,8 +350,12 @@ mod tests {
         make_online(&state);
         let input = CloseContainerInput {};
         let result = handle_close_container(&state, &sender, input).await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        // L-9: the missing-container state is reported via the dedicated
+        // ContainerNotOpen variant, not a generic InvalidParams.
+        assert!(
+            matches!(result, Err(BotError::ContainerNotOpen)),
+            "expected ContainerNotOpen, got: {result:?}"
+        );
     }
 
     // ── Schema tests ────────────────────────────────────────────

@@ -636,4 +636,146 @@ proptest! {
             result
         );
     }
+
+    /// Property (audit M-13): a candidate whose floor is a FLUID (water,
+    /// lava, bubble_column) must NEVER be returned as standable. Build a
+    /// snapshot where the neighbours are air with fluid floors and assert
+    /// the function returns `None` — the bot must never pathfind onto a
+    /// fluid.
+    #[test]
+    fn prop_standable_neighbor_never_on_fluid(
+        x in -100i32..100,
+        z in -100i32..100,
+        y in 0i32..200,
+        fluid in prop_oneof!["water", "lava", "bubble_column"],
+    ) {
+        let target = BlockPos::new(x, y, z);
+        let mut blocks = vec![BlockEntry {
+            position: target,
+            block_type: "stone".into(),
+            block_state: None,
+        }];
+        // Every neighbour cell is air, but its floor is a fluid — none are
+        // standable. (Also seed the y-1 level floors the same way so no
+        // y+1 candidate "steps up" onto a solid floor.)
+        for &(dx, dz) in &[(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+            let cell = BlockPos::new(x + dx, y, z + dz);
+            blocks.push(BlockEntry {
+                position: cell,
+                block_type: "air".into(),
+                block_state: None,
+            });
+            blocks.push(BlockEntry {
+                position: BlockPos::new(cell.x, cell.y - 1, cell.z),
+                block_type: fluid.to_string(),
+                block_state: None,
+            });
+            // y+1 candidate: air above, fluid floor at y.
+            let upper = BlockPos::new(x + dx, y + 1, z + dz);
+            blocks.push(BlockEntry {
+                position: upper,
+                block_type: "air".into(),
+                block_state: None,
+            });
+            blocks.push(BlockEntry {
+                position: BlockPos::new(upper.x, upper.y - 1, upper.z),
+                block_type: fluid.to_string(),
+                block_state: None,
+            });
+        }
+
+        let snapshot = make_snapshot_with_blocks(blocks);
+        let result = find_standable_neighbor(&snapshot, target);
+        prop_assert!(
+            result.is_none(),
+            "found standable neighbor {:?} on a fluid ({fluid}) floor — fluids are never standable",
+            result
+        );
+    }
+
+    /// Property (audit M-14): a returned standable neighbor's Y must always
+    /// be within the world's build range (-64..=320). Targets are generated
+    /// across the whole range (including both boundaries) with a
+    /// deterministic mix of solid/air/fluid floors, so an out-of-bounds
+    /// candidate (e.g. y=321 for a target at y=320, or y=-65 for a target at
+    /// y=-64) would be caught.
+    #[test]
+    fn prop_standable_neighbor_y_within_world(
+        x in -50i32..50,
+        z in -50i32..50,
+        ty in -70i32..330i32,
+        seed in any::<u64>(),
+    ) {
+        let target = BlockPos::new(x, ty, z);
+        let mut blocks = vec![BlockEntry {
+            position: target,
+            block_type: "stone".into(),
+            block_state: None,
+        }];
+        // Deterministic varied layout: for each of the 8 horizontal offsets
+        // and the 3 Y levels, a position-hash decides air-with-solid-floor,
+        // air-with-fluid-floor, or solid.
+        for &(dx, dz) in &[
+            (-1i32, -1i32),
+            (-1, 0),
+            (-1, 1),
+            (0, -1),
+            (0, 1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+        ] {
+            for &dy in &[-1i32, 0i32, 1i32] {
+                let cell = BlockPos::new(x + dx, ty + dy, z + dz);
+                let floor = BlockPos::new(cell.x, cell.y - 1, cell.z);
+                let h = seed
+                    .wrapping_add((cell.x as u64).wrapping_mul(2654435761))
+                    .wrapping_add((cell.y as u64).wrapping_mul(40503))
+                    .wrapping_add((cell.z as u64).wrapping_mul(16777619));
+                match h % 3 {
+                    0 => {
+                        blocks.push(BlockEntry {
+                            position: cell,
+                            block_type: "air".into(),
+                            block_state: None,
+                        });
+                        blocks.push(BlockEntry {
+                            position: floor,
+                            block_type: "stone".into(),
+                            block_state: None,
+                        });
+                    }
+                    1 => {
+                        blocks.push(BlockEntry {
+                            position: cell,
+                            block_type: "air".into(),
+                            block_state: None,
+                        });
+                        blocks.push(BlockEntry {
+                            position: floor,
+                            block_type: "water".into(),
+                            block_state: None,
+                        });
+                    }
+                    _ => {
+                        blocks.push(BlockEntry {
+                            position: cell,
+                            block_type: "stone".into(),
+                            block_state: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        let snapshot = make_snapshot_with_blocks(blocks);
+        if let Some(pos) = find_standable_neighbor(&snapshot, target) {
+            prop_assert!(
+                (-64..=320).contains(&pos.y),
+                "standable neighbor y={} outside world build range (-64..=320) \
+                 for target at y={ty}",
+                pos.y
+            );
+        }
+    }
 }

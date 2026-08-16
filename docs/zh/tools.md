@@ -38,8 +38,8 @@
 
 | 工具 | 说明 |
 |------|------|
-| `get_settings` | 返回完整配置（MCP 令牌始终脱敏为 `"***"`）以及运行时状态：`online`、`connecting`、`mcp_server_status`、`config_path`。 |
-| `update_settings` | 部分更新——只有传入的字段会改变。先校验并**持久化**到配置文件，再应用到内存。修改 `mc_address`/`mc_port`/`ai_username` 会在已连接/连接中时触发重连；`mcp_transport`/`mcp_address`/`mcp_port` 在进程重启后生效。 |
+| `get_settings` | 返回完整配置（MCP 令牌始终脱敏为 `"***"`）以及运行时状态：`online`、`connecting`、`mcp_server_status`。 |
+| `update_settings` | 部分更新——只有传入的字段会改变。先校验，再应用到运行中的进程（**没有配置文件**；如需持久化请通过 `MINECRAFT_MCP_*` 环境变量重启）。修改 `mc_address`/`mc_port`/`ai_username` 会在已连接/连接中时触发重连；`mcp_transport`/`mcp_address`/`mcp_port` 在进程重启后生效。 |
 | `connect_bot` | 启动到配置服务器的机器人连接。已连接或连接中时为空操作。 |
 | `disconnect_bot` | 请求断开连接；重连循环停止。 |
 
@@ -59,6 +59,7 @@
 | -32007 | `ContainerTimeout` | `container_timeout` | true |
 | -32008 | `PathfindingFailed` | `pathfinding_failed` | false |
 | -32009 | `CommandRejected` | `command_rejected` | true |
+| -32010 | `ContainerNotOpen` | `container_not_open` | false |
 | -32600 | `PermissionDenied` | `permission_denied` | false |
 | -32602 | `ToolNotFound` / `TooFar` / `InvalidParams` | `tool_not_found` / `too_far` / `invalid_params` | false |
 | -32603 | `Internal` | `internal_error` | false |

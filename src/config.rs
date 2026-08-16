@@ -121,8 +121,13 @@ pub struct AppConfig {
     /// (default: [`McpTransport::Http`]).
     #[serde(default)]
     pub mcp_transport: McpTransport,
-    /// UI display language (default: [`Language::En`]).
-    #[serde(default)]
+    /// UI display language (default: the host system locale via
+    /// [`Language::from_system_locale`], matching [`AppConfig::default`]).
+    ///
+    /// L-30: the serde default previously drifted to [`Language::En`] while
+    /// `AppConfig::default()` followed the system locale — deserializing an
+    /// old config on a Chinese system silently got English.
+    #[serde(default = "Language::from_system_locale")]
     pub language: Language,
 }
 
@@ -244,10 +249,11 @@ impl AppConfig {
         if self.mcp_port == 0 {
             return Err("mcp_port must not be 0".into());
         }
-        if self.mcp_address != "localhost" {
-            self.mcp_address
-                .parse::<std::net::IpAddr>()
-                .map_err(|_| "mcp_address must be a valid IP address (e.g. 127.0.0.1 or 0.0.0.0) or \"localhost\"")?;
+        if self.mcp_address != "localhost" && !valid_bind_address(&self.mcp_address) {
+            return Err(
+                "mcp_address must be a valid IP address (e.g. 127.0.0.1 or 0.0.0.0) or \"localhost\""
+                    .into(),
+            );
         }
         if self.chunk_scan_radius < 1 || self.chunk_scan_radius > 16 {
             return Err(format!(
@@ -319,7 +325,14 @@ impl AppConfig {
     /// app from starting; validation happens where settings are applied.
     pub fn from_env() -> AppConfig {
         let mut config = AppConfig::default();
-        config.mc_address = env_var_or("MINECRAFT_MCP_MC_ADDRESS", config.mc_address);
+        config.mc_address =
+            env_parse_or_validated("MINECRAFT_MCP_MC_ADDRESS", config.mc_address, |s| {
+                if s.is_empty() {
+                    Err("must not be empty".into())
+                } else {
+                    Ok(())
+                }
+            });
         config.mc_port = env_parse_or_validated("MINECRAFT_MCP_MC_PORT", config.mc_port, |v| {
             if *v == 0 {
                 Err("must be greater than 0".into())
@@ -327,8 +340,26 @@ impl AppConfig {
                 Ok(())
             }
         });
-        config.ai_username = env_var_or("MINECRAFT_MCP_AI_USERNAME", config.ai_username);
-        config.mcp_address = env_var_or("MINECRAFT_MCP_MCP_ADDRESS", config.mcp_address);
+        config.ai_username =
+            env_parse_or_validated("MINECRAFT_MCP_AI_USERNAME", config.ai_username, |s| {
+                if s.is_empty() {
+                    Err("must not be empty".into())
+                } else {
+                    Ok(())
+                }
+            });
+        // L-11: a bad bind address used to survive `from_env` and only trip
+        // `main.rs`'s final validate(), which then discarded the ENTIRE env
+        // config. It is now rejected per-field (same rule as validate())
+        // with a warning, keeping every other variable intact.
+        config.mcp_address =
+            env_parse_or_validated("MINECRAFT_MCP_MCP_ADDRESS", config.mcp_address, |s| {
+                if valid_bind_address(s) {
+                    Ok(())
+                } else {
+                    Err("must be a valid IP address or \"localhost\"".into())
+                }
+            });
         config.mcp_port = env_parse_or_validated("MINECRAFT_MCP_MCP_PORT", config.mcp_port, |v| {
             if *v == 0 {
                 Err("must be greater than 0".into())
@@ -450,6 +481,15 @@ impl AppConfig {
 // ---------------------------------------------------------------------------
 // Environment-variable helpers
 // ---------------------------------------------------------------------------
+
+/// Is `address` acceptable for the MCP HTTP bind address?
+///
+/// Mirrors the rule [`AppConfig::validate`] applies (L-11 extracted the
+/// predicate so `from_env`'s per-field check and the final validation gate
+/// can never drift): `localhost` or a parseable [`std::net::IpAddr`].
+fn valid_bind_address(address: &str) -> bool {
+    address == "localhost" || address.parse::<std::net::IpAddr>().is_ok()
+}
 
 /// Read a `String`-typed env var, falling back to `fallback` when unset.
 fn env_var_or(name: &str, fallback: String) -> String {
@@ -640,6 +680,10 @@ mod tests {
         // A JSON payload lacking the `language` field (as written by older
         // binaries before i18n existed) must still deserialize, with the
         // field falling back to its `#[serde(default)]` value.
+        //
+        // L-30: the serde default now matches `AppConfig::default()` (the
+        // system locale) instead of a hardcoded `En` — rewritten to assert
+        // the aligned behaviour so it is robust on Chinese systems too.
         let json = r#"{
             "mc_address": "127.0.0.1",
             "mc_port": 25565,
@@ -657,7 +701,8 @@ mod tests {
             "mcp_transport": "Http"
         }"#;
         let config: AppConfig = serde_json::from_str(json).expect("must deserialize");
-        assert_eq!(config.language, Language::En);
+        assert_eq!(config.language, Language::from_system_locale());
+        assert_eq!(config.language, AppConfig::default().language);
     }
 
     #[test]
@@ -1158,5 +1203,77 @@ mod tests {
         config.fly_timeout_secs = 0;
         let err = config.validate().unwrap_err();
         assert!(err.contains("fly_timeout_secs"), "got: {err}");
+    }
+
+    // -- L-30: language serde default vs AppConfig::default -------------------
+
+    /// A config missing the `language` field must deserialize to the SAME
+    /// value as [`AppConfig::default`] — which follows the system locale —
+    /// not a hardcoded [`Language::En`]. The `#[serde(default)]` on
+    /// `language` previously diverged from `AppConfig::default()`.
+    #[test]
+    fn test_deserialized_absent_language_equals_default_language() {
+        let json = r#"{
+            "mc_address": "127.0.0.1",
+            "mc_port": 25565,
+            "ai_username": "AI_Bot",
+            "mcp_address": "127.0.0.1",
+            "mcp_port": 3000,
+            "task_name": "mining",
+            "chunk_scan_radius": 8,
+            "block_perception_radius": 32,
+            "snapshot_interval_ms": 500,
+            "reconnect_initial_delay_ms": 5000,
+            "reconnect_max_delay_ms": 60000,
+            "command_timeout_secs": 30,
+            "mcp_token": "minecraft-mcp-rs",
+            "mcp_transport": "Http"
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).expect("must deserialize");
+        assert_eq!(config.language, AppConfig::default().language);
+        assert_eq!(config.language, Language::from_system_locale());
+    }
+
+    // -- L-11: per-field string env validation --------------------------------
+
+    /// L-11: a semantically invalid string env var (bad `mcp_address`) must
+    /// be rejected PER-FIELD inside `from_env`, keeping the OTHER variables
+    /// and never degrading the whole config to defaults — which is what
+    /// happened before, because the bad value survived `from_env` and only
+    /// `main.rs`'s final `validate()` (replacing the ENTIRE config with
+    /// defaults) caught it.
+    #[test]
+    fn test_from_env_bad_mcp_address_keeps_other_variables() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = [
+            EnvGuard::set("MINECRAFT_MCP_MCP_ADDRESS", "not-an-ip"),
+            EnvGuard::set("MINECRAFT_MCP_MC_PORT", "25566"),
+        ];
+        let config = AppConfig::from_env();
+        assert_eq!(config.mc_port, 25566, "valid sibling variable must survive");
+        assert_eq!(
+            config.mcp_address,
+            AppConfig::default().mcp_address,
+            "bad mcp_address must fall back to the default"
+        );
+        assert!(
+            config.validate().is_ok(),
+            "per-field fallback must leave a fully valid config"
+        );
+    }
+
+    /// Empty `mc_address` / `ai_username` are rejected per-field (mirroring
+    /// [`AppConfig::validate`]) and fall back to their defaults.
+    #[test]
+    fn test_from_env_empty_mc_address_falls_back() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = [
+            EnvGuard::set("MINECRAFT_MCP_MC_ADDRESS", ""),
+            EnvGuard::set("MINECRAFT_MCP_AI_USERNAME", ""),
+        ];
+        let config = AppConfig::from_env();
+        assert_eq!(config.mc_address, AppConfig::default().mc_address);
+        assert_eq!(config.ai_username, AppConfig::default().ai_username);
+        assert!(config.validate().is_ok());
     }
 }

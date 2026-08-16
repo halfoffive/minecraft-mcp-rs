@@ -27,6 +27,48 @@ pub fn success_rate(processed: u64, succeeded: u64) -> Option<f64> {
     Some(rate.clamp(0.0, 100.0))
 }
 
+/// Cache of the last chat messages rendered by the status panel (L-20).
+///
+/// [`SharedState::get_chat_messages`] clones every `(sender, message)` pair
+/// (up to the 50-message cap) — paying for that on every frame was wasteful
+/// when nothing new arrived. The cache stores the chat cursor it was built
+/// from; when the cursor advances, the messages are re-fetched exactly once.
+#[derive(Debug, Clone, Default)]
+pub struct ChatCache {
+    /// `SharedState::chat_cursor()` of the last fetch (`None` = never
+    /// fetched — the first `get` always fetches, even for an empty history
+    /// whose cursor is 0).
+    cursor: Option<u64>,
+    /// The cloned messages shown by the panel.
+    messages: Vec<(String, String)>,
+    /// Number of fetches performed (test diagnostic proving reuse).
+    fetches: u64,
+}
+
+impl ChatCache {
+    /// Create an empty chat cache (first `get` always fetches).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the chat messages to render, re-fetching from `state` only
+    /// when the chat cursor advanced past the cached cursor.
+    pub fn get(&mut self, state: &Arc<SharedState>) -> &[(String, String)] {
+        let cursor = state.chat_cursor();
+        if self.cursor != Some(cursor) {
+            self.cursor = Some(cursor);
+            self.messages = state.get_chat_messages();
+            self.fetches += 1;
+        }
+        &self.messages
+    }
+
+    /// Number of fetches performed (0 before the first `get`).
+    pub fn fetches(&self) -> u64 {
+        self.fetches
+    }
+}
+
 /// Render the status panel.
 ///
 /// Displays:
@@ -36,14 +78,16 @@ pub fn success_rate(processed: u64, succeeded: u64) -> Option<f64> {
 /// - Player information (position, health, hunger, gamemode)
 /// - World stats (blocks, entities, chunks loaded)
 /// - Command counters (processed, succeeded, failed)
-/// - Last 10 chat messages
-pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
+/// - Last 50 chat messages
+pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>, chat_cache: &mut ChatCache) {
     let (is_online, is_connecting) = (state.is_online(), state.is_connecting());
     let snapshot = state.read_snapshot();
     // Read connected_since under the lock, then drop the guard immediately.
     // The atomic counters (commands_processed etc.) don't need the lock.
     let connected_since = state.read_run_stats().connected_since;
-    let chat = state.get_chat_messages();
+    // L-20: reuse the cached messages while the chat cursor is unchanged
+    // instead of cloning all 50 pairs every frame.
+    let chat = chat_cache.get(state);
 
     // ── Last Error ────────────────────────────────────────────────────
     // Display a prominent red banner if the bot/MCP layer has reported an
@@ -249,7 +293,7 @@ pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
             egui::ScrollArea::vertical()
                 .max_height(200.0)
                 .show(ui, |ui| {
-                    for (sender, message) in &chat {
+                    for (sender, message) in chat {
                         // Chat line format "<sender> message" is universal
                         // across languages; left untranslated on purpose.
                         ui.monospace(format!("<{sender}> {message}"));
@@ -265,7 +309,10 @@ pub fn status_panel(ui: &mut Ui, state: &Arc<SharedState>) {
 
 #[cfg(test)]
 mod tests {
-    use super::success_rate;
+    use super::*;
+    use crate::config::AppConfig;
+    use crate::state::SharedState;
+    use std::sync::Arc;
 
     /// No processed commands → no rate (UI omits the line).
     #[test]
@@ -292,5 +339,49 @@ mod tests {
     fn test_success_rate_clamps_over_100() {
         let rate = success_rate(2, 5).expect("rate exists");
         assert!(rate <= 100.0);
+    }
+
+    // -- Chat cache (L-20) ----------------------------------------------------
+
+    /// L-20: the status panel cloned all 50 chat messages every frame. The
+    /// cache reuses the cloned messages while the chat cursor is unchanged
+    /// and refetches exactly once when it advances.
+    #[test]
+    fn test_status_chat_cache_reuses_on_same_cursor() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        state.add_chat_message("Alice".into(), "hello".into());
+
+        let mut cache = ChatCache::new();
+        {
+            let first = cache.get(&state);
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0], ("Alice".into(), "hello".into()));
+        }
+        assert_eq!(cache.fetches(), 1);
+
+        // Same cursor → no refetch (this is the per-frame hot path).
+        {
+            let second = cache.get(&state);
+            assert_eq!(second.len(), 1);
+        }
+        assert_eq!(cache.fetches(), 1, "same cursor must reuse the cache");
+
+        // New message advances the cursor → exactly one refetch.
+        state.add_chat_message("Bob".into(), "world".into());
+        {
+            let third = cache.get(&state);
+            assert_eq!(third.len(), 2);
+        }
+        assert_eq!(cache.fetches(), 2);
+    }
+
+    /// An empty chat history is handled: one initial fetch, then cache hits.
+    #[test]
+    fn test_status_chat_cache_empty_history() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let mut cache = ChatCache::new();
+        assert!(cache.get(&state).is_empty());
+        assert!(cache.get(&state).is_empty());
+        assert_eq!(cache.fetches(), 1);
     }
 }

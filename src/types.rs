@@ -376,7 +376,7 @@ pub struct SelfPlayer {
     /// the up-to-1-block truncation bias of `position`.
     #[serde(skip)]
     pub position_precise: Option<[f64; 3]>,
-    /// Horizontal look direction in radians (Minecraft convention).
+    /// Horizontal look direction in degrees (Minecraft convention, −180..180).
     ///
     /// Populated by [`SnapshotUpdater`](crate::bot::snapshot_updater::SnapshotUpdater)
     /// from `azalea::entity::metadata::Player`. Used by the top-down

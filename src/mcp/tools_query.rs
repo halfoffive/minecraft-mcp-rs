@@ -9,7 +9,7 @@
 //! dropped an item / moved / teleported sees the fresh state instead of a
 //! 500 ms-stale snapshot.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -141,14 +141,15 @@ pub struct NearbyBlocksInput {
     pub top_only: bool,
     /// Maximum number of blocks to return. The response reports
     /// `truncated: true` when the match count exceeds this cap (default 500).
-    #[serde(default = "default_max_blocks")]
+    #[serde(default = "default_max_payload")]
     #[schemars(range(min = 1, max = 10000))]
     pub max_blocks: u32,
 }
 
 /// Serde default: cap the response at 500 blocks so a large radius can
-/// never flood the LLM context (the historical 340 KB response).
-fn default_max_blocks() -> u32 {
+/// never flood the LLM context (the historical 340 KB response). Shared by
+/// `get_nearby_blocks` and `get_nearby_entities`.
+fn default_max_payload() -> u32 {
     500
 }
 
@@ -158,7 +159,45 @@ pub struct NearbyEntitiesInput {
     /// Chebyshev (square) radius around the bot to search. Range: 1..=100.
     #[schemars(range(min = 1, max = 100))]
     pub radius: u32,
+    /// Maximum number of entities to return. The response reports
+    /// `truncated: true` when the match count exceeds this cap (default 500).
+    #[serde(default = "default_max_payload")]
+    #[schemars(range(min = 1, max = 10000))]
+    pub max_entities: u32,
 }
+
+// ---------------------------------------------------------------------------
+// get_nearby_blocks — single-entry response cache (L-17)
+// ---------------------------------------------------------------------------
+
+/// One cached [`get_nearby_blocks`] response: the request parameters plus the
+/// snapshot revision it was computed from, and the serialized response.
+///
+/// The key includes `snapshot_seq` (monotonic, bumped on every
+/// `update_snapshot` / `modify_snapshot`) rather than `timestamp`
+/// (seconds-granularity, can repeat for two consecutive 500 ms builds).
+struct NearbyBlocksCache {
+    snapshot_seq: u64,
+    radius: u32,
+    /// The normalized (lowercased, empty→None) filter the response was
+    /// computed with.
+    filter_type: Option<String>,
+    top_only: bool,
+    max_blocks: u32,
+    response: String,
+}
+
+/// File-local single-entry cache for [`get_nearby_blocks`].
+///
+/// `get_nearby_blocks` is hot (an LLM probing a scene re-queries it
+/// repeatedly), and every call used to re-scan the whole snapshot (~230k
+/// blocks at a large radius) plus an O(n log n) `top_only` sort — while
+/// `get_world_view` already caches its render. Keyed on
+/// `(snapshot_seq, radius, filter_type, top_only, max_blocks)` so a cache
+/// hit is byte-identical to a fresh compute. Single entry keeps memory
+/// bounded. Poisoning recovery per project convention.
+static NEARBY_BLOCKS_CACHE: LazyLock<Mutex<Option<NearbyBlocksCache>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 /// Get blocks near the bot within the given Chebyshev (square) radius.
 ///
@@ -196,14 +235,38 @@ pub fn get_nearby_blocks(
     let center = snapshot.self_player.position;
     let r = clamp_to_i32(radius);
 
-    // Pre-compute the lowercased filter once outside the hot closure so we
-    // don't allocate a new `String` per block when filtering thousands of
-    // nearby blocks. The per-block match uses the non-allocating ASCII
-    // substring helper (block ids are pure ASCII).
-    let ft_lower = filter_type
+    // Normalize the filter once, before both the cache lookup and the scan:
+    // empty behaves as None and matching is case-insensitive, so `None`,
+    // `Some("")`, `Some("stone")` and `Some("Stone")` are the same request
+    // and must share one cache entry. The per-block match uses the
+    // non-allocating ASCII substring helper (block ids are pure ASCII).
+    let ft_key: Option<String> = filter_type
         .as_deref()
         .filter(|ft| !ft.is_empty())
         .map(|ft| ft.to_lowercase());
+
+    // L-17 cache hit: same snapshot revision + parameters → the stored
+    // response is byte-identical to a fresh compute; skip the full-snapshot
+    // scan and the top_only sort.
+    {
+        let cache = NEARBY_BLOCKS_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = cache.as_ref()
+            && entry.snapshot_seq == snapshot.snapshot_seq
+            && entry.radius == radius
+            && entry.filter_type == ft_key
+            && entry.top_only == top_only
+            && entry.max_blocks == max_blocks
+        {
+            tracing::trace!(
+                snapshot_seq = snapshot.snapshot_seq,
+                radius,
+                "get_nearby_blocks cache hit"
+            );
+            return Ok(entry.response.clone());
+        }
+    }
 
     let mut matched: Vec<&crate::types::BlockEntry> = snapshot
         .blocks
@@ -213,7 +276,7 @@ pub fn get_nearby_blocks(
                 && (b.position.y - center.y).abs() <= r
                 && (b.position.z - center.z).abs() <= r
         })
-        .filter(|b| match &ft_lower {
+        .filter(|b| match &ft_key {
             Some(ft) => crate::utils::contains_ascii_case_insensitive(&b.block_type, ft),
             None => true,
         })
@@ -250,15 +313,54 @@ pub fn get_nearby_blocks(
         "truncated": truncated,
         "top_only": top_only,
     });
-    serde_json::to_string(&response)
-        .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
+    let response_str = serde_json::to_string(&response)
+        .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))?;
+
+    // L-17: store for the next identical call (single entry, last write
+    // wins under concurrency — the response is deterministic per key).
+    *NEARBY_BLOCKS_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(NearbyBlocksCache {
+        snapshot_seq: snapshot.snapshot_seq,
+        radius,
+        filter_type: ft_key,
+        top_only,
+        max_blocks,
+        response: response_str.clone(),
+    });
+
+    Ok(response_str)
 }
 
 /// Get entities near the bot within the given Chebyshev (square) radius.
+///
+/// Convenience wrapper over [`get_nearby_entities_capped`] with the default
+/// 500-entity payload cap (kept for callers that do not need to tune the
+/// cap, e.g. integration tests).
 pub fn get_nearby_entities(state: &Arc<SharedState>, radius: u32) -> Result<String, BotError> {
+    get_nearby_entities_capped(state, radius, default_max_payload())
+}
+
+/// Get entities near the bot within the given Chebyshev (square) radius.
+///
+/// `max_entities` caps the response (with `truncated: true` reported when
+/// the cap is hit) so a large radius can never flood the LLM context —
+/// mirroring `get_nearby_blocks`' `max_blocks` handling (R-11).
+///
+/// The response is an object: `{entities, count, truncated}`.
+pub fn get_nearby_entities_capped(
+    state: &Arc<SharedState>,
+    radius: u32,
+    max_entities: u32,
+) -> Result<String, BotError> {
     if !(1..=100).contains(&radius) {
         return Err(BotError::InvalidParams(format!(
             "radius must be in range 1..=100, got {radius}"
+        )));
+    }
+    if !(1..=10000).contains(&max_entities) {
+        return Err(BotError::InvalidParams(format!(
+            "max_entities must be in range 1..=10000, got {max_entities}"
         )));
     }
     if !state.is_online() {
@@ -268,7 +370,7 @@ pub fn get_nearby_entities(state: &Arc<SharedState>, radius: u32) -> Result<Stri
     let center = snapshot.self_player.position;
     let r = clamp_to_i32(radius);
 
-    let entities: Vec<&crate::types::EntityEntry> = snapshot
+    let mut entities: Vec<&crate::types::EntityEntry> = snapshot
         .entities
         .iter()
         .filter(|e| {
@@ -278,7 +380,20 @@ pub fn get_nearby_entities(state: &Arc<SharedState>, radius: u32) -> Result<Stri
         })
         .collect();
 
-    serde_json::to_string(&entities)
+    // Cap the response; report truncation honestly so the caller can shrink
+    // the radius instead of reasoning about a partial list that looks
+    // complete.
+    let truncated = entities.len() > max_entities as usize;
+    if truncated {
+        entities.truncate(max_entities as usize);
+    }
+
+    let response = serde_json::json!({
+        "entities": entities,
+        "count": entities.len(),
+        "truncated": truncated,
+    });
+    serde_json::to_string(&response)
         .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
 }
 
@@ -355,6 +470,14 @@ pub async fn get_server_info(
     .to_string())
 }
 
+/// How long the `/seed` commands probe waits for the executor to reply.
+///
+/// The probe only needs to know whether the server accepted the command —
+/// it must NOT block behind a busy executor for the full 30 s command
+/// timeout: `give_item` / `get_server_info(refresh)` would otherwise stall
+/// for half a minute whenever another command is running (L-18).
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Run a live `/seed` command-availability probe and cache the result.
 ///
 /// The single source of truth for "can this bot run commands": every tool
@@ -367,13 +490,25 @@ pub async fn get_server_info(
 /// Probe outcome: `Some(true)` accepted, `Some(false)` rejected, `None`
 /// unknown (timeout / offline mid-probe / no feedback — the previous cached
 /// value is preserved). The result is cached in [`SharedState`] via
-/// `set_commands_probe` and merged into every snapshot build.
+/// `set_commands_probe` and merged into every snapshot build. The probe
+/// envelope is bounded at [`PROBE_TIMEOUT`], so a busy executor yields a
+/// timeout that preserves the previous value instead of a 30 s stall.
 pub(crate) async fn probe_commands_enabled(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
 ) -> Option<bool> {
+    probe_commands_enabled_with_timeout(state, sender, PROBE_TIMEOUT).await
+}
+
+/// The probe logic with an explicit envelope timeout (unit-testable with a
+/// short duration; production uses [`PROBE_TIMEOUT`]).
+async fn probe_commands_enabled_with_timeout(
+    state: &Arc<SharedState>,
+    sender: &BotCommandSender,
+    timeout: Duration,
+) -> Option<bool> {
     let probe = match sender
-        .send_command(BotCommand::ExecuteCommand("/seed".into()))
+        .send_command_with_timeout(BotCommand::ExecuteCommand("/seed".into()), timeout)
         .await
     {
         Ok(_) => Some(true),
@@ -502,8 +637,9 @@ pub struct GetWorldViewInput {
     /// unsupported values fall back to `1` (legacy 1-pixel-per-block
     /// render). Defaults to `1` so existing clients see no change.
     ///
-    /// The image dimensions are `(2*radius+1) * scale` per side — for
-    /// example `radius=8, scale=4` produces a `68 * 4 = 272x272` PNG.
+    /// The image dimensions are `(2*radius+1) * scale` pixels per side —
+    /// for example `radius=8, scale=4` produces a `(2*8+1) * 4 = 68x68`
+    /// PNG.
     #[serde(default)]
     #[schemars(range(min = 1, max = 8))]
     pub scale: u8,
@@ -958,8 +1094,23 @@ mod tests {
     fn test_get_nearby_entities_radius_1() {
         let state = state_with_snapshot();
         let result = get_nearby_entities(&state, 1).unwrap();
-        assert!(result.contains("zombie"));
-        assert!(!result.contains("creeper")); // creeper at (100,64,0) is far
+        // L-13 (rewritten from the bare-array assertions): the response is an
+        // OBJECT `{entities, count, truncated}` mirroring get_nearby_blocks
+        // (R-11), so the assertions must parse the object rather than scan
+        // the raw JSON string for a bare array.
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let entities = v["entities"]
+            .as_array()
+            .expect("entities must be a JSON array inside the object");
+        let joined = entities
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(joined.contains("zombie"));
+        assert!(!joined.contains("creeper")); // creeper at (100,64,0) is far
+        assert_eq!(v["count"], json!(1));
+        assert_eq!(v["truncated"], json!(false));
     }
 
     #[test]
@@ -968,8 +1119,19 @@ mod tests {
         // radius = 100 (the maximum allowed by runtime validation) still
         // catches both nearby and far entities.
         let result = get_nearby_entities(&state, 100).unwrap();
-        assert!(result.contains("zombie"));
-        assert!(result.contains("creeper"));
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let entities = v["entities"]
+            .as_array()
+            .expect("entities must be a JSON array inside the object");
+        let joined = entities
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(joined.contains("zombie"));
+        assert!(joined.contains("creeper"));
+        assert_eq!(v["count"], json!(2));
+        assert_eq!(v["truncated"], json!(false));
     }
 
     #[test]
@@ -977,6 +1139,185 @@ mod tests {
         let state = offline_state();
         let result = get_nearby_entities(&state, 10);
         assert!(matches!(result, Err(BotError::Offline(_))));
+    }
+
+    // -- L-13: object shape with max_entities cap ----------------------------
+
+    #[test]
+    fn test_get_nearby_entities_object_shape_with_truncation() {
+        let state = state_with_snapshot();
+        // radius 100 catches both entities; max_entities=1 caps the payload
+        // and must set truncated:true honestly.
+        let result = get_nearby_entities_capped(&state, 100, 1).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(
+            v.get("entities").is_some(),
+            "response must be an object with entities, got: {result}"
+        );
+        assert_eq!(v["count"], json!(1), "count must be capped, got: {result}");
+        assert_eq!(v["truncated"], json!(true), "got: {result}");
+        assert_eq!(v["entities"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_get_nearby_entities_invalid_max_entities_rejected() {
+        let state = state_with_snapshot();
+        let result = get_nearby_entities_capped(&state, 5, 0);
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("max_entities")),
+            "expected InvalidParams for max_entities=0, got: {result:?}"
+        );
+        let result = get_nearby_entities_capped(&state, 5, 10001);
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("max_entities")),
+            "expected InvalidParams for max_entities=10001, got: {result:?}"
+        );
+    }
+
+    // -- L-17: get_nearby_blocks single-entry cache --------------------------
+
+    /// Serializes the two nearby-blocks cache tests: they deliberately plant
+    /// entries under the same file-local cache key, so they must not
+    /// interleave with each other (other tests use distinct keys and are
+    /// unaffected).
+    static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_get_nearby_blocks_cache_hit_on_same_seq_and_params() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let state = state_with_snapshot();
+        let seq = state.read_snapshot().snapshot_seq;
+        // Plant a deliberately WRONG entry under the request's key: if the
+        // handler serves it verbatim, the cache is genuinely consulted (a
+        // recompute would return the real data). Radius 7 + filter "stone"
+        // is a key no other test uses (the stone block at (0,64,0) lies
+        // inside radius 7 of the centre).
+        *NEARBY_BLOCKS_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(NearbyBlocksCache {
+            snapshot_seq: seq,
+            radius: 7,
+            filter_type: Some("stone".into()),
+            top_only: false,
+            max_blocks: 500,
+            response: "CACHED-PLANT".into(),
+        });
+        let result = get_nearby_blocks(&state, 7, Some("stone".into()), false, 500).unwrap();
+        assert_eq!(
+            result, "CACHED-PLANT",
+            "same snapshot_seq + params must be served from the cache"
+        );
+
+        // After clearing the cache the same call recomputes the real data.
+        *NEARBY_BLOCKS_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        let fresh = get_nearby_blocks(&state, 7, Some("stone".into()), false, 500).unwrap();
+        assert_ne!(fresh, "CACHED-PLANT");
+        assert!(fresh.contains("stone"));
+    }
+
+    #[test]
+    fn test_get_nearby_blocks_cache_invalidates_on_seq_change() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let state = state_with_snapshot();
+        let seq = state.read_snapshot().snapshot_seq;
+        *NEARBY_BLOCKS_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(NearbyBlocksCache {
+            snapshot_seq: seq,
+            radius: 7,
+            filter_type: Some("stone".into()),
+            top_only: false,
+            max_blocks: 500,
+            response: "STALE-PLANT".into(),
+        });
+        // Re-store the SAME content (identical timestamp): only the
+        // monotonic snapshot_seq changes. A cache keyed on timestamp would
+        // wrongly serve the stale entry.
+        let snap = state.read_snapshot().as_ref().clone();
+        state.update_snapshot(snap);
+        assert_ne!(
+            state.read_snapshot().snapshot_seq,
+            seq,
+            "update_snapshot must bump snapshot_seq"
+        );
+        let result = get_nearby_blocks(&state, 7, Some("stone".into()), false, 500).unwrap();
+        assert_ne!(
+            result, "STALE-PLANT",
+            "snapshot_seq change must invalidate the cache"
+        );
+        assert!(result.contains("stone"));
+    }
+
+    // -- L-18: probe envelope timeout ----------------------------------------
+
+    /// A probe whose responder never replies must NOT hang for the 30 s
+    /// command timeout: the short envelope (50 ms here) fires CommandTimeout,
+    /// and the probe must preserve the previous cached value (Some(true)),
+    /// never flip it to Some(false) and never surface an error.
+    #[tokio::test]
+    async fn test_probe_uses_short_timeout() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        state.set_online(true);
+        state.set_commands_probe(Some(true));
+
+        let (sender, mut receiver) = crate::channel::create_command_channel(4, Arc::clone(&state));
+        // Responder that accepts the probe but never replies (a busy
+        // executor stuck behind a long-running action).
+        let hold = tokio::spawn(async move {
+            while let Some(wrapped) = receiver.recv().await {
+                drop(wrapped); // accepted, never answered
+            }
+        });
+
+        let start = std::time::Instant::now();
+        let probe =
+            probe_commands_enabled_with_timeout(&state, &sender, Duration::from_millis(50)).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            probe,
+            Some(true),
+            "timeout must preserve the previous cached value, got: {probe:?}"
+        );
+        assert_eq!(
+            state.get_commands_probe(),
+            Some(true),
+            "cache must be unchanged"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "probe must not block for the 30 s command timeout, took {elapsed:?}"
+        );
+        hold.abort();
+    }
+
+    // -- L-24: image_size contract the corrected prose describes -------------
+
+    #[test]
+    fn test_get_world_view_annotation_image_size_matches_doc() {
+        let state = state_with_snapshot();
+        let contents = get_world_view(&state, 8, 4).unwrap();
+        match &contents[1].raw {
+            rmcp::model::RawContent::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t.text).unwrap();
+                assert_eq!(
+                    v["image_size"],
+                    json!(68),
+                    "radius=8, scale=4 must be (2*8+1)*4 = 68 px per side (L-24 doc contract)"
+                );
+            }
+            other => panic!("expected Text content, got: {other:?}"),
+        }
+        let contents = get_world_view(&state, 8, 1).unwrap();
+        match &contents[1].raw {
+            rmcp::model::RawContent::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t.text).unwrap();
+                assert_eq!(v["image_size"], json!(17), "scale=1 must be 17 px per side");
+            }
+            other => panic!("expected Text content, got: {other:?}"),
+        }
     }
 
     // -- get_chunk_summary -----------------------------------------------------
