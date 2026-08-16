@@ -155,6 +155,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`get_nearby_blocks` enforces `max_blocks` at runtime:** values outside
   `1..=10000` now return `InvalidParams` instead of silently truncating or
   trying to return everything.
+- **`execute_command` rejection detection survives a full chat queue:**
+  the feedback diff used the deque length as its baseline, so once the
+  queue hit its cap every new message looked "before the baseline" and
+  rejected commands were reported as successes (real sessions always had a
+  full queue; unit tests never did). Chat messages now carry monotonic
+  sequence numbers and the baseline is a cursor, so the scan is correct
+  even when the deque is full. The chat cap was raised from 10 to 50.
+- **`teleport` actually teleports (via `/tp`):** it previously mutated the
+  local ECS `Position` component and reported success, but the server
+  re-syncs the authoritative position every tick, so the bot never moved.
+  It now sends `/tp x y z` and verifies the server reply — a rejected
+  command (no OP) surfaces `CommandRejected` instead of a fake success.
+  `fly_to`'s vertical landing leg uses the same server-authoritative
+  teleport instead of the local position mutation.
+- **`get_world_view` annotation counts are view-scoped:** `block_count` /
+  `entity_count` reported the whole snapshot (hundreds of thousands of
+  blocks for a 9-block viewport). The renderer now returns the distinct
+  visible block columns and in-radius entities it actually drew, and the
+  cache stores them so a cache hit returns the same numbers.
+- **`place_block` names the placed block:** the result message previously
+  read `Placed 3 at ...` (the hotbar slot). The MCP layer now resolves the
+  item id from the inventory snapshot and reports `Placed stone at ...`;
+  an empty slot is reported honestly as `(empty slot)`.
+- **Headless idle watchdog keys on MCP requests, not bot commands:** a
+  client host that spawns per-session connections and sends
+  initialize/list_tools without ever dispatching a bot command (e.g. ZCode
+  probe connections) was killed after 600 s, surfacing as "MCP server
+  connection closed unexpectedly". `initialize` / `ping` / `list_tools` /
+  `call_tool` now stamp MCP-request activity and the watchdog uses that.
+- **`act` with `perception_radius=0` returns no nearby context:** the
+  `<= 0` filter previously kept entities/blocks sharing the player's own
+  cell, contradicting the documented "0 returns no nearby context at all".
 
 ## [1.3.1-rc.1] - 2026-08-15
 

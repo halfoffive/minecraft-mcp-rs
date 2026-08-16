@@ -84,7 +84,9 @@ pub struct TakeFromContainerInput {
     /// have 54 slots (0-53).
     #[schemars(range(min = 0, max = 53))]
     pub slot: u8,
-    /// Number of items to take (default 1).
+    /// Number of items to take (default 1). NOTE: this is a HINT — the
+    /// underlying container click moves the whole stack (shift-click), so
+    /// the actual amount transferred may exceed `count`.
     #[schemars(range(min = 1, max = 64))]
     pub count: Option<u8>,
 }
@@ -139,7 +141,9 @@ pub struct PutIntoContainerInput {
     /// have 54 slots (0-53).
     #[schemars(range(min = 0, max = 53))]
     pub slot: u8,
-    /// Number of items to put (default 1).
+    /// Number of items to put (default 1). NOTE: this is a HINT — the
+    /// underlying container click moves the whole stack (shift-click), so
+    /// the actual amount transferred may exceed `count`.
     #[schemars(range(min = 1, max = 64))]
     pub count: Option<u8>,
 }

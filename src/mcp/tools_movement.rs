@@ -195,12 +195,14 @@ pub async fn handle_teleport(
         ));
     }
 
-    // Teleport requires Creative mode (or operator permissions)
+    // Teleport routes through the server-authoritative `/tp` command, which
+    // requires operator permissions (creative mode alone is not enough on a
+    // vanilla server).
     {
         let snap = state.read_snapshot();
         if snap.self_player.gamemode != GameMode::Creative {
             return Err(BotError::PermissionDenied(
-                "Teleport requires Creative mode".to_string(),
+                "Teleport requires Creative mode (and /tp command access / OP)".to_string(),
             ));
         }
     }

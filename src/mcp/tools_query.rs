@@ -592,7 +592,8 @@ pub fn get_world_view(
         scale,
         "get_world_view cache miss — re-rendering"
     );
-    let png_bytes = crate::mcp::render::render_topdown_enhanced(&snapshot, radius, scale)?;
+    let (png_bytes, block_count, entity_count) =
+        crate::mcp::render::render_topdown_enhanced(&snapshot, radius, scale)?;
     let encoded = crate::mcp::render::base64_encode(&png_bytes);
 
     // Build the JSON annotation. Carries enough metadata for a multimodal
@@ -614,8 +615,12 @@ pub fn get_world_view(
         "yaw": snapshot.self_player.yaw,
         "snapshot_timestamp": snapshot_ts,
         "image_size": ((2 * radius as u32 + 1) * scale.max(1) as u32),
-        "block_count": snapshot.blocks.len(),
-        "entity_count": snapshot.entities.len(),
+        // Counts are what the rendered image actually shows (distinct block
+        // columns + entities inside `radius`), NOT the whole snapshot —
+        // the snapshot holds hundreds of thousands of blocks far beyond
+        // any viewport.
+        "block_count": block_count,
+        "entity_count": entity_count,
     });
     let annotation_json = annotation.to_string();
 
@@ -625,6 +630,8 @@ pub fn get_world_view(
         radius,
         scale,
         png_base64: encoded.clone(),
+        block_count,
+        entity_count,
         annotation_json: annotation_json.clone(),
     });
 
@@ -1182,6 +1189,59 @@ mod tests {
                 assert!(parsed["snapshot_timestamp"].is_u64());
             }
             other => panic!("expected Text content, got: {other:?}"),
+        }
+    }
+
+    /// The annotation counts must describe the VIEW, not the whole snapshot.
+    /// Regression: they used to be `snapshot.blocks.len()` /
+    /// `snapshot.entities.len()` — 3 blocks / 2 entities here, but radius=1
+    /// only shows 1 block column and 1 entity.
+    #[test]
+    fn test_get_world_view_annotation_counts_are_view_scoped() {
+        let state = state_with_snapshot();
+        let contents = get_world_view(&state, 1, 1).unwrap();
+        match &contents[1].raw {
+            rmcp::model::RawContent::Text(text) => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&text.text).expect("annotation should be valid JSON");
+                // Centre (0,64,0), radius 1: (0,64,0)+(0,65,0) share a column
+                // (1 column), diamond_ore at x=10 is out of view, zombie at
+                // (1,64,0) is in view, creeper at x=100 is out.
+                assert_eq!(
+                    parsed["block_count"], 1,
+                    "annotation block_count must be view-scoped, got: {parsed}"
+                );
+                assert_eq!(
+                    parsed["entity_count"], 1,
+                    "annotation entity_count must be view-scoped, got: {parsed}"
+                );
+            }
+            other => panic!("expected Text content, got: {other:?}"),
+        }
+    }
+
+    /// A cache hit must return the same view-scoped counts as a fresh render
+    /// (the counts are part of the cached annotation).
+    #[test]
+    fn test_get_world_view_cache_hit_preserves_view_counts() {
+        let state = state_with_snapshot();
+        let first = get_world_view(&state, 1, 1).unwrap();
+        let second = get_world_view(&state, 1, 1).unwrap();
+        match (&first[1].raw, &second[1].raw) {
+            (rmcp::model::RawContent::Text(a), rmcp::model::RawContent::Text(b)) => {
+                let ja: serde_json::Value = serde_json::from_str(&a.text).expect("valid JSON");
+                let jb: serde_json::Value = serde_json::from_str(&b.text).expect("valid JSON");
+                assert_eq!(
+                    ja["block_count"], jb["block_count"],
+                    "cache hit must preserve block_count"
+                );
+                assert_eq!(
+                    ja["entity_count"], jb["entity_count"],
+                    "cache hit must preserve entity_count"
+                );
+                assert_eq!(ja["block_count"], 1);
+            }
+            other => panic!("expected two text contents, got: {other:?}"),
         }
     }
 

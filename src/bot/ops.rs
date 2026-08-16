@@ -957,8 +957,6 @@ mod tests {
 
         fn swap_hotbar(&self, _source_menu_slot: u16, _target_hotbar_slot: u8) {}
 
-        fn teleport(&self, _pos: &BlockPos) {}
-
         fn switch_hotbar_slot(&self, slot: u8) {
             let snap = (*self.state.read_snapshot()).clone();
             self.state.update_snapshot(WorldSnapshot {
