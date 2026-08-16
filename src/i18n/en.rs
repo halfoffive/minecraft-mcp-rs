@@ -1,9 +1,9 @@
 //! English (US) source strings for the UI i18n layer.
 //!
 //! This is the **canonical** language: every [`TextKey`]
-//! variant maps to a literal here, and the catch-all arm falls back to
-//! [`super::key_name`] so the function is total even if a new variant is
-//! added before this file is updated.
+//! variant maps to a literal here. The match is exhaustive with **no
+//! catch-all arm** — adding a [`TextKey`] variant fails to COMPILE until it
+//! is translated in this file (the compile-time completeness guard).
 //!
 //! Strings include any trailing punctuation (colons, ellipses) so they
 //! render identically to the pre-i18n English UI.
@@ -12,10 +12,11 @@ use super::TextKey;
 
 /// Translate `key` to English.
 ///
-/// Returns a static English string.  The catch-all arm guarantees totality:
-/// any unrecognised key surfaces its variant name rather than panicking.
+/// Returns a static English string. The match is exhaustive — a new
+/// [`TextKey`] variant must be added here (and in `zh_cn::lookup`) before
+/// the crate compiles.
 pub(crate) fn lookup(key: TextKey) -> &'static str {
-    #[allow(unreachable_patterns)] // keep catch-all for future TextKey variants
+    // compile-time exhaustiveness guard: no catch-all
     match key {
         // ── Top-level / section headings ───────────────────────────────
         TextKey::AppTitle => "Minecraft MCP Server",
@@ -129,9 +130,6 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::WorldViewPlaceholder => {
             "No render cached yet — click Refresh to render the current snapshot."
         }
-
-        // ── Catch-all: never panic, surface the variant name ───────────
-        _ => super::key_name(key),
     }
 }
 
@@ -154,9 +152,10 @@ mod tests {
         assert_eq!(lookup(TextKey::LangEn), "English");
     }
 
-    /// The catch-all arm is reachable for variants that exist on the enum
-    /// but were accidentally omitted from the match — simulate by passing
-    /// every defined variant; none should panic.
+    /// Every defined variant resolves to a non-empty string. (Exhaustiveness
+    /// itself is enforced at compile time by the missing catch-all arm; this
+    /// test additionally guards against accidentally translating a key to an
+    /// empty string.)
     #[test]
     fn test_lookup_total_for_all_variants() {
         // Iterate over every TextKey we know about.  This is a hand-rolled
