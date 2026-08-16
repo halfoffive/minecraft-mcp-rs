@@ -882,10 +882,23 @@ impl<B: BotActions> CommandExecutor<B> {
                     return Err(BotError::Offline("disconnected during movement".into()));
                 }
 
+                // R-12: report where the bot actually ended up. Prefer the
+                // zero-wait live position component — the throttled snapshot
+                // can lag a just-finished move by one interval (5 s when
+                // idle) — and fall back to the snapshot when unavailable.
+                let live_position = self.bot.position();
+                let end_pos = live_position
+                    .map(|[x, y, z]| {
+                        BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32)
+                    })
+                    .unwrap_or_else(|| self.state.read_snapshot().self_player.position);
+
                 Ok(BotResult {
                     success: true,
                     message: format!("Walking {:?} for {} blocks", dir, distance),
-                    data: None,
+                    data: Some(serde_json::json!({
+                        "position": [end_pos.x, end_pos.y, end_pos.z],
+                    })),
                 })
             }
             None => {
@@ -896,7 +909,7 @@ impl<B: BotActions> CommandExecutor<B> {
                 // INVALID_PARAMS response with actionable guidance.
                 Err(BotError::InvalidParams(format!(
                     "direction {dir:?} is not supported for distance-based movement; \
-                     use north/south/east/west"
+                     use north/south/east/west or a diagonal"
                 )))
             }
         }
@@ -2308,13 +2321,15 @@ struct ObstacleInfo {
     position: BlockPos,
 }
 
-/// Case-insensitive prefix match against the server's known command-rejection
-/// messages (vanilla and common plugin servers).
+/// Case-insensitive substring match against the server's known
+/// command-rejection messages (vanilla and common plugin servers).
 fn is_command_rejection(feedback: &str) -> bool {
     const PATTERNS: &[&str] = &[
         "incorrect argument for command",
         "unknown or incomplete command",
         "unknown command",
+        "unknown item",
+        "no such item",
         "you do not have permission to use this command",
         "you are not allowed to use this command",
         "cannot execute",
@@ -3086,6 +3101,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_walk_direction_reports_live_end_position() {
+        // R-12 regression: the result data must carry the bot's end
+        // position. The live position component is preferred over the
+        // snapshot, which can lag a just-finished move by one interval.
+        let (executor, sender, state, log) = make_executor();
+        make_populated_snapshot(&state);
+        *log.live_position.lock().unwrap() = Some([0.5, 64.0, -0.5]);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::WalkDirection(Direction::North, 1)).await;
+        let br = result.expect("walk should succeed");
+        let data = br.data.expect("walk result must carry position data");
+        assert_eq!(data["position"], serde_json::json!([0, 64, -1]));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_walk_direction_reports_snapshot_end_position() {
+        // When the live position component is unavailable the result falls
+        // back to the snapshot; with snapshot-tracking goto this is the
+        // post-move target, not the pre-move start.
+        let (executor, sender, state, _log) = make_executor_with_snapshot_goto();
+        make_populated_snapshot(&state);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::WalkDirection(Direction::East, 3)).await;
+        let br = result.expect("walk should succeed");
+        let data = br.data.expect("walk result must carry position data");
+        assert_eq!(data["position"], serde_json::json!([3, 64, 0]));
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
     async fn test_walk_south() {
         let (executor, sender, state, log) = make_executor();
         make_populated_snapshot(&state);
@@ -3573,6 +3625,51 @@ mod tests {
         sim.await.expect("simulation task should finish");
         let chats = log.chat_calls.lock().unwrap();
         assert_eq!(chats.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_rejection_detected_unknown_item() {
+        // Vanilla rejects an invalid /give item id with
+        // "Unknown item 'minecraft:nonexistent_item_xyz'" followed by the
+        // command echo carrying `<--[HERE]`. The rejection scan must match
+        // the error title even though the keywordless echo lands last —
+        // otherwise give_item reports a fake success.
+        let (executor, _sender, state, log) = make_executor();
+        let state2 = Arc::clone(&state);
+        let sim = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            state2.add_chat_message(
+                "System".into(),
+                "Unknown item 'minecraft:nonexistent_item_xyz'".into(),
+            );
+            state2.add_chat_message(
+                "System".into(),
+                "give TestBot minecraft:nonexistent_item_xyz 1<--[HERE]".into(),
+            );
+        });
+
+        let result = executor
+            .handle_execute_command("/give TestBot minecraft:nonexistent_item_xyz 1".into())
+            .await;
+        assert!(
+            matches!(result, Err(BotError::CommandRejected { ref feedback, .. }) if feedback.contains("Unknown item")),
+            "unknown-item rejection must surface CommandRejected, got: {result:?}"
+        );
+        sim.await.expect("simulation task should finish");
+        let chats = log.chat_calls.lock().unwrap();
+        assert_eq!(chats.len(), 1);
+    }
+
+    #[test]
+    fn test_is_command_rejection_matches_unknown_item_variants() {
+        // Vanilla and common plugin item-id rejection spellings.
+        assert!(is_command_rejection(
+            "Unknown item 'minecraft:nonexistent_item_xyz'"
+        ));
+        assert!(is_command_rejection("unknown item"));
+        assert!(is_command_rejection("No such item 'foo'"));
+        assert!(!is_command_rejection("Gave 1x minecraft:diamond_pickaxe"));
+        assert!(!is_command_rejection("Teleported TestBot to 1, 64, 1"));
     }
 
     #[tokio::test]

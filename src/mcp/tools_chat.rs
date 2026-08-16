@@ -142,7 +142,7 @@ pub async fn handle_set_game_mode(
 // get_chat_history — reads recent chat messages from SharedState
 // ---------------------------------------------------------------------------
 
-/// Return recent chat messages (up to 10) as a JSON array.
+/// Return recent chat messages (up to 50, the shared-state retention cap) as a JSON array.
 ///
 /// Each entry is an object `{"sender":"...","message":"..."}`. Returns an
 /// error when the bot is not connected to a server.
@@ -415,6 +415,27 @@ mod tests {
         assert_eq!(arr[0]["message"], "Hello");
         assert_eq!(arr[1]["sender"], "Bob");
         assert_eq!(arr[1]["message"], "Hi there");
+    }
+
+    #[test]
+    fn test_get_chat_history_caps_at_shared_state_limit() {
+        // The tool description says "up to 50": the SharedState deque retains
+        // 50 messages, so adding 60 must return exactly the newest 50.
+        let state = make_state(true);
+        for i in 0..60 {
+            state.add_chat_message(format!("User{i}"), format!("Msg{i}"));
+        }
+
+        let result = get_chat_history(&state).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+        let arr = parsed
+            .as_array()
+            .expect("expected a JSON array of messages");
+        assert_eq!(arr.len(), 50);
+        assert_eq!(arr[0]["sender"], "User10");
+        assert_eq!(arr[0]["message"], "Msg10");
+        assert_eq!(arr[49]["sender"], "User59");
+        assert_eq!(arr[49]["message"], "Msg59");
     }
 
     #[test]
