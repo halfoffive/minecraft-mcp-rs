@@ -141,8 +141,28 @@ pub async fn handle_place_block(
         format!("slot:{}", input.item_slot),
     );
     match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
+        Ok(mut result) => {
+            // The executor only knows the hotbar slot ("slot:N" encoding), so
+            // its message reads "Placed 3 at ..." — opaque to the LLM. Resolve
+            // the actual item id from the snapshot inventory here (the MCP
+            // layer has snapshot access; the executor does not) and rewrite
+            // the message to name the block. The executor's result message
+            // format is "Placed {} at {}", so we rebuild it with the item id.
+            let item_id = state
+                .read_snapshot()
+                .self_player
+                .inventory
+                .iter()
+                .find(|entry| entry.slot_index == input.item_slot)
+                .map(|entry| entry.item_id.clone())
+                .unwrap_or_else(|| "(empty slot)".to_string());
+            result.message = format!(
+                "Placed {} at ({}, {}, {})",
+                item_id, input.x, input.y, input.z
+            );
+            serde_json::to_string(&result)
+                .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
+        }
         Err(e) => Err(e),
     }
 }
@@ -516,6 +536,65 @@ mod tests {
         };
         let result = handle_place_block(&state, &sender, input).await.unwrap();
         let _: Value = serde_json::from_str(&result).expect("valid JSON");
+    }
+
+    /// Regression: the result message used to name only the hotbar slot
+    /// ("Placed 3 at ..."), which is opaque to the LLM — it cannot know what
+    /// block was placed. The MCP layer resolves the item id from the snapshot
+    /// inventory and rewrites the message to "Placed <item_id> at ...".
+    #[tokio::test]
+    async fn test_place_block_message_names_item_from_inventory() {
+        let (state, sender) = make_echo_channel();
+        make_online(&state);
+        // Give the snapshot a hotbar inventory so the handler can resolve
+        // slot 3 → stone.
+        state.update_snapshot(crate::types::WorldSnapshot {
+            self_player: crate::types::SelfPlayer {
+                inventory: vec![crate::types::InventorySlot {
+                    slot_index: 3,
+                    item_id: "stone".into(),
+                    count: 64,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let input = PlaceBlockInput {
+            x: 5,
+            y: 65,
+            z: 10,
+            item_slot: 3,
+        };
+        let result = handle_place_block(&state, &sender, input).await.unwrap();
+        let v: Value = serde_json::from_str(&result).expect("valid JSON");
+        assert_eq!(
+            v["message"], "Placed stone at (5, 65, 10)",
+            "message must name the block, not the slot: {v}"
+        );
+    }
+
+    /// An empty hotbar slot is reported honestly instead of pretending a
+    /// block was placed.
+    #[tokio::test]
+    async fn test_place_block_message_empty_slot_is_honest() {
+        let (state, sender) = make_echo_channel();
+        make_online(&state);
+        // Snapshot inventory does not contain slot 7.
+        let input = PlaceBlockInput {
+            x: 0,
+            y: 64,
+            z: 0,
+            item_slot: 7,
+        };
+        let result = handle_place_block(&state, &sender, input).await.unwrap();
+        let v: Value = serde_json::from_str(&result).expect("valid JSON");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("(empty slot)"),
+            "empty slot must be surfaced, got: {v}"
+        );
     }
 
     // ── use_item_on_block ──────────────────────────────────────────

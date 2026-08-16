@@ -120,6 +120,12 @@ pub struct WorldViewCache {
     pub scale: u8,
     /// Base64-encoded PNG bytes ready to embed in MCP `Content::Image`.
     pub png_base64: String,
+    /// Number of block columns visible in the cached render (a column with
+    /// stacked blocks counts once). Mirrors what the image actually shows,
+    /// so a cache hit returns the same annotation as a fresh render.
+    pub block_count: usize,
+    /// Number of entities visible in the cached render.
+    pub entity_count: usize,
     /// Optional JSON annotation payload embedded alongside the image in a
     /// multi-content response (centre coords, radius, scale, yaw,
     /// timestamp). Stored so a cache hit can return both image + text
@@ -177,11 +183,19 @@ pub struct SharedState {
     /// Stored behind `Mutex<Option<_>>` because [`ContainerHandle`] auto-closes
     /// on [`Drop`], so we must ensure only one owner exists at a time.
     container_handle: Mutex<Option<ContainerHandle>>,
-    /// Last 10 chat messages received from the server.
+    /// Recent chat messages received from the server.
     ///
-    /// Each entry is `(sender, message)`. Stored behind a `Mutex` because the
-    /// bot event handler writes to it from azalea's ECS thread.
-    chat_messages: Mutex<VecDeque<(String, String)>>,
+    /// Each entry is `(seq, sender, message)` — the monotonic `seq` lets
+    /// `execute_command` diff "messages that arrived after my command" by
+    /// cursor instead of by list index, which breaks when the deque is full
+    /// (index-based diffing skipped everything once `len()` hit the cap).
+    /// Stored behind a `Mutex` because the bot event handler writes to it
+    /// from azalea's ECS thread.
+    chat_messages: Mutex<VecDeque<(u64, String, String)>>,
+    /// Monotonic sequence allocator for chat messages. Incremented under the
+    /// `chat_messages` lock so `chat_cursor()` (also lock-guarded) can never
+    /// exceed the count of already-visible messages.
+    chat_next_seq: AtomicU64,
     /// Last error message reported by the bot/MCP layer, if any.
     ///
     /// Stored behind a `Mutex` because writers (bot event handlers, MCP
@@ -267,6 +281,14 @@ pub struct SharedState {
     /// (0 = never). The snapshot updater reads this to relax its rebuild
     /// interval while the bot is idle.
     last_command_at: AtomicU64,
+    /// Epoch-millis timestamp of the last MCP *request* (initialize /
+    /// ping / list_tools / call_tool). Semantically independent of
+    /// `last_command_at`: the headless idle watchdog keys on MCP activity,
+    /// because a client host may hold a connection open and send requests
+    /// while never dispatching a bot command (e.g. ZCode's per-session
+    /// probe connections) — keying the watchdog on command activity killed
+    /// those sessions after 600 s.
+    mcp_activity_at: AtomicU64,
     /// Monotonic snapshot revision counter. Incremented every time a new
     /// snapshot is stored via [`update_snapshot`](Self::update_snapshot) or
     /// [`modify_snapshot`](Self::modify_snapshot), and written into
@@ -313,6 +335,7 @@ impl SharedState {
             config_restart_requested: AtomicBool::new(false),
             container_handle: Mutex::new(None),
             chat_messages: Mutex::new(VecDeque::new()),
+            chat_next_seq: AtomicU64::new(0),
             last_error: Mutex::new(None),
             mcp_server_status: Mutex::new(McpServerStatus::Stopped),
             cancel_token: Mutex::new(CancellationToken::new()),
@@ -325,6 +348,7 @@ impl SharedState {
             commands_probe: Mutex::new(None),
             executor_busy: AtomicBool::new(false),
             last_command_at: AtomicU64::new(0),
+            mcp_activity_at: AtomicU64::new(0),
             next_snapshot_seq: AtomicU64::new(0),
         }
     }
@@ -629,19 +653,69 @@ impl SharedState {
         f(guard.as_ref())
     }
 
-    /// Store a chat message, keeping only the last 10.
+    /// Maximum chat messages retained. 50 keeps `get_chat_history` useful
+    /// for LLM clients while bounding memory; the command-feedback window
+    /// (400 ms) never produces more than a handful of messages, so a full
+    /// queue cannot evict a just-arrived rejection reply.
+    const MAX_CHAT_MESSAGES: usize = 50;
+
+    /// Store a chat message, keeping only the last [`MAX_CHAT_MESSAGES`].
+    ///
+    /// Each message is assigned a monotonic sequence number (allocated under
+    /// the same lock as the push) so callers can diff new arrivals by cursor
+    /// via [`chat_cursor`](Self::chat_cursor) /
+    /// [`chat_messages_since`](Self::chat_messages_since).
     pub fn add_chat_message(&self, sender: String, message: String) {
         let mut guard = self.chat_messages.lock().unwrap_or_else(|e| e.into_inner());
-        guard.push_back((sender, message));
-        while guard.len() > 10 {
+        let seq = self.chat_next_seq.fetch_add(1, Ordering::Relaxed);
+        guard.push_back((seq, sender, message));
+        while guard.len() > Self::MAX_CHAT_MESSAGES {
             guard.pop_front();
         }
     }
 
-    /// Return a copy of the last 10 chat messages.
+    /// Return a copy of the last [`MAX_CHAT_MESSAGES`] chat messages.
+    ///
+    /// The `(sender, message)` pair is the public contract consumed by
+    /// `get_chat_history` and the UI; the internal sequence number is
+    /// exposed only through [`chat_cursor`](Self::chat_cursor) /
+    /// [`chat_messages_since`](Self::chat_messages_since).
     pub fn get_chat_messages(&self) -> Vec<(String, String)> {
         let guard = self.chat_messages.lock().unwrap_or_else(|e| e.into_inner());
-        guard.iter().cloned().collect()
+        guard
+            .iter()
+            .map(|(_, sender, message)| (sender.clone(), message.clone()))
+            .collect()
+    }
+
+    /// Next chat-message sequence number to be assigned.
+    ///
+    /// Lock-guarded so the returned cursor is always ≤ the number of
+    /// messages already pushed: a caller that captures `cursor` and later
+    /// scans [`chat_messages_since(cursor)`](Self::chat_messages_since) is
+    /// guaranteed to see every message that arrived after the capture.
+    pub fn chat_cursor(&self) -> u64 {
+        // Lock only for the happens-before edge: allocation and push happen
+        // under this same mutex, so holding it here guarantees the returned
+        // cursor never exceeds the count of already-visible messages.
+        let _guard = self.chat_messages.lock().unwrap_or_else(|e| e.into_inner());
+        self.chat_next_seq.load(Ordering::Relaxed)
+    }
+
+    /// Chat messages with `seq >= cursor` (the messages that arrived after a
+    /// cursor captured earlier), including their sequence numbers.
+    ///
+    /// Unlike an index-based diff, this is correct even when the deque has
+    /// been full for a while — a full deque is exactly when `len()`-based
+    /// baselines degenerate (they always equal the cap, so every message
+    /// looks "before the baseline").
+    pub fn chat_messages_since(&self, cursor: u64) -> Vec<(u64, String, String)> {
+        let guard = self.chat_messages.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .iter()
+            .filter(|(seq, _, _)| *seq >= cursor)
+            .cloned()
+            .collect()
     }
 
     // ── Snapshot force-refresh (get_self_info/get_inventory force=true) ──
@@ -728,6 +802,25 @@ impl SharedState {
     /// Epoch-millis timestamp of the last dispatched command (0 = never).
     pub fn last_command_at_ms(&self) -> u64 {
         self.last_command_at.load(Ordering::Relaxed)
+    }
+
+    /// Record that an MCP request was received right now (epoch millis).
+    ///
+    /// Called at the entry of every `ServerHandler` request method
+    /// (initialize / ping / list_tools / call_tool). The headless idle
+    /// watchdog uses this instead of [`mark_command_activity`](Self::mark_command_activity)
+    /// so a connected-but-commandless client session is never judged idle.
+    pub fn mark_mcp_activity(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.mcp_activity_at.store(now, Ordering::Relaxed);
+    }
+
+    /// Epoch-millis timestamp of the last MCP request (0 = never).
+    pub fn mcp_activity_at_ms(&self) -> u64 {
+        self.mcp_activity_at.load(Ordering::Relaxed)
     }
 
     /// Store the last error message reported by the bot/MCP layer.
@@ -1305,21 +1398,72 @@ mod tests {
     }
 
     #[test]
-    fn test_chat_message_limit_10() {
+    fn test_chat_message_limit_50() {
         let state = SharedState::new(AppConfig::default());
-        for i in 0..15 {
+        for i in 0..60 {
             state.add_chat_message(format!("User{i}"), format!("Msg{i}"));
         }
         let messages = state.get_chat_messages();
-        assert_eq!(messages.len(), 10);
-        assert_eq!(messages[0].0, "User5");
-        assert_eq!(messages[9].0, "User14");
+        assert_eq!(messages.len(), 50);
+        assert_eq!(messages[0].0, "User10");
+        assert_eq!(messages[49].0, "User59");
+    }
+
+    #[test]
+    fn test_chat_message_seqs_monotonic_across_eviction() {
+        // The sequence numbers must stay monotonic and gap-free even when
+        // old messages are evicted from the deque — the `execute_command`
+        // cursor diff depends on `seq >= cursor` semantics.
+        let state = SharedState::new(AppConfig::default());
+        for i in 0..60 {
+            state.add_chat_message(format!("User{i}"), format!("Msg{i}"));
+        }
+        let since_50 = state.chat_messages_since(50);
+        // 10 survivors (seqs 50..=59) with monotonic, contiguous seqs.
+        let seqs: Vec<u64> = since_50.iter().map(|(seq, _, _)| *seq).collect();
+        assert_eq!(seqs, (50..60).collect::<Vec<u64>>());
+        assert_eq!(since_50[0].1, "User50");
+    }
+
+    #[test]
+    fn test_chat_cursor_advances_and_filters_since() {
+        let state = SharedState::new(AppConfig::default());
+        assert_eq!(state.chat_cursor(), 0);
+        state.add_chat_message("Alice".into(), "Hello".into());
+        state.add_chat_message("Bob".into(), "Hi".into());
+        let cursor = state.chat_cursor();
+        assert_eq!(cursor, 2);
+        // Messages at/after the cursor (cursor was captured after seq 1).
+        let since = state.chat_messages_since(cursor);
+        assert!(since.is_empty());
+        state.add_chat_message("System".into(), "Gave 1 [Diamond]".into());
+        let since = state.chat_messages_since(cursor);
+        assert_eq!(since.len(), 1);
+        assert_eq!(since[0].2, "Gave 1 [Diamond]");
     }
 
     #[test]
     fn test_chat_messages_empty_by_default() {
         let state = SharedState::new(AppConfig::default());
         assert!(state.get_chat_messages().is_empty());
+    }
+
+    #[test]
+    fn test_mark_mcp_activity_stamps_timestamp() {
+        // The headless idle watchdog keys on MCP-request activity; the stamp
+        // must advance after a request arrives.
+        let state = SharedState::new(AppConfig::default());
+        assert_eq!(state.mcp_activity_at_ms(), 0, "never touched → 0");
+        state.mark_mcp_activity();
+        let stamped = state.mcp_activity_at_ms();
+        assert!(stamped > 0, "mark must stamp a non-zero epoch millis");
+        // A second mark must advance (or at least not go backwards).
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        state.mark_mcp_activity();
+        assert!(
+            state.mcp_activity_at_ms() >= stamped,
+            "activity stamp must be monotonic"
+        );
     }
 
     // -- last_error -----------------------------------------------------------

@@ -179,11 +179,18 @@ pub const MIN_BUILD_Y: i32 = -64;
 /// `render_topdown_enhanced(snapshot, radius, 1)` minus the Y-modulation
 /// and yaw arrow (kept separate so the existing simpler API stays stable
 /// for tests and downstream callers).
+///
+/// Returns `(png_bytes, visible_block_columns, visible_entities)`: the block
+/// count is the number of distinct columns that actually painted (one per
+/// pixel column — stacked blocks in the same column collapse to a single
+/// pixel), and the entity count is the number of entities inside `radius`.
+/// Both are counted in the same loop that renders, so the annotation in
+/// `get_world_view` can never drift from what the image actually shows.
 pub fn render_topdown_enhanced(
     snapshot: &WorldSnapshot,
     radius: u8,
     scale: u8,
-) -> Result<Vec<u8>, BotError> {
+) -> Result<(Vec<u8>, usize, usize), BotError> {
     // Clamp scale to a supported value — invalid inputs silently fall back
     // to 1× rather than producing a malformed image.
     let scale = if VALID_SCALES.contains(&scale) {
@@ -220,6 +227,9 @@ pub fn render_topdown_enhanced(
     let block_size_usize = block_size as usize;
     let mut column_best: Vec<Option<(i32, Rgba<u8>)>> =
         vec![None; block_size_usize * block_size_usize];
+    // Distinct columns that painted (a column with stacked blocks counts
+    // once — the renderer draws only the highest block per column).
+    let mut visible_columns = 0usize;
     for block in &snapshot.blocks {
         let dx = block.position.x as f64 - center_x;
         let dz = block.position.z as f64 - center_z;
@@ -245,6 +255,7 @@ pub fn render_topdown_enhanced(
             }
             None => {
                 column_best[idx] = Some((block.position.y, colour));
+                visible_columns += 1;
             }
         }
     }
@@ -268,12 +279,14 @@ pub fn render_topdown_enhanced(
     // 3. Overlay entities (within radius) in yellow, each occupying a
     //    `scale × scale` square so they remain visible at scale=1.
     let entity_colour = Rgba([255, 230, 0, 255]);
+    let mut visible_entities = 0usize;
     for entity in &snapshot.entities {
         let dx = entity.position.x as f64 - center_x;
         let dz = entity.position.z as f64 - center_z;
         if dx.abs() > r as f64 || dz.abs() > r as f64 {
             continue;
         }
+        visible_entities += 1;
         let px = (dx.round() as i32 + r) as u32 * scale as u32;
         let py = (dz.round() as i32 + r) as u32 * scale as u32;
         paint_square(&mut img, px, py, scale as u32, entity_colour);
@@ -292,7 +305,7 @@ pub fn render_topdown_enhanced(
         draw_yaw_arrow(&mut img, cx, cy, yaw, scale);
     }
 
-    encode_png(&img)
+    encode_png(&img).map(|png| (png, visible_columns, visible_entities))
 }
 
 /// Multiply each colour channel of `colour` by `factor` (alpha untouched).
@@ -1325,7 +1338,7 @@ mod tests {
     fn test_render_enhanced_scale_1_matches_legacy_dimensions() {
         let snap = snapshot_with_surroundings();
         let legacy = render_topdown(&snap, 4).expect("legacy render");
-        let enhanced = render_topdown_enhanced(&snap, 4, 1).expect("enhanced render");
+        let (enhanced, _, _) = render_topdown_enhanced(&snap, 4, 1).expect("enhanced render");
         let legacy_img = image::load_from_memory(&legacy).unwrap().to_rgba8();
         let enhanced_img = image::load_from_memory(&enhanced).unwrap().to_rgba8();
         assert_eq!(
@@ -1339,7 +1352,7 @@ mod tests {
     #[test]
     fn test_render_enhanced_scale_4_dimensions() {
         let snap = snapshot_with_surroundings();
-        let bytes = render_topdown_enhanced(&snap, 4, 4).expect("render");
+        let (bytes, _, _) = render_topdown_enhanced(&snap, 4, 4).expect("render");
         let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
         // radius=4 → block_size=9 → 9*4 = 36 pixels per side
         assert_eq!(img.dimensions(), (36, 36));
@@ -1349,7 +1362,7 @@ mod tests {
     #[test]
     fn test_render_enhanced_scale_8_dimensions() {
         let snap = snapshot_with_surroundings();
-        let bytes = render_topdown_enhanced(&snap, 2, 8).expect("render");
+        let (bytes, _, _) = render_topdown_enhanced(&snap, 2, 8).expect("render");
         let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
         // radius=2 → block_size=5 → 5*8 = 40 pixels per side
         assert_eq!(img.dimensions(), (40, 40));
@@ -1361,7 +1374,7 @@ mod tests {
     fn test_render_enhanced_invalid_scale_falls_back() {
         let snap = snapshot_with_surroundings();
         for invalid in [0u8, 3, 5, 7, 9, 100, 255] {
-            let bytes = render_topdown_enhanced(&snap, 4, invalid).expect("render");
+            let (bytes, _, _) = render_topdown_enhanced(&snap, 4, invalid).expect("render");
             let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
             // Should produce a scale=1 image (9x9 for radius=4).
             assert_eq!(
@@ -1416,8 +1429,9 @@ mod tests {
         let mut snap_precise = snap_floor.clone();
         snap_precise.self_player.position_precise = Some([0.5, 64.0, 0.5]);
 
-        let bytes_floor = render_topdown_enhanced(&snap_floor, 2, 1).expect("render floor");
-        let bytes_precise = render_topdown_enhanced(&snap_precise, 2, 1).expect("render precise");
+        let (bytes_floor, _, _) = render_topdown_enhanced(&snap_floor, 2, 1).expect("render floor");
+        let (bytes_precise, _, _) =
+            render_topdown_enhanced(&snap_precise, 2, 1).expect("render precise");
         // Both should be valid PNGs of the same size (5×5).
         let img_floor = image::load_from_memory(&bytes_floor).unwrap().to_rgba8();
         let img_precise = image::load_from_memory(&bytes_precise).unwrap().to_rgba8();
@@ -1471,7 +1485,7 @@ mod tests {
                 commands_enabled: None,
                 ..Default::default()
             };
-            let bytes = render_topdown_enhanced(&snap, 2, 1).expect("render");
+            let (bytes, _, _) = render_topdown_enhanced(&snap, 2, 1).expect("render");
             let img = image::load_from_memory(&bytes).unwrap().to_rgba8();
             // radius=2, size=5. Block at (2,0) → pixel (2+2, 0+2) = (4, 2).
             *img.get_pixel(4, 2)
@@ -1528,8 +1542,8 @@ mod tests {
             s
         };
 
-        let bytes_with = render_topdown_enhanced(&snap_with_yaw, 4, 4).expect("render");
-        let bytes_without = render_topdown_enhanced(&snap_no_yaw, 4, 4).expect("render");
+        let (bytes_with, _, _) = render_topdown_enhanced(&snap_with_yaw, 4, 4).expect("render");
+        let (bytes_without, _, _) = render_topdown_enhanced(&snap_no_yaw, 4, 4).expect("render");
         let img_with = image::load_from_memory(&bytes_with).unwrap().to_rgba8();
         let img_without = image::load_from_memory(&bytes_without).unwrap().to_rgba8();
 
@@ -1541,6 +1555,61 @@ mod tests {
             "yaw arrow should paint white pixels; with-yaw={count_with}, without={count_without}"
         );
         assert!(count_with > 0, "yaw arrow should paint at least one pixel");
+    }
+
+    /// The returned counts must describe what the image actually shows: the
+    /// number of distinct block columns inside `radius` (stacked blocks in a
+    /// column collapse to one pixel) and the number of entities inside
+    /// `radius`. The `get_world_view` annotation uses these — the previous
+    /// whole-snapshot counts reported 230k blocks for a 9-block viewport.
+    #[test]
+    fn test_render_enhanced_counts_visible_columns_and_entities() {
+        let snap = snapshot_with_surroundings();
+        // Blocks inside radius=4: (0,63,0), (1,63,0), (-1,63,0) — three
+        // distinct columns. (50,63,0) is out of radius and must not count.
+        // One zombie entity at (0,63,1) is inside radius.
+        let (_, block_count, entity_count) = render_topdown_enhanced(&snap, 4, 1).expect("render");
+        assert_eq!(block_count, 3, "distinct visible columns");
+        assert_eq!(entity_count, 1, "entities inside radius");
+
+        // Stacked blocks in the same column collapse to a single counted
+        // column (the renderer draws only the highest block per column).
+        let stacked = WorldSnapshot {
+            blocks: vec![
+                BlockEntry {
+                    position: BlockPos::new(0, 63, 0),
+                    block_type: "stone".into(),
+                    block_state: None,
+                },
+                BlockEntry {
+                    position: BlockPos::new(0, 64, 0),
+                    block_type: "grass_block".into(),
+                    block_state: None,
+                },
+            ],
+            ..snap.clone()
+        };
+        let (_, block_count, _) = render_topdown_enhanced(&stacked, 4, 1).expect("render stacked");
+        assert_eq!(block_count, 1, "stacked blocks in one column count once");
+
+        // Chebyshev boundary: |dx| <= r is in-view, |dx| == r+1 is out.
+        let edge = WorldSnapshot {
+            blocks: vec![
+                BlockEntry {
+                    position: BlockPos::new(4, 63, 0),
+                    block_type: "stone".into(),
+                    block_state: None,
+                },
+                BlockEntry {
+                    position: BlockPos::new(5, 63, 0),
+                    block_type: "diamond_ore".into(),
+                    block_state: None,
+                },
+            ],
+            ..snap.clone()
+        };
+        let (_, block_count, _) = render_topdown_enhanced(&edge, 4, 1).expect("render edge");
+        assert_eq!(block_count, 1, "only the in-radius column counts");
     }
 
     /// `modulate_brightness` should preserve alpha and clamp factor.
