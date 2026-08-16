@@ -5,7 +5,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     Router,
@@ -161,7 +161,11 @@ impl McpBotServer {
         &self,
         Parameters(input): Parameters<NearbyEntitiesInput>,
     ) -> Result<String, BotError> {
-        crate::mcp::tools_query::get_nearby_entities(&self.state, input.radius)
+        crate::mcp::tools_query::get_nearby_entities_capped(
+            &self.state,
+            input.radius,
+            input.max_entities,
+        )
     }
 
     #[tool(
@@ -311,7 +315,7 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Place a block at the given position",
+        description = "Place a block at the given position; the placed block occupies exactly (x, y, z). Placement is verified against the world after the click — success is reported only when the block was observed at the target. y must be in -63..=320; y=-64 is rejected because the clicked block would be at y=-65, outside the world.",
         annotations(destructive_hint = true)
     )]
     async fn place_block(
@@ -605,8 +609,13 @@ impl ServerHandler for McpBotServer {
 
 /// Start the MCP server on stdio transport.
 ///
-/// This function blocks until the transport is closed. All logging goes to
-/// stderr; stdout is reserved for MCP JSON-RPC messages.
+/// This function blocks until the transport is closed, the shutdown token
+/// fires, an OS Ctrl+C is received, or — headless only — the idle watchdog
+/// fires after [`HEADLESS_IDLE_TIMEOUT`] without any MCP request activity.
+/// It does NOT simply wait for stdin EOF: on Windows a client host may hold
+/// both pipe ends open so EOF never arrives, hence the raced exit paths.
+/// All logging goes to stderr; stdout is reserved for MCP JSON-RPC
+/// messages.
 ///
 /// The `receiver` slot is handed to the server so the `connect_bot` tool can
 /// spawn a bot connection using the same receiver the UI path uses.
@@ -628,8 +637,9 @@ pub async fn serve_stdio(
     let state_for_status = Arc::clone(&state);
     state_for_status.set_mcp_server_status(McpServerStatus::Stdio);
     // Anchor for the idle watchdog: a fresh process gets a full grace period
-    // even if the client never dispatches a command.
-    let started_at_ms = now_epoch_ms();
+    // even if the client never dispatches a request. Monotonic (L-23) — a
+    // wall-clock NTP jump cannot shorten or lengthen the measured idle span.
+    let started_at = Instant::now();
     let server = McpBotServer::new(state, sender, receiver);
     let (stdin, stdout) = stdio();
 
@@ -654,7 +664,7 @@ pub async fn serve_stdio(
                 _ = tokio::signal::ctrl_c() => {
                     info!("Ctrl+C received — shutting down MCP stdio server");
                 }
-                _ = headless_idle_watchdog(Arc::clone(&state_for_status), started_at_ms), if headless => {
+                _ = headless_idle_watchdog(Arc::clone(&state_for_status), started_at), if headless => {
                     info!("headless idle watchdog fired — no MCP request for {:?}, shutting down", HEADLESS_IDLE_TIMEOUT);
                 }
             }
@@ -679,7 +689,7 @@ pub async fn serve_stdio(
 /// arrives and stdout writes may never fail. Ten minutes with zero MCP
 /// request activity is a strong signal the session is abandoned.
 ///
-/// The activity probe is MCP-request activity ([`SharedState::mcp_activity_at_ms`]),
+/// The activity probe is MCP-request activity ([`SharedState::mcp_activity_at`]),
 /// NOT bot-command activity: ZCode spawns per-session probe connections
 /// that send initialize/list_tools but never dispatch a bot command.
 /// Keying the watchdog on command activity killed those healthy sessions
@@ -689,28 +699,29 @@ const HEADLESS_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 /// Poll period for the headless idle watchdog.
 const HEADLESS_IDLE_POLL: Duration = Duration::from_secs(5);
 
-/// Current wall-clock time in epoch milliseconds.
-fn now_epoch_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 /// Pure headless-idle decision, unit-testable without a running server.
 ///
 /// Idle means BOTH the session has been alive for at least `timeout` (a
 /// fresh process gets the full grace period before its first request) AND
 /// no MCP request has been received within `timeout`.
+///
+/// All three instants are monotonic (L-23): elapsed time is measured with
+/// `saturating_duration_since`, never with wall-clock epoch arithmetic, so
+/// an NTP jump can neither fire the watchdog early (forward jump) nor keep
+/// the session alive forever (backward jump saturating `now - last` to 0).
 fn is_headless_idle(
-    now_ms: u64,
-    last_activity_ms: u64,
-    started_at_ms: u64,
+    now: Instant,
+    last_activity: Option<Instant>,
+    started_at: Instant,
     timeout: Duration,
 ) -> bool {
-    let timeout_ms = timeout.as_millis() as u64;
-    now_ms.saturating_sub(started_at_ms) >= timeout_ms
-        && now_ms.saturating_sub(last_activity_ms) >= timeout_ms
+    // `None` (no request ever) means the grace-period check above governs —
+    // the old epoch-ms code treated the never-stamped 0 as "idle" too
+    // (epoch now minus 0 is always >= timeout).
+    let activity_idle = last_activity
+        .map(|t| now.saturating_duration_since(t) >= timeout)
+        .unwrap_or(true);
+    now.saturating_duration_since(started_at) >= timeout && activity_idle
 }
 
 /// Resolve once the headless stdio session has been idle (no MCP request
@@ -718,13 +729,13 @@ fn is_headless_idle(
 /// coarse cadence; request activity is recorded by
 /// [`SharedState::mark_mcp_activity`] at the entry of every
 /// `ServerHandler` request method.
-async fn headless_idle_watchdog(state: Arc<SharedState>, started_at_ms: u64) {
+async fn headless_idle_watchdog(state: Arc<SharedState>, started_at: Instant) {
     loop {
         tokio::time::sleep(HEADLESS_IDLE_POLL).await;
         if is_headless_idle(
-            now_epoch_ms(),
-            state.mcp_activity_at_ms(),
-            started_at_ms,
+            Instant::now(),
+            state.mcp_activity_at(),
+            started_at,
             HEADLESS_IDLE_TIMEOUT,
         ) {
             return;
@@ -818,7 +829,8 @@ fn is_request_authorized(auth_enabled: bool, expected_token: &str, headers: &Hea
     is_bearer_authorized(headers, expected_token)
 }
 
-/// Axum middleware that enforces the configured Bearer token.///
+/// Axum middleware that enforces the configured Bearer token.
+///
 /// Returns 401 Unauthorized for missing, empty, or mismatched tokens when
 /// authentication is enabled (`mcp_auth_enabled`). If authentication is
 /// disabled, all requests pass through. Valid requests are forwarded to the
@@ -967,45 +979,73 @@ mod tests {
 
     /// The headless idle watchdog must NOT fire while the session is younger
     /// than the timeout (a fresh process gets a full grace period even
-    /// before its first command).
+    /// before its first request).
     #[test]
     fn test_is_headless_idle_grace_period_before_first_command() {
         let timeout = Duration::from_secs(600);
-        let started = 1_000_000;
-        // No command ever dispatched (last_command_ms = 0) but only 10
-        // minutes... 60 seconds after start: not idle yet.
-        assert!(!is_headless_idle(started + 60_000, 0, started, timeout));
-        // 10 minutes elapsed with zero commands: abandoned — idle.
-        assert!(is_headless_idle(started + 600_000, 0, started, timeout));
-    }
-
-    /// Recent command activity resets the idle clock.
-    #[test]
-    fn test_is_headless_idle_recent_command_resets() {
-        let timeout = Duration::from_secs(600);
-        let started = 1_000_000;
-        // 30 minutes after start, but a command arrived 5 minutes ago.
+        let started = Instant::now();
+        // No request ever received (None) but only 60 seconds after start:
+        // not idle yet.
         assert!(!is_headless_idle(
-            started + 1_800_000,
-            started + 1_500_000,
+            started + Duration::from_secs(60),
+            None,
             started,
             timeout
         ));
-        // Same session, last command 11 minutes ago: idle.
+        // 10 minutes elapsed with zero requests: abandoned — idle.
         assert!(is_headless_idle(
-            started + 1_800_000,
-            started + 1_140_000,
+            started + Duration::from_secs(600),
+            None,
             started,
             timeout
         ));
     }
 
-    /// A clock anomaly (now before the anchor) must never report idle.
+    /// Recent request activity resets the idle clock.
+    #[test]
+    fn test_is_headless_idle_recent_activity_resets() {
+        let timeout = Duration::from_secs(600);
+        let started = Instant::now();
+        let now = started + Duration::from_secs(1_800);
+        // 30 minutes after start, but a request arrived 5 minutes ago.
+        assert!(!is_headless_idle(
+            now,
+            Some(started + Duration::from_secs(1_500)),
+            started,
+            timeout
+        ));
+        // Same session, last request 11 minutes ago: idle.
+        assert!(is_headless_idle(
+            now,
+            Some(started + Duration::from_secs(1_140)),
+            started,
+            timeout
+        ));
+    }
+
+    /// A clock "jump" can never make the decision fire early. With
+    /// monotonic stamps a backward jump is impossible by construction; the
+    /// only remaining anomaly is a caller passing an anchor in the future,
+    /// which `saturating_duration_since` resolves to zero elapsed — never
+    /// idle.
     #[test]
     fn test_is_headless_idle_clock_anomaly_safe() {
         let timeout = Duration::from_secs(600);
-        let started = 1_000_000;
-        assert!(!is_headless_idle(999_000, 0, started, timeout));
+        let now = Instant::now();
+        // Anchor ahead of `now` (the old epoch-ms backward-jump case):
+        // elapsed since the anchor saturates to zero → not idle.
+        assert!(!is_headless_idle(
+            now,
+            None,
+            now + Duration::from_secs(1),
+            timeout
+        ));
+        assert!(!is_headless_idle(
+            now,
+            Some(now + Duration::from_secs(1)),
+            now + Duration::from_secs(1),
+            timeout
+        ));
     }
 
     /// Verify get_info() returns the expected server name.
@@ -1181,7 +1221,10 @@ mod tests {
         ));
         assert!(matches!(
             server
-                .get_nearby_entities(Parameters(NearbyEntitiesInput { radius: 10 }))
+                .get_nearby_entities(Parameters(NearbyEntitiesInput {
+                    radius: 10,
+                    max_entities: 500,
+                }))
                 .await,
             Err(BotError::Offline(_))
         ));
