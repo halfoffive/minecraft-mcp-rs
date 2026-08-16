@@ -357,14 +357,26 @@ pub fn update_settings(
     let mut reconnect_triggered = false;
     if connection_fields_changed {
         if state.is_online() || state.is_connecting() {
-            // The connect loop consumes the restart flag: disconnect, then
-            // re-read the fresh config and reconnect.
+            // Online/connecting: the CONNECT LOOP owns the restart flag
+            // (single-ownership rule, M-10). request_config_restart +
+            // request_disconnect tear the running session down; the connect
+            // loop's checkpoint consumes the flag, clears the disconnect
+            // request, resets the cancel token and reconnects in-place with
+            // the fresh config. The bot thread never exits, so the headless
+            // supervisor keeps polling the same handle and must NOT consume
+            // the flag — otherwise it could spawn a second bot thread while
+            // the old loop reconnects (two azalea sessions → kick loop).
             state.request_config_restart();
             state.request_disconnect();
             reconnect_triggered = true;
         } else {
-            // Headless supervisor consumes the flag on its next pass; in UI
-            // mode it is a harmless no-op until the user clicks Connect.
+            // Offline: nobody is connected, so the new config is already
+            // applied for the next Connect. The restart flag is set for the
+            // HEADLESS supervisor, which consumes it only when no bot thread
+            // exists (spawn.rs quiet-wait / next-action) and respawns the
+            // bot. In UI mode it is stale by design: `connect()`'s entry
+            // cleanup discards it (L-22) so a later explicit Disconnect is
+            // never converted into a surprise reconnect.
             state.request_config_restart();
         }
     }

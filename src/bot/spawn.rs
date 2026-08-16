@@ -216,6 +216,50 @@ pub fn headless_next_action(state: &SharedState) -> HeadlessAction {
     HeadlessAction::WaitMore
 }
 
+/// Outcome of one [`inner_wait_step`] poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InnerWaitOutcome {
+    /// The shutdown token is cancelled — abort the bot and exit the
+    /// supervisor.
+    Shutdown,
+    /// The bot thread is gone (finished, or no handle is stored) — the
+    /// outer loop may proceed to the quiet-wait.
+    ThreadGone,
+    /// The bot thread is alive and healthy — sleep and poll again.
+    WaitMore,
+}
+
+/// Decide one step of the supervisor's inner wait loop (the loop that
+/// polls a LIVE bot thread handle while staying responsive to shutdown).
+///
+/// While a bot thread is alive the supervisor does NOT consume
+/// [`SharedState::take_config_restart`]: an online config restart is
+/// handled in-place by the connect loop inside the bot thread (its
+/// checkpoint consumes the flag, clears the disconnect request, resets
+/// the cancel token and reconnects — the thread never exits, so the
+/// supervisor keeps polling the same handle). Consuming the flag here too
+/// would race the connect loop and could spawn a SECOND bot thread — two
+/// azalea sessions with the same username → server kick loop (M-10,
+/// single-ownership rule: the connect loop owns the restart flag while a
+/// bot thread lives; the supervisor consumes it only when no thread
+/// exists).
+pub(crate) fn inner_wait_step(
+    state: &SharedState,
+    handle: Option<&std::thread::JoinHandle<()>>,
+) -> InnerWaitOutcome {
+    if state.shutdown_token().is_cancelled() {
+        return InnerWaitOutcome::Shutdown;
+    }
+    match handle {
+        Some(h) if h.is_finished() => InnerWaitOutcome::ThreadGone,
+        Some(_) => InnerWaitOutcome::WaitMore,
+        // No handle stored — nothing to wait on; treat as "gone" so the
+        // outer loop reaches the quiet-wait, which DOES own the restart
+        // flag (no bot thread exists).
+        None => InnerWaitOutcome::ThreadGone,
+    }
+}
+
 /// Headless-mode supervisor loop (runs on the `"headless-supervisor"` OS
 /// thread).
 ///
@@ -228,15 +272,18 @@ pub fn headless_next_action(state: &SharedState) -> HeadlessAction {
 ///   once the stdio transport closes).
 ///
 /// The supervisor does NOT hot-respawn in a loop: while a bot thread is
-/// running it polls the thread plus the shutdown/restart flags (rather than
+/// running it polls the thread plus the shutdown flag (rather than
 /// blocking on a bare `join()`), so the moment the shutdown token fires it
 /// can abort an in-flight azalea connect attempt via
 /// [`SharedState::request_disconnect`] — otherwise a dead Minecraft server
 /// would keep the process alive for the duration of azalea's internal TCP
-/// retries. If the bot thread exits without a config restart (fail-fast
-/// after the bounded first-connect retries, or an explicit
-/// `disconnect_bot`), the supervisor waits quietly for a restart or a
-/// shutdown instead of re-spawning.
+/// retries. Online config restarts are NOT consumed here: while a bot
+/// thread lives, the connect loop inside it owns the restart flag and
+/// reconnects in-place (single-ownership rule, M-10 — the thread never
+/// exits, so the supervisor keeps polling the same handle). If the bot
+/// thread exits without a config restart (fail-fast after the bounded
+/// first-connect retries, or an explicit `disconnect_bot`), the supervisor
+/// waits quietly for a restart or a shutdown instead of re-spawning.
 pub fn headless_supervisor(
     state: Arc<SharedState>,
     command_receiver: ReceiverSlot,
@@ -265,61 +312,60 @@ pub fn headless_supervisor(
         }
 
         // ── 2. Wait for the bot thread while staying responsive to
-        //       shutdown / config restarts ─────────────────────────────────
+        //       shutdown ───────────────────────────────────────────────────
         let mut handle = state.take_bot_thread_handle();
         let mut break_outer = false;
-        let mut respawn = false;
         loop {
-            if state.shutdown_token().is_cancelled() {
-                // Abort the bot's in-flight connect attempt (request_disconnect
-                // cancels the token the connect loop's select! is waiting on)
-                // and join with a bound.
-                state.request_disconnect();
-                if let Some(handle) = handle.take() {
-                    let _ = join_with_timeout(handle, Duration::from_secs(3));
+            match inner_wait_step(&state, handle.as_ref()) {
+                InnerWaitOutcome::Shutdown => {
+                    // Abort the bot's in-flight connect attempt
+                    // (request_disconnect cancels the token the connect
+                    // loop's select! is waiting on) and join with a bound.
+                    state.request_disconnect();
+                    if let Some(handle) = handle.take() {
+                        let _ = join_with_timeout(handle, Duration::from_secs(3));
+                    }
+                    break_outer = true;
+                    break;
                 }
-                break_outer = true;
-                break;
-            }
-            if state.take_config_restart() {
-                // Agent changed connection settings while the bot was busy —
-                // consume the flag and respawn with the fresh config.
-                state.clear_disconnect_request();
-                respawn = true;
-                if let Some(handle) = handle.take() {
-                    let _ = join_with_timeout(handle, Duration::from_secs(3));
+                InnerWaitOutcome::ThreadGone => break,
+                InnerWaitOutcome::WaitMore => {
+                    // Note (M-10): the config-restart flag is deliberately
+                    // NOT consumed here. While a bot thread lives, the
+                    // connect loop inside it owns the flag — it consumes
+                    // the restart, clears the disconnect request, resets
+                    // the cancel token and reconnects in-place, so this
+                    // thread never exits and the supervisor keeps polling
+                    // the same handle. Consuming the flag here too would
+                    // let the old loop fall into backoff while the
+                    // supervisor spawns a second bot thread.
+                    std::thread::sleep(Duration::from_millis(100));
                 }
-                break;
-            }
-            match &handle {
-                Some(h) if h.is_finished() => break,
-                Some(_) => std::thread::sleep(Duration::from_millis(100)),
-                None => std::thread::sleep(Duration::from_millis(250)),
             }
         }
         if break_outer {
             break;
         }
 
-        // ── 3. Thread gone. A config restart respawns immediately (step 1
-        //       on the next iteration); otherwise wait quietly for a restart
-        //       or shutdown — an explicit `disconnect_bot` must stay
-        //       effective and a fail-fast must not spin the connection loop.
-        if !respawn {
-            loop {
-                if state.shutdown_token().is_cancelled() {
-                    break_outer = true;
-                    break;
-                }
-                if state.take_config_restart() {
-                    state.clear_disconnect_request();
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(250));
-            }
-            if break_outer {
+        // ── 3. Thread gone. Wait quietly for a restart or shutdown — an
+        //       explicit `disconnect_bot` must stay effective and a
+        //       fail-fast must not spin the connection loop. Only here,
+        //       with NO bot thread alive, does the supervisor consume the
+        //       config-restart flag (single-ownership rule, M-10); the
+        //       outer loop then respawns via `headless_next_action`.
+        loop {
+            if state.shutdown_token().is_cancelled() {
+                break_outer = true;
                 break;
             }
+            if state.take_config_restart() {
+                state.clear_disconnect_request();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        if break_outer {
+            break;
         }
     }
 
@@ -515,5 +561,73 @@ mod tests {
         let state = SharedState::new(AppConfig::default());
         state.set_online(true);
         assert_eq!(headless_next_action(&state), HeadlessAction::WaitMore);
+    }
+
+    // ── M-10 regression: single ownership of the restart flag ───────────
+
+    /// Regression for audit M-10: while a bot thread is alive, the
+    /// supervisor's inner wait loop must NOT consume the config-restart
+    /// flag.
+    ///
+    /// An online config restart (`update_settings` while the bot is
+    /// connected) is handled IN-PLACE by the connect loop inside the bot
+    /// thread: its checkpoint consumes the flag, clears the disconnect
+    /// request, resets the cancel token and reconnects — the thread never
+    /// exits, so the supervisor keeps polling the SAME handle. If the
+    /// supervisor also consumed the flag (and cleared the disconnect
+    /// request), the old loop would fall into its backoff branch and
+    /// reconnect on its own thread while the supervisor spawns a SECOND
+    /// bot thread → two azalea sessions with the same username → server
+    /// kick loop.
+    ///
+    /// This test drives the extracted [`inner_wait_step`]: with a live,
+    /// non-finished handle and the restart flag set, the step must WAIT —
+    /// the flag must remain set for the connect loop to consume.
+    #[test]
+    fn test_supervisor_does_not_consume_restart_while_thread_alive() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let state = SharedState::new(AppConfig::default());
+
+        // A live, non-finished bot thread handle.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !stop_clone.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        // Agent changed connection settings while the bot was online.
+        state.request_config_restart();
+
+        // The inner-loop step must WAIT — the flag stays set for the
+        // connect loop (inside the bot thread) to consume.
+        assert_eq!(
+            inner_wait_step(&state, Some(&handle)),
+            InnerWaitOutcome::WaitMore
+        );
+        assert!(
+            state.take_config_restart(),
+            "restart flag must stay set while a bot thread lives — the connect loop owns it"
+        );
+
+        // A finished thread is reported gone so the outer loop can proceed.
+        stop.store(true, Ordering::Relaxed);
+        // Bounded wait for the thread to exit without consuming the handle
+        // (join() moves it; we still need `is_finished()` below).
+        for _ in 0..200 {
+            if handle.is_finished() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(handle.is_finished(), "parked thread should exit promptly");
+        assert_eq!(
+            inner_wait_step(&state, Some(&handle)),
+            InnerWaitOutcome::ThreadGone
+        );
+        // No thread at all is also "gone" (nothing to wait on).
+        assert_eq!(inner_wait_step(&state, None), InnerWaitOutcome::ThreadGone);
     }
 }
