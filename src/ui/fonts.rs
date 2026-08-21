@@ -54,28 +54,35 @@ use std::sync::Arc;
 /// - **Linux** — Noto Sans CJK is the most common distribution default;
 ///   WenQuanYi Micro Hei is a lightweight fallback common on minimal
 ///   installs.
-fn candidate_font_paths() -> Vec<&'static str> {
+fn candidate_font_paths() -> Vec<String> {
     if cfg!(windows) {
+        // Resolve the real system directory instead of hard-coding the C:
+        // drive — a non-C system drive (or a relocated Windows dir) used
+        // to make every candidate miss and silently fall back to the
+        // default font.
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
         vec![
-            "C:\\Windows\\Fonts\\msyh.ttc",
-            "C:\\Windows\\Fonts\\msyh.ttf",
-            "C:\\Windows\\Fonts\\simsun.ttc",
+            format!("{windir}\\Fonts\\msyh.ttc"),
+            format!("{windir}\\Fonts\\msyh.ttf"),
+            format!("{windir}\\Fonts\\simsun.ttc"),
         ]
     } else if cfg!(target_os = "macos") {
         vec![
-            "/System/Library/Fonts/PingFang.ttc",
-            "/Library/Fonts/Arial Unicode.ttf",
+            "/System/Library/Fonts/PingFang.ttc".to_string(),
+            "/Library/Fonts/Arial Unicode.ttf".to_string(),
         ]
     } else {
         // Treat everything else as Linux-like.  This is the right default
         // for the production Linux desktop deployment target; other Unixes
         // (BSDs etc.) are unlikely hosts for this app.
         vec![
-            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
-            "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc".to_string(),
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc".to_string(),
+            // Fedora / RHEL package path (google-noto-sans-cjk-fonts).
+            "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc".to_string(),
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc".to_string(),
+            "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc".to_string(),
+            "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc".to_string(),
         ]
     }
 }

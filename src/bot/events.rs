@@ -168,7 +168,14 @@ pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::R
         Event::Spawn => {
             handle_spawn(bot, &state).await;
         }
-        Event::Disconnect(_) => {
+        Event::Disconnect(reason) => {
+            // The server-provided disconnect reason is otherwise never
+            // logged, which makes diagnosing an online server kick difficult
+            // (a reason like "You are not whitelisted" in a sea of
+            // connection retries). Log it before the teardown.
+            if let Some(reason) = &reason {
+                warn!(?reason, "bot disconnected — reason provided by server");
+            }
             handle_disconnect(bot, &state).await;
         }
         Event::Tick => {

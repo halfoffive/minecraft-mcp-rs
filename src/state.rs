@@ -102,7 +102,7 @@ pub enum McpServerStatus {
 /// `get_world_view` tool checks this before re-rendering: if
 /// `snapshot_seq`, `radius`, and `scale` all match the current
 /// request, the cached PNG bytes are returned without invoking
-/// [`render_topdown`](crate::mcp::render::render_topdown) again.
+/// [render_topdown_enhanced](crate::mcp::render::render_topdown_enhanced) again using the same snapshot_seq/radius/scale cache key. 
 ///
 /// Only one entry is cached (overwritten on each fresh render), keeping
 /// memory bounded — the typical 65×65 PNG is ~3 KB so even at `scale=8`
@@ -347,26 +347,11 @@ impl SharedState {
     /// The world snapshot starts empty, the bot is offline, and no container
     /// is open.
     pub fn new(config: AppConfig) -> Self {
-        let empty_snapshot = WorldSnapshot {
-            blocks: vec![],
-            entities: vec![],
-            self_player: crate::types::SelfPlayer {
-                uuid: String::new(),
-                username: String::new(),
-                position: crate::types::BlockPos::new(0, 0, 0),
-                health: 0.0,
-                hunger: 0,
-                gamemode: crate::types::GameMode::Survival,
-                held_item_slot: 0,
-                inventory: Vec::new(),
-                position_precise: None,
-                yaw: None,
-            },
-            timestamp: 0,
-            chunk_summary: vec![],
-            commands_enabled: None,
-            ..Default::default()
-        };
+        // WorldSnapshot::default() — the previous handwritten empty literal
+        // duplicated the same defaults and could drift (it did not even
+        // reset snapshot_seq / block_index explicitly; the ..Default
+        // fallback covered them by luck).
+        let empty_snapshot = WorldSnapshot::default();
 
         Self {
             world_snapshot: ArcSwap::from_pointee(empty_snapshot),

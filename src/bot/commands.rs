@@ -1257,12 +1257,12 @@ impl<B: BotActions> CommandExecutor<B> {
     ) -> Result<BotResult, BotError> {
         trace!(?pos, ?item_slot, ?effect_pos, "UseItemOnBlock");
         // If a hotbar slot was specified, select it before interacting so the
-        // correct item is used. Mirrors `handle_switch_hotbar_slot`'s range
+        // correct item is used. Mirrors handle_switch_hotbar_slot's range
         // check (the MCP layer also validates, but defend in depth).
         if let Some(slot) = item_slot
             && slot > 8
         {
-            // Defense-in-depth only — dispatch's central `validate_command`
+            // Defense-in-depth only — dispatch's central validate_command
             // gate rejects this first. Carry the honest variant anyway: an
             // out-of-range slot is a caller input error, not internal.
             return Err(BotError::InvalidParams(format!(
@@ -1273,21 +1273,24 @@ impl<B: BotActions> CommandExecutor<B> {
         let snapshot = self.state.read_snapshot();
 
         // Identify the item that will be used (for the confirmation gate and
-        // the result message).
+        // the result message). M-11 (report): read the LIVE inventory, not
+        // the throttled snapshot — the snapshot can lag the just-switched
+        // slot by a whole idle interval, which made the message name the
+        // previous held item (and an empty snapshot inventory read "empty"
+        // while a container window was open).
+        let held_entries = self.bot.inventory_entries();
         let used_slot = item_slot.unwrap_or(snapshot.self_player.held_item_slot);
-        let used_item = snapshot
-            .self_player
-            .inventory
-            .iter()
-            .find(|entry| entry.slot_index == used_slot)
-            .map(|entry| entry.item_id.as_str())
+        let used_item = held_entries
+            .get(used_slot as usize)
+            .and_then(|opt| opt.as_ref())
+            .map(|stack| stack.item_id.as_str())
             .unwrap_or("empty")
             .to_string();
         // M-6: whether the used item is expected to place a block/fluid. The
         // effect-cell occupancy pre-check AND the auto-approach only make
         // sense for placement items — for flint-and-steel, a cauldron-filling
         // bucket, etc. the "effect cell" is meaningless and a ceiling above
-        // the target caused a false `InvalidParams` (audit M-6).
+        // the target caused a false InvalidParams (audit M-6).
         let is_placement = item_has_placement_effect(&used_item);
 
         // Placement verification path (fluid buckets / placeable blocks).
@@ -1327,9 +1330,11 @@ impl<B: BotActions> CommandExecutor<B> {
                     let stand = match find_standable_neighbor(&fresh, pos) {
                         Some(s) => s,
                         None => {
-                            return Err(BotError::Internal(format!(
-                                "no standable position adjacent to interaction target {pos}"
-                            )));
+                            return Err(BotError::PathfindingFailed {
+                                target: pos,
+                                reason: "no standable position adjacent to interaction target"
+                                    .to_string(),
+                            });
                         }
                     };
                     // Best-effort approach: a movement failure falls through to
@@ -1675,7 +1680,7 @@ impl<B: BotActions> CommandExecutor<B> {
                 // back to slot 0 (the swap trades places, so the displaced
                 // hotbar item lands in the tool's old main-inventory slot).
                 let target = (0..=8u8)
-                    .find(|&i| entries[i as usize].is_none())
+                    .find(|&i| entries.get(i as usize).is_some_and(|slot| slot.is_none()))
                     .unwrap_or(0);
                 let moved = self.handle_move_item_to_hotbar(target, item_id, 1).await?;
                 if !moved.success {
@@ -2602,8 +2607,13 @@ fn is_command_rejection(feedback: &str) -> bool {
         "you are not allowed to use this command",
         "cannot execute",
     ];
-    let lower = feedback.to_lowercase();
-    PATTERNS.iter().any(|p| lower.contains(p))
+    // Zero-allocation ASCII fold: the feedback strings are server-provided
+    // ASCII messages and PATTERNS is lowercase, so the shared
+    // contains_ascii_case_insensitive matcher (no per-call String allocation,
+    // unlike the previous feedback.to_lowercase()) gives the same result.
+    PATTERNS
+        .iter()
+        .any(|p| crate::utils::contains_ascii_case_insensitive(feedback, p))
 }
 
 /// Cap on the interpolated line scan's step count.

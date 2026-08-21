@@ -674,6 +674,11 @@ pub async fn serve_stdio(
             error!(error = %e, "MCP server failed");
             state_for_status.set_mcp_server_status(McpServerStatus::Failed(msg.clone()));
             state_for_status.set_last_error(msg);
+            // Report the FAILURE, not a later "Stopped": without the return
+            // the unconditional Stopped write below overwrote the Failed
+            // status the moment it ran, and the UI only ever showed a
+            // generic "stopped" (the HTTP path never had this problem).
+            return;
         }
     }
 

@@ -214,7 +214,7 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig, cache: &mut McpConfigCac
         // bunx variant — parallel block for users on Bun. `bunx` auto-installs
         // the package without prompting, so this JSON has no `-y` flag.
         ui.add_space(6.0);
-        ui.label(i18n::tr(TextKey::NpxConfig));
+        ui.label(i18n::tr(TextKey::BunxConfig));
         ui.horizontal(|ui| {
             if ui.button(i18n::tr(TextKey::Copy)).clicked() {
                 ui.ctx().copy_text(BUNX_JSON.clone());
@@ -230,15 +230,19 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig, cache: &mut McpConfigCac
     }
 }
 
-/// Format a host string for use in a URL, wrapping IPv6 addresses in
-/// square brackets per RFC 3986 (e.g. `::1` → `[::1]`).
+/// Format a BIND host string as a CLIENT-connectable URL host (report P3).
 ///
-/// - If `host` parses as an [`std::net::IpAddr::V6`], returns `[host]`.
-/// - If `host` parses as an [`std::net::IpAddr::V4`], returns it unchanged.
-/// - If `host` is a hostname like `localhost` (fails `IpAddr::parse`),
-///   returns it unchanged.
+/// - IPv6 addresses get square brackets per RFC 3986 (::1 becomes [::1]);
+/// - a bind-all address is NOT connectable by a client — 0.0.0.0 (and ::)
+///   would make the MCP client target itself and usually fail, so it is
+///   rewritten to the loopback address the local client must use
+///   (127.0.0.1 / [::1]).
+///
+
 fn format_host_for_url(host: &str) -> String {
     match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(addr)) if addr.is_unspecified() => "[::1]".to_string(),
+        Ok(std::net::IpAddr::V4(addr)) if addr.is_unspecified() => "127.0.0.1".to_string(),
         Ok(std::net::IpAddr::V6(_)) => format!("[{host}]"),
         _ => host.to_owned(),
     }
@@ -414,6 +418,32 @@ mod tests {
         assert!(
             json.contains(r#""url": "http://[::1]:3000/mcp""#),
             "wrong IPv6 url (should have brackets): {json}"
+        );
+    }
+
+    /// Report P3: a bind-all address must be rewritten to the loopback
+    /// host for the client URL — http://0.0.0.0:... and http://[::]:...
+    /// are not connectable by a local MCP client.
+    #[test]
+    fn test_mcp_config_http_json_bind_all_rewritten() {
+        let mut edit = EditConfig::from(&AppConfig::default());
+        edit.mcp_transport = McpTransport::Http;
+        edit.mcp_address = "0.0.0.0".to_string();
+        edit.mcp_port = 3000;
+        edit.mcp_token = "".to_string();
+        edit.mcp_auth_enabled = false;
+
+        let json = build_mcp_config_json(&edit);
+        assert!(
+            json.contains(r#""url": "http://127.0.0.1:3000/mcp""#),
+            "0.0.0.0 must be rewritten to 127.0.0.1: {json}"
+        );
+
+        edit.mcp_address = "::".to_string();
+        let json2 = build_mcp_config_json(&edit);
+        assert!(
+            json2.contains(r#""url": "http://[::1]:3000/mcp""#),
+            "unspecified IPv6 must be rewritten to [::1]: {json2}"
         );
     }
 

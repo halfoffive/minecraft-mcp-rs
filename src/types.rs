@@ -335,6 +335,25 @@ impl Default for WorldSnapshot {
     }
 }
 
+impl WorldSnapshot {
+    /// Rebuild `block_index` from `blocks`.
+    ///
+    /// `block_index` is `#[serde(skip)]`, so a snapshot reconstructed from
+    /// serialized data (or any hand-built literal that forgot the field)
+    /// carries an EMPTY index — every O(1) `block_index.get()` lookup would
+    /// miss and callers would silently degrade to `blocks.iter().find()`
+    /// semantics. Code paths that build a `WorldSnapshot` from
+    /// deserialised data MUST call this before relying on block lookups.
+    pub fn rebuild_block_index(&mut self) {
+        self.block_index = self
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b.position, i))
+            .collect();
+    }
+}
+
 /// A single inventory slot entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct InventorySlot {
@@ -422,6 +441,44 @@ mod tests {
         assert_eq!(pos.x, 1);
         assert_eq!(pos.y, 2);
         assert_eq!(pos.z, 3);
+    }
+
+    /// A deserialised snapshot carries an EMPTY block_index (serde skip) —
+    /// rebuild_block_index must restore it so O(1) lookups work again.
+    #[test]
+    fn test_rebuild_block_index_restores_lookups_after_deserialize() {
+        let snapshot = WorldSnapshot {
+            blocks: vec![
+                BlockEntry {
+                    position: BlockPos::new(1, 64, 2),
+                    block_type: "stone".into(),
+                    block_state: None,
+                },
+                BlockEntry {
+                    position: BlockPos::new(3, 64, 4),
+                    block_type: "dirt".into(),
+                    block_state: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&snapshot).expect("snapshot must serialize");
+        let mut back: WorldSnapshot = serde_json::from_str(&json).expect("snapshot must round-trip");
+        // What the report's deserialisation trap looks like: empty index.
+        assert!(back.block_index.is_empty());
+        assert!(back.snapshot_seq == 0);
+
+        back.rebuild_block_index();
+
+        assert_eq!(
+            back.block_index.get(&BlockPos::new(1, 64, 2)),
+            Some(&0)
+        );
+        assert_eq!(
+            back.block_index.get(&BlockPos::new(3, 64, 4)),
+            Some(&1)
+        );
+        assert_eq!(back.block_index.len(), 2);
     }
 
     #[test]
