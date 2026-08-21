@@ -6,7 +6,7 @@
 //! > **Note:** Most items in this module are lookup tables designed for the
 //! > bot ops layer.  They are retained for the integration plan.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use crate::types::{MaterialTier, ToolType};
@@ -25,15 +25,23 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
     let mut m = HashMap::new();
 
     // --- Pickaxe blocks ---
+    //
+    // Vanilla 1.21.11 `mineable/pickaxe` membership, extracted from the
+    // azalea-generated registry data (the ONLY supported Minecraft version —
+    // the same data the bot library is generated from). Note that chests
+    // are NOT pickaxe blocks in vanilla — they live in the Axe list below
+    // (report M-19).
     for &block in &[
         "stone",
         "cobblestone",
+        "mossy_cobblestone",
         "andesite",
         "diorite",
         "granite",
         "stone_bricks",
         "mossy_stone_bricks",
         "cracked_stone_bricks",
+        "smooth_stone",
         "stone_slab",
         "cobblestone_slab",
         "stone_stairs",
@@ -58,16 +66,107 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "deepslate_lapis_ore",
         "deepslate_redstone_ore",
         "deepslate_copper_ore",
+        "nether_gold_ore",
+        // Deepslate family
         "deepslate",
+        "cobbled_deepslate",
+        "polished_deepslate",
+        "deepslate_bricks",
+        "deepslate_tiles",
+        "cobbled_deepslate_stairs",
+        "cobbled_deepslate_slab",
+        "cobbled_deepslate_wall",
         "tuff",
         "calcite",
+        // Copper family (all require stone+ — see HARVEST_LEVEL)
+        "copper_block",
+        "exposed_copper",
+        "weathered_copper",
+        "oxidized_copper",
+        "cut_copper",
+        "raw_copper_block",
+        "raw_iron_block",
+        "raw_gold_block",
+        // Blackstone / basalt family
+        "blackstone",
+        "polished_blackstone",
+        "polished_blackstone_bricks",
+        "gilded_blackstone",
+        "blackstone_stairs",
+        "blackstone_slab",
+        "blackstone_wall",
+        "basalt",
+        "polished_basalt",
+        "smooth_basalt",
         // Nether / End
         "netherrack",
         "nether_quartz_ore",
-        "nether_gold_ore",
         "end_stone",
+        "end_stone_bricks",
         "purpur_block",
         "purpur_pillar",
+        "nether_bricks",
+        "red_nether_bricks",
+        "nether_brick_stairs",
+        "nether_brick_slab",
+        "nether_brick_fence",
+        "magma_block",
+        "bone_block",
+        // Sandstone family
+        "sandstone",
+        "red_sandstone",
+        "smooth_sandstone",
+        "chiseled_sandstone",
+        "cut_sandstone",
+        "sandstone_stairs",
+        "sandstone_slab",
+        "red_sandstone_stairs",
+        // Quartz family
+        "quartz_block",
+        "smooth_quartz",
+        "chiseled_quartz_block",
+        "quartz_pillar",
+        "quartz_bricks",
+        "quartz_stairs",
+        // Prismarine family
+        "prismarine",
+        "prismarine_bricks",
+        "dark_prismarine",
+        "prismarine_stairs",
+        "prismarine_slab",
+        // Mud brick family
+        "mud_bricks",
+        "packed_mud",
+        "mud_brick_stairs",
+        "mud_brick_slab",
+        // Terracotta family
+        "terracotta",
+        "white_terracotta",
+        "orange_terracotta",
+        "magenta_terracotta",
+        "light_blue_terracotta",
+        "yellow_terracotta",
+        "lime_terracotta",
+        "pink_terracotta",
+        "gray_terracotta",
+        "light_gray_terracotta",
+        "cyan_terracotta",
+        "purple_terracotta",
+        "blue_terracotta",
+        "brown_terracotta",
+        "green_terracotta",
+        "red_terracotta",
+        "black_terracotta",
+        // Amethyst
+        "amethyst_block",
+        "budding_amethyst",
+        // Dripstone
+        "dripstone_block",
+        // Ice (pickaxe is the fastest tool; drops need silk touch either
+        // way, so harvest level stays 0)
+        "ice",
+        "packed_ice",
+        "blue_ice",
         // Manufactured
         "bricks",
         "brick_slab",
@@ -76,6 +175,9 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "gold_block",
         "diamond_block",
         "emerald_block",
+        "lapis_block",
+        "coal_block",
+        "redstone_block",
         "furnace",
         "blast_furnace",
         "smoker",
@@ -88,8 +190,6 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "dropper",
         "dispenser",
         "observer",
-        "chest",
-        "trapped_chest",
         "ender_chest",
         // Netherite blocks
         "ancient_debris",
@@ -99,36 +199,111 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
     }
 
     // --- Axe blocks ---
+    //
+    // Vanilla 1.21.11 `mineable/axe` membership. Chests are axe blocks in
+    // vanilla (report M-19: they were misfiled under Pickaxe, and with an
+    // over-strict harvest requirement on top — they are now level 0, so a
+    // bot without any axe can still break them by hand, exactly like
+    // vanilla).
     for &block in &[
+        "chest",
+        "trapped_chest",
         "oak_log",
         "spruce_log",
         "birch_log",
         "jungle_log",
         "acacia_log",
         "dark_oak_log",
+        "mangrove_log",
+        "cherry_log",
+        "bamboo_block",
+        "crimson_stem",
+        "warped_stem",
         "oak_planks",
         "spruce_planks",
         "birch_planks",
         "jungle_planks",
         "acacia_planks",
         "dark_oak_planks",
+        "mangrove_planks",
+        "cherry_planks",
+        "bamboo_planks",
+        "bamboo_mosaic",
+        "crimson_planks",
+        "warped_planks",
         "oak_stairs",
         "spruce_stairs",
         "birch_stairs",
+        "mangrove_stairs",
+        "cherry_stairs",
+        "bamboo_stairs",
+        "crimson_stairs",
+        "warped_stairs",
         "oak_slab",
         "spruce_slab",
         "birch_slab",
+        "mangrove_slab",
+        "cherry_slab",
+        "bamboo_slab",
+        "crimson_slab",
+        "warped_slab",
         "oak_fence",
         "spruce_fence",
         "birch_fence",
+        "mangrove_fence",
+        "cherry_fence",
+        "bamboo_fence",
+        "crimson_fence",
+        "warped_fence",
         "oak_fence_gate",
+        "mangrove_fence_gate",
+        "cherry_fence_gate",
+        "bamboo_fence_gate",
+        "crimson_fence_gate",
+        "warped_fence_gate",
         "oak_door",
         "spruce_door",
         "birch_door",
+        "mangrove_door",
+        "cherry_door",
+        "bamboo_door",
+        "crimson_door",
+        "warped_door",
+        "oak_trapdoor",
+        "spruce_trapdoor",
+        "birch_trapdoor",
+        "jungle_trapdoor",
+        "acacia_trapdoor",
+        "dark_oak_trapdoor",
+        "mangrove_trapdoor",
+        "cherry_trapdoor",
+        "bamboo_trapdoor",
+        "crimson_trapdoor",
+        "warped_trapdoor",
+        "jungle_stairs",
+        "acacia_stairs",
+        "dark_oak_stairs",
+        "jungle_slab",
+        "acacia_slab",
+        "dark_oak_slab",
+        "jungle_fence",
+        "acacia_fence",
+        "dark_oak_fence",
+        "jungle_fence_gate",
+        "acacia_fence_gate",
+        "dark_oak_fence_gate",
+        "jungle_door",
+        "acacia_door",
+        "dark_oak_door",
         "crafting_table",
         "bookshelf",
         "ladder",
         "barrel",
+        // Gourd / hive blocks are axe-mineable in vanilla
+        "pumpkin",
+        "melon",
+        "bee_nest",
+        "beehive",
     ] {
         m.insert(block, ToolType::Axe);
     }
@@ -168,6 +343,8 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "acacia_leaves",
         "dark_oak_leaves",
         "azalea_leaves",
+        "mangrove_leaves",
+        "cherry_leaves",
         "white_wool",
         "orange_wool",
         "magenta_wool",
@@ -195,9 +372,12 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
     m.insert("cobweb", ToolType::Sword);
 
     // --- Hoe blocks ---
-    // Hoes are the fastest tool for hay bales, sculk, and moss blocks.
-    // (Leaves variants are already mapped to Shears above.)
-    for &block in &["hay_bale", "sculk", "moss_block"] {
+    // Hoes are the fastest tool for hay blocks, sculk, moss, sponges, and
+    // shroomlight (vanilla 1.21.11 `mineable/hoe`). NOTE: the block id is
+    // `hay_block` — the previous `hay_bale` entry never matched a real
+    // snapshot block name. (Leaves variants are already mapped to Shears
+    // above.)
+    for &block in &["hay_block", "sculk", "moss_block", "sponge", "wet_sponge", "shroomlight"] {
         m.insert(block, ToolType::Hoe);
     }
 
@@ -361,8 +541,11 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
     m.insert("nether_quartz_ore", 3.0);
     m.insert("nether_gold_ore", 3.0);
     m.insert("end_stone", 3.0);
-    m.insert("purpur_block", 3.0);
-    m.insert("purpur_pillar", 3.0);
+    m.insert("end_stone_bricks", 3.0);
+    // Vanilla 1.21.11 hardness is 1.5 for both (the old 3.0 doubled the
+    // wait — safe direction, but inaccurate).
+    m.insert("purpur_block", 1.5);
+    m.insert("purpur_pillar", 1.5);
 
     // Wood
     m.insert("oak_log", 2.0);
@@ -413,7 +596,9 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
     m.insert("farmland", 0.6);
     m.insert("mycelium", 0.6);
     m.insert("podzol", 0.5);
-    m.insert("powder_snow", 0.1);
+    // Vanilla 1.21.11 hardness is 0.25 (report M-20: the old 0.1 halved the
+    // mining wait below the real break time).
+    m.insert("powder_snow", 0.25);
     m.insert("snow_block", 0.2);
 
     // Leaves & plants
@@ -454,10 +639,26 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
     // Other
     m.insert("ice", 0.5);
     m.insert("packed_ice", 0.5);
-    m.insert("blue_ice", 0.5);
+    // Vanilla 1.21.11 hardness is 2.8 (report M-20: the old 0.5 made the
+    // mining wait 5.6× too short, so every blue-ice dig timed out as
+    // MiningInterrupted).
+    m.insert("blue_ice", 2.8);
     m.insert("snow", 0.1);
-    m.insert("hay_bale", 0.5);
+    m.insert("hay_block", 0.5);
     m.insert("cobweb", 4.0);
+    m.insert("pumpkin", 1.0);
+    m.insert("melon", 1.0);
+    m.insert("bee_nest", 0.3);
+    m.insert("beehive", 0.6);
+    m.insert("sponge", 0.6);
+    m.insert("wet_sponge", 0.6);
+    m.insert("shroomlight", 1.0);
+    m.insert("sea_lantern", 0.3);
+    m.insert("glowstone", 0.3);
+    m.insert("magma_block", 0.5);
+    m.insert("bone_block", 2.0);
+    m.insert("dripstone_block", 1.5);
+    m.insert("pointed_dripstone", 1.5);
 
     // Notable blocks
     m.insert("obsidian", 50.0);
@@ -477,13 +678,197 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
     m.insert("chest", 2.5);
     m.insert("trapped_chest", 2.5);
     m.insert("iron_block", 5.0);
-    m.insert("gold_block", 5.0);
+    // Vanilla 1.21.11 hardness is 3.0 (report M-20: the old 5.0 over-
+    // estimated — the safe direction, but inaccurate).
+    m.insert("gold_block", 3.0);
     m.insert("diamond_block", 5.0);
     m.insert("emerald_block", 5.0);
+    m.insert("lapis_block", 3.0);
+    m.insert("coal_block", 5.0);
+    m.insert("redstone_block", 5.0);
+    m.insert("raw_iron_block", 5.0);
+    m.insert("raw_copper_block", 5.0);
+    m.insert("raw_gold_block", 5.0);
     m.insert("netherite_block", 50.0);
 
     // Ancient debris (needs diamond+ pickaxe, drops as raw ancient debris)
     m.insert("ancient_debris", 30.0);
+
+    // ── Coverage additions (report M-22) ─────────────────────
+    // Values are the vanilla 1.21.11 `strength` extracted from the
+    // azalea-generated block data.
+    //
+    // Wood families added in the 2026-08 review round (mangrove, cherry,
+    // bamboo, crimson, warped): logs/stems/planks/mosaic 2.0, doors and
+    // trapdoors 3.0, everything else 2.0. Leaves 0.2 like the other trees.
+    m.insert("mangrove_log", 2.0);
+    m.insert("cherry_log", 2.0);
+    m.insert("bamboo_block", 2.0);
+    m.insert("crimson_stem", 2.0);
+    m.insert("warped_stem", 2.0);
+    for &block in &[
+        "mangrove_planks",
+        "cherry_planks",
+        "bamboo_planks",
+        "bamboo_mosaic",
+        "crimson_planks",
+        "warped_planks",
+        "mangrove_stairs",
+        "cherry_stairs",
+        "bamboo_stairs",
+        "crimson_stairs",
+        "warped_stairs",
+        "mangrove_slab",
+        "cherry_slab",
+        "bamboo_slab",
+        "crimson_slab",
+        "warped_slab",
+        "mangrove_fence",
+        "cherry_fence",
+        "bamboo_fence",
+        "crimson_fence",
+        "warped_fence",
+        "mangrove_fence_gate",
+        "cherry_fence_gate",
+        "bamboo_fence_gate",
+        "crimson_fence_gate",
+        "warped_fence_gate",
+        "jungle_stairs",
+        "acacia_stairs",
+        "dark_oak_stairs",
+        "jungle_slab",
+        "acacia_slab",
+        "dark_oak_slab",
+        "jungle_fence",
+        "acacia_fence",
+        "dark_oak_fence",
+        "jungle_fence_gate",
+        "acacia_fence_gate",
+        "dark_oak_fence_gate",
+    ] {
+        m.insert(block, 2.0);
+    }
+    for &block in &[
+        "mangrove_door",
+        "cherry_door",
+        "bamboo_door",
+        "crimson_door",
+        "warped_door",
+        "mangrove_trapdoor",
+        "cherry_trapdoor",
+        "bamboo_trapdoor",
+        "crimson_trapdoor",
+        "warped_trapdoor",
+        "oak_trapdoor",
+        "spruce_trapdoor",
+        "birch_trapdoor",
+        "jungle_trapdoor",
+        "acacia_trapdoor",
+        "dark_oak_trapdoor",
+        "jungle_door",
+        "acacia_door",
+        "dark_oak_door",
+    ] {
+        m.insert(block, 3.0);
+    }
+    m.insert("mangrove_leaves", 0.2);
+    m.insert("cherry_leaves", 0.2);
+
+    // Copper family (all stone+ tier; see HARVEST_LEVEL).
+    m.insert("copper_block", 3.0);
+    m.insert("exposed_copper", 3.0);
+    m.insert("weathered_copper", 3.0);
+    m.insert("oxidized_copper", 3.0);
+    m.insert("cut_copper", 3.0);
+    m.insert("exposed_cut_copper", 3.0);
+    m.insert("waxed_copper_block", 3.0);
+
+    // Deepslate building family (stone itself stays 3.0 above).
+    m.insert("cobbled_deepslate", 3.5);
+    m.insert("polished_deepslate", 3.5);
+    m.insert("deepslate_bricks", 3.5);
+    m.insert("deepslate_tiles", 3.5);
+    m.insert("cobbled_deepslate_stairs", 3.5);
+    m.insert("cobbled_deepslate_slab", 3.5);
+    m.insert("cobbled_deepslate_wall", 3.5);
+
+    // Blackstone / basalt family.
+    m.insert("blackstone", 1.5);
+    m.insert("polished_blackstone", 2.0);
+    m.insert("polished_blackstone_bricks", 1.5);
+    m.insert("gilded_blackstone", 1.5);
+    m.insert("blackstone_stairs", 1.5);
+    m.insert("blackstone_slab", 2.0);
+    m.insert("blackstone_wall", 1.5);
+    m.insert("basalt", 1.25);
+    m.insert("polished_basalt", 1.25);
+    m.insert("smooth_basalt", 1.25);
+
+    // Sandstone family (smooth variants are 2.0, the rest 0.8).
+    m.insert("sandstone", 0.8);
+    m.insert("red_sandstone", 0.8);
+    m.insert("chiseled_sandstone", 0.8);
+    m.insert("cut_sandstone", 0.8);
+    m.insert("sandstone_stairs", 0.8);
+    m.insert("red_sandstone_stairs", 0.8);
+    m.insert("sandstone_slab", 2.0);
+    m.insert("smooth_sandstone", 2.0);
+    m.insert("smooth_sandstone_stairs", 2.0);
+
+    // Quartz family (smooth quartz 2.0, the rest 0.8).
+    m.insert("quartz_block", 0.8);
+    m.insert("chiseled_quartz_block", 0.8);
+    m.insert("quartz_pillar", 0.8);
+    m.insert("quartz_bricks", 0.8);
+    m.insert("quartz_stairs", 0.8);
+    m.insert("smooth_quartz", 2.0);
+
+    // Prismarine, nether brick, mud brick families.
+    m.insert("prismarine", 1.5);
+    m.insert("prismarine_bricks", 1.5);
+    m.insert("dark_prismarine", 1.5);
+    m.insert("prismarine_stairs", 1.5);
+    m.insert("prismarine_slab", 1.5);
+    m.insert("nether_bricks", 2.0);
+    m.insert("red_nether_bricks", 2.0);
+    m.insert("nether_brick_stairs", 2.0);
+    m.insert("nether_brick_slab", 2.0);
+    m.insert("nether_brick_fence", 2.0);
+    m.insert("mud_bricks", 1.5);
+    m.insert("packed_mud", 1.0);
+    m.insert("mud_brick_stairs", 1.5);
+    m.insert("mud_brick_slab", 1.5);
+
+    // Terracotta family (uniform 1.25).
+    m.insert("terracotta", 1.25);
+    for &block in &[
+        "white_terracotta",
+        "orange_terracotta",
+        "magenta_terracotta",
+        "light_blue_terracotta",
+        "yellow_terracotta",
+        "lime_terracotta",
+        "pink_terracotta",
+        "gray_terracotta",
+        "light_gray_terracotta",
+        "cyan_terracotta",
+        "purple_terracotta",
+        "blue_terracotta",
+        "brown_terracotta",
+        "green_terracotta",
+        "red_terracotta",
+        "black_terracotta",
+    ] {
+        m.insert(block, 1.25);
+    }
+
+    // Amethyst.
+    m.insert("amethyst_block", 1.5);
+    m.insert("budding_amethyst", 1.5);
+
+    // Common stone-family blocks missing from the original table.
+    m.insert("mossy_cobblestone", 2.0);
+    m.insert("smooth_stone", 2.0);
 
     m
 });
@@ -587,9 +972,16 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
         "snow_block",
         "powder_snow",
         "mud",
+        "packed_mud",
         "muddy_mangrove_roots",
         "mycelium",
         "podzol",
+        "pumpkin",
+        "melon",
+        "bee_nest",
+        "beehive",
+        "sponge",
+        "wet_sponge",
         "oak_leaves",
         "spruce_leaves",
         "birch_leaves",
@@ -597,11 +989,32 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
         "acacia_leaves",
         "dark_oak_leaves",
         "azalea_leaves",
+        "mangrove_leaves",
+        "cherry_leaves",
+        // All 16 wool colours are level 0 (the original table listed only
+        // white_wool; the others silently defaulted to 0 anyway — this just
+        // makes the coverage explicit).
         "white_wool",
+        "orange_wool",
+        "magenta_wool",
+        "light_blue_wool",
+        "yellow_wool",
+        "lime_wool",
+        "pink_wool",
+        "gray_wool",
+        "light_gray_wool",
+        "cyan_wool",
+        "purple_wool",
+        "blue_wool",
+        "brown_wool",
+        "green_wool",
+        "red_wool",
+        "black_wool",
         "cobweb",
-        "hay_bale",
+        "hay_block",
         "sculk",
         "moss_block",
+        "shroomlight",
         "vine",
         "glow_lichen",
         "glass",
@@ -609,68 +1022,144 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
         "white_stained_glass",
         "white_stained_glass_pane",
         "ice",
+        "packed_ice",
+        "blue_ice",
+        // Chests are level 0 in vanilla — any tool (or hand) breaks them
+        // and they drop with their contents (report M-19: the old table
+        // demanded a stone+ PICKAXE and refused the bare-hand path).
+        "chest",
+        "trapped_chest",
+        "ender_chest",
+        // Nether gold ore is level 0 in vanilla 1.21.11 — it appears in NO
+        // `needs_*_tool` / `incorrect_for_*_tool` tag (verified against the
+        // azalea-generated tag data). The 2026-08 audit's "level 2" claim
+        // was wrong; the stone-tier over-requirement let a bot skip a legal
+        // wooden/stone pick (report M-21 adjudication).
+        "nether_gold_ore",
+        // Wood families added in the 2026-08 review round.
+        "mangrove_log",
+        "mangrove_planks",
+        "cherry_log",
+        "cherry_planks",
+        "bamboo_block",
+        "bamboo_planks",
+        "bamboo_mosaic",
+        "crimson_stem",
+        "crimson_planks",
+        "warped_stem",
+        "warped_planks",
+        // Stone-family building blocks with NO vanilla tier requirement
+        // (they DO require the correct tool for drops — see
+        // TOOL_REQUIRED_FOR_DROPS).
+        "cobbled_deepslate",
+        "polished_deepslate",
+        "deepslate_bricks",
+        "deepslate_tiles",
+        "blackstone",
+        "polished_blackstone",
+        "polished_blackstone_bricks",
+        "gilded_blackstone",
+        "basalt",
+        "polished_basalt",
+        "smooth_basalt",
+        "sandstone",
+        "red_sandstone",
+        "smooth_sandstone",
+        "quartz_block",
+        "smooth_quartz",
+        "prismarine",
+        "prismarine_bricks",
+        "dark_prismarine",
+        "nether_bricks",
+        "red_nether_bricks",
+        "mud_bricks",
+        "terracotta",
+        "white_terracotta",
+        "orange_terracotta",
+        "magenta_terracotta",
+        "light_blue_terracotta",
+        "yellow_terracotta",
+        "lime_terracotta",
+        "pink_terracotta",
+        "gray_terracotta",
+        "light_gray_terracotta",
+        "cyan_terracotta",
+        "purple_terracotta",
+        "blue_terracotta",
+        "brown_terracotta",
+        "green_terracotta",
+        "red_terracotta",
+        "black_terracotta",
+        "amethyst_block",
+        "budding_amethyst",
+        "dripstone_block",
+        "mossy_cobblestone",
+        "smooth_stone",
+        "end_stone_bricks",
+        "bone_block",
+        "magma_block",
+        "coal_block",
+        "redstone_block",
+        "lapis_block",
     ] {
         m.insert(block, 0u8);
     }
 
-    // Level 1: needs stone+ (cobblestone, stone, netherrack, stone bricks,
-    // most stone-family blocks, all 0-level ores like coal/iron/copper, etc.).
+    // Level 1: needs stone+ (vanilla needs_stone_tool — iron/copper/lapis
+    // ores, copper blocks, and the raw copper/iron blocks).
+    //
+    // The first ten entries are a DOCUMENTED CONSERVATIVE DEVIATION: vanilla
+    // lists them at level 0 (any pickaxe drops them), but the bot refuses a
+    // wooden pickaxe for them because wood mining is so slow the bot should
+    // prefer to wait for stone+. test_harvest_level_known_blocks pins
+    // stone=1 and cobblestone=1; the deviation was deliberately introduced
+    // in the 2026-08 audit round and is kept. Everything else the old table
+    // carried at level 1 (andesite, stone bricks, furnace, hopper, chests,
+    // ...) moved to level 0 in the 2026-08 review round: vanilla has no
+    // tier requirement for those blocks, and the over-requirement made the
+    // bot refuse legal mining (report M-19/M-22).
     for &block in &[
+        // Documented conservative over-requirements (vanilla level 0):
         "stone",
         "cobblestone",
-        "andesite",
-        "diorite",
-        "granite",
-        "stone_bricks",
-        "mossy_stone_bricks",
-        "cracked_stone_bricks",
-        "stone_slab",
-        "cobblestone_slab",
-        "stone_stairs",
-        "cobblestone_stairs",
-        "cobblestone_wall",
-        "tuff",
-        "calcite",
+        "coal_ore",
+        "deepslate_coal_ore",
         "netherrack",
         "nether_quartz_ore",
         "end_stone",
         "purpur_block",
         "purpur_pillar",
-        "bricks",
-        "brick_slab",
-        "brick_stairs",
-        "furnace",
-        "blast_furnace",
-        "smoker",
-        "enchanting_table",
-        "brewing_stand",
-        "hopper",
-        "dropper",
-        "dispenser",
-        "observer",
-        "chest",
-        "trapped_chest",
-        "ender_chest",
         "deepslate",
-        "coal_ore",
-        "deepslate_coal_ore",
+        // Vanilla level 1 (needs_stone_tool):
         "iron_ore",
         "deepslate_iron_ore",
         "copper_ore",
         "deepslate_copper_ore",
         "lapis_ore",
         "deepslate_lapis_ore",
+        "copper_block",
+        "exposed_copper",
+        "weathered_copper",
+        "oxidized_copper",
+        "cut_copper",
+        "raw_copper_block",
+        "raw_iron_block",
+        "iron_block",
     ] {
         m.insert(block, 1u8);
     }
 
-    // Level 2: needs iron+ (gold, diamond, emerald ores; deepslate variants;
-    // iron/diamond/blocks; anvils; obsidian-adjacent blocks).
+    // Level 2: needs iron+ (vanilla needs_iron_tool: gold/redstone/diamond/
+    // emerald ores, their deepslate variants, and the gold/diamond/emerald/
+    // raw-gold blocks).
     //
-    // `nether_gold_ore` lives here too (audit H-3): vanilla 1.21 requires an
-    // iron+ pickaxe to drop it, and the old level-1 entry let a stone
-    // pickaxe "mine" it for nothing. Nether gold is a rare ore — refusing
-    // stone here is the conservative, vanilla-accurate choice.
+    // NOTE: nether_gold_ore was moved OUT of this list in the 2026-08 review
+    // round — the audit's "iron+" claim was refuted by the vanilla 1.21.11
+    // tag data (it appears in no needs_*/incorrect_for_* tag; see its entry
+    // in the level-0 list). iron_block moved out as well — vanilla
+    // needs_stone_tool lists it at level 1. anvil/chipped_anvil/
+    // damaged_anvil have no vanilla tier requirement at all (level 0 +
+    // correct tool required for drops).
     for &block in &[
         "gold_ore",
         "deepslate_gold_ore",
@@ -680,14 +1169,10 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
         "deepslate_diamond_ore",
         "emerald_ore",
         "deepslate_emerald_ore",
-        "nether_gold_ore",
-        "iron_block",
         "gold_block",
         "diamond_block",
         "emerald_block",
-        "anvil",
-        "chipped_anvil",
-        "damaged_anvil",
+        "raw_gold_block",
     ] {
         m.insert(block, 2u8);
     }
@@ -705,6 +1190,195 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
 
     m
 });
+
+/// Blocks whose drops REQUIRE the correct tool even though they have no
+/// harvest-tier (level) requirement.
+///
+/// Extracted from vanilla 1.21.11's requires_correct_tool_for_drops block
+/// property (via the azalea-generated block behaviours), intersected with
+/// the blocks this crate knows about (BLOCK_TO_TOOL_TYPE). Mining one of
+/// these WITHOUT its correct tool breaks the block but drops nothing — e.g.
+/// cobbled_deepslate by hand. This is the second half of vanilla's mining
+/// gate next to HARVEST_LEVEL: tier 0 does NOT mean "hand is fine" for
+/// these blocks.
+pub static TOOL_REQUIRED_FOR_DROPS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    let blocks: &[&str] = &[
+        // Stone family
+        "stone",
+        "cobblestone",
+        "mossy_cobblestone",
+        "andesite",
+        "diorite",
+        "granite",
+        "stone_bricks",
+        "mossy_stone_bricks",
+        "cracked_stone_bricks",
+        "smooth_stone",
+        "stone_slab",
+        "cobblestone_slab",
+        "stone_stairs",
+        "cobblestone_stairs",
+        "cobblestone_wall",
+        // Ores (every pickaxe ore, regardless of tier)
+        "coal_ore",
+        "iron_ore",
+        "gold_ore",
+        "diamond_ore",
+        "emerald_ore",
+        "lapis_ore",
+        "redstone_ore",
+        "copper_ore",
+        "nether_gold_ore",
+        "deepslate_coal_ore",
+        "deepslate_iron_ore",
+        "deepslate_gold_ore",
+        "deepslate_diamond_ore",
+        "deepslate_emerald_ore",
+        "deepslate_lapis_ore",
+        "deepslate_redstone_ore",
+        "deepslate_copper_ore",
+        // Deepslate building family
+        "deepslate",
+        "cobbled_deepslate",
+        "polished_deepslate",
+        "deepslate_bricks",
+        "deepslate_tiles",
+        "cobbled_deepslate_stairs",
+        "cobbled_deepslate_slab",
+        "cobbled_deepslate_wall",
+        "tuff",
+        "calcite",
+        // Copper family + raw metal blocks
+        "copper_block",
+        "exposed_copper",
+        "weathered_copper",
+        "oxidized_copper",
+        "cut_copper",
+        "raw_copper_block",
+        "raw_iron_block",
+        "raw_gold_block",
+        // Blackstone / basalt family
+        "blackstone",
+        "polished_blackstone",
+        "polished_blackstone_bricks",
+        "gilded_blackstone",
+        "blackstone_stairs",
+        "blackstone_slab",
+        "blackstone_wall",
+        "basalt",
+        "polished_basalt",
+        "smooth_basalt",
+        // Nether / End
+        "netherrack",
+        "nether_quartz_ore",
+        "end_stone",
+        "end_stone_bricks",
+        "purpur_block",
+        "purpur_pillar",
+        "nether_bricks",
+        "red_nether_bricks",
+        "nether_brick_stairs",
+        "nether_brick_slab",
+        "nether_brick_fence",
+        "magma_block",
+        "bone_block",
+        // Sandstone family
+        "sandstone",
+        "red_sandstone",
+        "smooth_sandstone",
+        "chiseled_sandstone",
+        "cut_sandstone",
+        "sandstone_stairs",
+        "sandstone_slab",
+        "red_sandstone_stairs",
+        // Quartz family
+        "quartz_block",
+        "smooth_quartz",
+        "chiseled_quartz_block",
+        "quartz_pillar",
+        "quartz_bricks",
+        "quartz_stairs",
+        // Prismarine family
+        "prismarine",
+        "prismarine_bricks",
+        "dark_prismarine",
+        "prismarine_stairs",
+        "prismarine_slab",
+        // Mud brick family
+        "mud_bricks",
+        "packed_mud",
+        "mud_brick_stairs",
+        "mud_brick_slab",
+        // Terracotta family
+        "terracotta",
+        "white_terracotta",
+        "orange_terracotta",
+        "magenta_terracotta",
+        "light_blue_terracotta",
+        "yellow_terracotta",
+        "lime_terracotta",
+        "pink_terracotta",
+        "gray_terracotta",
+        "light_gray_terracotta",
+        "cyan_terracotta",
+        "purple_terracotta",
+        "blue_terracotta",
+        "brown_terracotta",
+        "green_terracotta",
+        "red_terracotta",
+        "black_terracotta",
+        // Amethyst / dripstone
+        "amethyst_block",
+        "budding_amethyst",
+        "dripstone_block",
+        // Bricks
+        "bricks",
+        "brick_slab",
+        "brick_stairs",
+        // Metal / mineral blocks
+        "iron_block",
+        "gold_block",
+        "diamond_block",
+        "emerald_block",
+        "lapis_block",
+        "coal_block",
+        "redstone_block",
+        // Machinery (all drop only with a pickaxe)
+        "furnace",
+        "blast_furnace",
+        "smoker",
+        "anvil",
+        "chipped_anvil",
+        "damaged_anvil",
+        "enchanting_table",
+        "hopper",
+        "dropper",
+        "dispenser",
+        "observer",
+        // Hardest materials
+        "obsidian",
+        "ancient_debris",
+        "netherite_block",
+        // Non-pickaxe tools: cobweb needs sword/shears for string, snow
+        // needs a shovel for snowballs.
+        "cobweb",
+        "snow",
+        "snow_block",
+    ];
+    blocks.iter().copied().collect()
+});
+
+/// Whether the block drops nothing unless mined with its correct tool,
+/// independent of any harvest-tier requirement.
+///
+/// Vanilla's requires_correct_tool_for_drops property (see
+/// TOOL_REQUIRED_FOR_DROPS). Combined with HARVEST_LEVEL this forms the
+/// full vanilla mining gate: refusing to mine a tier-0 block by hand is
+/// only correct when this returns true (report M-16 — dirt, sand, logs,
+/// wool etc. are legal hand-mines and must not be refused).
+pub fn requires_tool_for_drops(block_type: &str) -> bool {
+    TOOL_REQUIRED_FOR_DROPS.contains(block_type)
+}
 
 // ---------------------------------------------------------------------------
 // Lookup functions
@@ -811,9 +1485,11 @@ mod tests {
         // Sword is the fastest tool for cobweb in Java Edition.
         assert_eq!(best_tool_for_block("cobweb"), ToolType::Sword);
         // Hoe is the fastest tool for these blocks.
-        assert_eq!(best_tool_for_block("hay_bale"), ToolType::Hoe);
+        assert_eq!(best_tool_for_block("hay_block"), ToolType::Hoe);
         assert_eq!(best_tool_for_block("sculk"), ToolType::Hoe);
         assert_eq!(best_tool_for_block("moss_block"), ToolType::Hoe);
+        assert_eq!(best_tool_for_block("sponge"), ToolType::Hoe);
+        assert_eq!(best_tool_for_block("shroomlight"), ToolType::Hoe);
         // Leaves variants are mapped to Shears (for drops), not Hoe.
         assert_eq!(best_tool_for_block("oak_leaves"), ToolType::Shears);
     }
@@ -1208,48 +1884,164 @@ mod tests {
         assert_eq!(HARVEST_LEVEL.get("not_a_block").copied(), None);
     }
 
-    // ── H-3 (audit): nether_gold_ore requires iron+ ─────────────────
+    // ── M-21 (report): nether_gold_ore adjudicated to level 0 ───────
 
-    /// H-3 (audit): vanilla 1.21 requires an IRON+ pickaxe (harvest level 2)
-    /// to drop nether_gold_ore — not stone (level 1). The old table listed it
-    /// at level 1, so a stone pickaxe was "accepted" and the bot mined the
-    /// ore for nothing. Assert the corrected level AND the tool-selector
-    /// consequences: level 2 rejects a stone pickaxe and accepts an iron one.
+    /// Report M-21 adjudication: the vanilla 1.21.11 data (extracted from
+    /// the azalea-generated block tags) lists nether_gold_ore in NO
+    /// needs_*_tool / incorrect_for_*_tool tag — ANY pickaxe drops it. The
+    /// 2026-08 audit's "level 2 (iron+)" correction was wrong; the table
+    /// now carries level 0 so wooden and stone pickaxes are accepted
+    /// (select_tool_for_block applies no tier filter for level-0 blocks).
     ///
-    /// Conservative deviations from vanilla (level 0, hand-mineable):
-    /// `coal_ore`, `netherrack`, `end_stone`, `purpur_block`/`purpur_pillar`,
-    /// `deepslate`, and `nether_quartz_ore` are deliberately listed at
-    /// level 1 so a wood-only bot refuses to mine them (wood mining is so
-    /// slow the bot should prefer not to). These are documented, deliberate
-    /// OVER-requirements, NOT vanilla-accurate values.
+    /// Conservative deviations from vanilla KEPT at level 1 (documented in
+    /// the HARVEST_LEVEL table): stone, cobblestone, coal_ore,
+    /// deepslate_coal_ore, netherrack, end_stone, purpur_block/
+    /// purpur_pillar, deepslate, nether_quartz_ore.
     #[test]
-    fn test_harvest_level_nether_gold_ore_requires_iron() {
+    fn test_harvest_level_nether_gold_ore_is_level_zero() {
         assert_eq!(
             HARVEST_LEVEL.get("nether_gold_ore").copied(),
-            Some(2),
-            "nether_gold_ore must require iron+ (harvest level 2), not stone (1)"
+            Some(0),
+            "nether_gold_ore has no vanilla tier requirement (any pickaxe drops it)"
         );
-
-        // find_tool_in_inventory with required level 2 must reject a stone
-        // pickaxe (level 1 < 2) and accept an iron pickaxe (level 2).
-        let stone_inv = vec![Some(ItemStack {
-            item_id: "stone_pickaxe".to_string(),
+        // With no tier filter, even a wooden pickaxe is selectable.
+        let wood_inv = vec![Some(ItemStack {
+            item_id: "wooden_pickaxe".to_string(),
             count: 1,
         })];
         assert_eq!(
-            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &stone_inv, Some(2)),
-            None,
-            "stone pickaxe (level 1) must be rejected for nether_gold_ore"
+            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &wood_inv, Some(0)),
+            Some((MaterialTier::Wood, 0)),
+            "wooden pickaxe must be accepted for nether_gold_ore"
         );
+    }
 
-        let iron_inv = vec![Some(ItemStack {
-            item_id: "iron_pickaxe".to_string(),
-            count: 1,
-        })];
-        assert_eq!(
-            crate::tool_select::find_tool_in_inventory(&ToolType::Pickaxe, &iron_inv, Some(2)),
-            Some((MaterialTier::Iron, 0)),
-            "iron pickaxe (level 2) must be accepted for nether_gold_ore"
-        );
+    // ── M-19 (report): chests are axe blocks with no tier gate ──────
+
+    /// Report M-19: vanilla chests are mineable/axe with NO harvest
+    /// requirement. The old table listed them as Pickaxe at level 1, so a
+    /// bot without a stone+ pickaxe got ToolNotFound even though vanilla
+    /// lets you break a chest bare-handed.
+    #[test]
+    fn test_chest_is_axe_block_without_harvest_gate() {
+        assert_eq!(best_tool_for_block("chest"), ToolType::Axe);
+        assert_eq!(best_tool_for_block("trapped_chest"), ToolType::Axe);
+        assert_eq!(best_tool_for_block("ender_chest"), ToolType::Pickaxe);
+        assert_eq!(HARVEST_LEVEL.get("chest").copied(), Some(0));
+        assert_eq!(HARVEST_LEVEL.get("trapped_chest").copied(), Some(0));
+        assert_eq!(HARVEST_LEVEL.get("ender_chest").copied(), Some(0));
+        // None of the chests requires the correct tool for drops — a hand
+        // break still yields the chest (contents included).
+        assert!(!requires_tool_for_drops("chest"));
+        assert!(!requires_tool_for_drops("trapped_chest"));
+        assert!(!requires_tool_for_drops("ender_chest"));
+    }
+
+    // ── M-20 (report): hardness corrections ─────────────────────────
+
+    /// Report M-20: blue_ice 0.5→2.8 (mining wait was 5.6x too short),
+    /// gold_block 5.0→3.0, powder_snow 0.1→0.25, purpur 3.0→1.5.
+    #[test]
+    fn test_hardness_corrections_match_vanilla() {
+        assert_eq!(BLOCK_HARDNESS.get("blue_ice").copied(), Some(2.8));
+        assert_eq!(BLOCK_HARDNESS.get("gold_block").copied(), Some(3.0));
+        assert_eq!(BLOCK_HARDNESS.get("powder_snow").copied(), Some(0.25));
+        assert_eq!(BLOCK_HARDNESS.get("purpur_block").copied(), Some(1.5));
+        assert_eq!(BLOCK_HARDNESS.get("purpur_pillar").copied(), Some(1.5));
+        // Unchanged anchors so the corrections cannot silently regress
+        // neighbouring entries.
+        assert_eq!(BLOCK_HARDNESS.get("packed_ice").copied(), Some(0.5));
+        assert_eq!(BLOCK_HARDNESS.get("ice").copied(), Some(0.5));
+        assert_eq!(BLOCK_HARDNESS.get("iron_block").copied(), Some(5.0));
+    }
+
+    // ── M-22 (report): coverage additions spot-checks ───────────────
+
+    /// Report M-22: previously-unregistered block families must now map
+    /// to the vanilla tool and tier instead of silently falling back to
+    /// "hand, no gate".
+    #[test]
+    fn test_coverage_additions_match_vanilla() {
+        // New wood families are axe blocks, level 0, no drop gate.
+        for block in [
+            "mangrove_planks",
+            "cherry_log",
+            "bamboo_planks",
+            "crimson_stem",
+            "warped_planks",
+        ] {
+            assert_eq!(best_tool_for_block(block), ToolType::Axe, "{block}");
+            assert_eq!(HARVEST_LEVEL.get(block).copied(), Some(0), "{block}");
+            assert!(!requires_tool_for_drops(block), "{block}");
+        }
+        // Copper needs stone+ (vanilla needs_stone_tool).
+        assert_eq!(best_tool_for_block("copper_block"), ToolType::Pickaxe);
+        assert_eq!(HARVEST_LEVEL.get("copper_block").copied(), Some(1));
+        assert_eq!(HARVEST_LEVEL.get("raw_copper_block").copied(), Some(1));
+        assert_eq!(HARVEST_LEVEL.get("raw_iron_block").copied(), Some(1));
+        assert_eq!(HARVEST_LEVEL.get("raw_gold_block").copied(), Some(2));
+        // Cobbled deepslate: pickaxe, level 0, but hand drops nothing.
+        assert_eq!(best_tool_for_block("cobbled_deepslate"), ToolType::Pickaxe);
+        assert_eq!(HARVEST_LEVEL.get("cobbled_deepslate").copied(), Some(0));
+        assert!(requires_tool_for_drops("cobbled_deepslate"));
+        // Blackstone / basalt / sandstone / quartz / prismarine /
+        // nether brick / mud brick / terracotta / amethyst families.
+        for block in [
+            "blackstone",
+            "basalt",
+            "sandstone",
+            "quartz_block",
+            "prismarine",
+            "nether_bricks",
+            "mud_bricks",
+            "terracotta",
+            "white_terracotta",
+            "amethyst_block",
+            "dripstone_block",
+        ] {
+            assert_eq!(best_tool_for_block(block), ToolType::Pickaxe, "{block}");
+            assert_eq!(HARVEST_LEVEL.get(block).copied(), Some(0), "{block}");
+            assert!(requires_tool_for_drops(block), "{block}");
+        }
+        // Anvil family: no vanilla tier requirement (moved from level 2),
+        // but a pickaxe is still required for drops.
+        assert_eq!(HARVEST_LEVEL.get("anvil"), None);
+        assert!(requires_tool_for_drops("anvil"));
+        // iron_block is level 1 in vanilla (was level 2).
+        assert_eq!(HARVEST_LEVEL.get("iron_block").copied(), Some(1));
+    }
+
+    // ── TOOL_REQUIRED_FOR_DROPS ─────────────────────────────────────
+
+    /// The drop gate must cover the tool-required families and stay out
+    /// of the legal hand-mining blocks (report M-16).
+    #[test]
+    fn test_requires_tool_for_drops_split() {
+        // Requires the correct tool for drops.
+        assert!(requires_tool_for_drops("stone"));
+        assert!(requires_tool_for_drops("furnace"));
+        assert!(requires_tool_for_drops("hopper"));
+        assert!(requires_tool_for_drops("cobweb"));
+        assert!(requires_tool_for_drops("snow_block"));
+        // Legal hand mines — must NOT be gated.
+        for block in [
+            "dirt",
+            "sand",
+            "gravel",
+            "oak_log",
+            "oak_planks",
+            "chest",
+            "white_wool",
+            "oak_leaves",
+            "pumpkin",
+            "melon",
+            "sponge",
+            "ice",
+            "glass",
+        ] {
+            assert!(!requires_tool_for_drops(block), "{block} must stay hand-mineable");
+        }
+        // Unknown blocks are not gated (fallback semantics).
+        assert!(!requires_tool_for_drops("unknown_block_xyz"));
     }
 }

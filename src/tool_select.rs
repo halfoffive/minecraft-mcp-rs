@@ -193,6 +193,19 @@ pub fn build_tool_alternatives(
 }
 
 // ---------------------------------------------------------------------------
+
+/// Alternatives for a block that needs a SPECIFIC tool but has no tier
+/// requirement (harvest level 0 + requires_correct_tool_for_drops, e.g.
+/// cobbled_deepslate): the weakest tool of the type is sufficient.
+///
+/// Shears have no material prefix; Hand never needs an alternative.
+pub fn base_tool_alternative(tool_type: ToolType) -> Vec<String> {
+    match tool_type {
+        ToolType::Shears => vec!["shears".into()],
+        ToolType::Hand => vec![],
+        other => vec![format!("{} {other}", MaterialTier::Wood)],
+    }
+}
 // Tests
 // ---------------------------------------------------------------------------
 

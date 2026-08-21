@@ -29,7 +29,9 @@ use crate::compound_ops::{
 use crate::error::BotError;
 use crate::mining_calc::calculate_mine_time;
 use crate::state::SharedState;
-use crate::tool_select::{build_tool_alternatives, find_tool_in_inventory, select_tool_for_block};
+use crate::tool_select::{
+    base_tool_alternative, build_tool_alternatives, find_tool_in_inventory, select_tool_for_block,
+};
 use crate::types::{BlockPos, BotCommand, BotResult, MaterialTier, ToolType};
 
 // ---------------------------------------------------------------------------
@@ -298,19 +300,36 @@ impl CompoundOpExecutor {
         if use_best_tool && required_tool != ToolType::Hand {
             let inventory = Self::query_inventory(executor).await?;
             let selection = select_tool_for_block(&block_type, &inventory);
-
-            // Step 4: Tool needed but not in inventory
+            // Step 4: Tool needed but not in inventory. M-16: refuse ONLY
+            // when the block genuinely demands a tool — a harvest level
+            // above 0, or vanilla's requires_correct_tool_for_drops flag
+            // (e.g. cobbled_deepslate drops nothing by hand). Tier-0 blocks
+            // without the flag (dirt, sand, logs, wool, chests, ...) are
+            // LEGAL hand mines in vanilla; the bot now falls through and
+            // digs with an empty hand (the mine-time model below uses hand
+            // speed) instead of surfacing ToolNotFound with a useless
+            // "wood shovel"-style suggestion.
             if selection.tool_type == ToolType::Hand {
-                return Err(BotError::ToolNotFound {
-                    tool_type: required_tool,
-                    material: None,
-                    alternatives: build_tool_alternatives(
-                        required_tool,
-                        selection.required_harvest_level,
-                    ),
-                });
+                let required_level = selection.required_harvest_level.unwrap_or(0);
+                if required_level > 0
+                    || crate::block_data::requires_tool_for_drops(&block_type)
+                {
+                    let alternatives = if required_level > 0 {
+                        build_tool_alternatives(required_tool, selection.required_harvest_level)
+                    } else {
+                        base_tool_alternative(required_tool)
+                    };
+                    return Err(BotError::ToolNotFound {
+                        tool_type: required_tool,
+                        material: None,
+                        alternatives,
+                    });
+                }
+                warn!(
+                    %block_type,
+                    "no matching tool in inventory; block is hand-mineable, digging bare-handed"
+                );
             }
-
             tool_type = selection.tool_type;
             material = selection.material.unwrap_or(MaterialTier::Wood);
             selected_harvest_level = selection.required_harvest_level;
@@ -1383,11 +1402,13 @@ mod tests {
         // best tool is a Shovel, so the upgraded mock (which only removes a
         // block when the held item matches the block's best tool, or the
         // block needs no tool) correctly leaves the block — mirroring a real
-        // bot that would fail the mine-time budget. "ice" has NO best tool
-        // (best_tool_for_block == Hand), preserving the test's intent:
-        // a hand-mineable block with no tool selection.
+        // bot that would fail the mine-time budget. "glass" has NO best
+        // tool (best_tool_for_block == Hand), preserving the test's intent:
+        // a hand-mineable block with no tool selection. (The 2026-08 review
+        // round gave ice a vanilla-accurate pickaxe mapping, so it no
+        // longer qualifies.)
         let pos = BlockPos::new(10, 64, 20);
-        let snapshot = make_snapshot_with_block(pos, "ice");
+        let snapshot = make_snapshot_with_block(pos, "glass");
         let (executor, _mock, _state) = setup(vec![], snapshot);
 
         let result = CompoundOpExecutor::execute_mine_block(&executor, pos, false).await;
@@ -1395,7 +1416,7 @@ mod tests {
         assert!(result.is_ok());
         let bot_result = result.unwrap();
         assert!(bot_result.success);
-        assert!(bot_result.message.contains("Mined ice"));
+        assert!(bot_result.message.contains("Mined glass"));
     }
 
     // ── execute_mine_block: with best tool ────────────────────────────────
@@ -1870,14 +1891,63 @@ mod tests {
 
     // ── State machine integration: mine block reaches all states ─────────
 
+
+    /// M-16 (report): tier-0 blocks WITHOUT the
+    /// requires_correct_tool_for_drops flag (dirt, sand, logs, wool,
+    /// chests, ...) are legal hand mines in vanilla. With the matching
+    /// tool missing the executor must fall through and dig bare-handed
+    /// instead of refusing with ToolNotFound. The strict mock still needs
+    /// the correct held item to remove the block, so the flow runs into
+    /// the mining wait and ends MiningInterrupted — the assertion is that
+    /// it is NOT ToolNotFound (it never got past the gate before M-16).
+    #[tokio::test]
+    async fn test_mine_block_hand_mineable_block_not_tool_not_found() {
+        let pos = BlockPos::new(10, 64, 20);
+        let snapshot = make_snapshot_with_block(pos, "dirt");
+        let (executor, _mock, _state) = setup(vec![], snapshot);
+
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, true).await;
+
+        assert!(
+            !matches!(result, Err(BotError::ToolNotFound { .. })),
+            "dirt is hand-mineable in vanilla; got: {result:?}"
+        );
+    }
+
+    /// M-16 companion: a tier-0 block that DOES require the correct tool
+    /// for drops (cobbled_deepslate) is still refused with ToolNotFound
+    /// when no pickaxe is present — hand-mining it would waste the budget
+    /// for no drops. The alternative suggests the weakest pickaxe.
+    #[tokio::test]
+    async fn test_mine_block_requires_drops_block_still_tool_not_found() {
+        let pos = BlockPos::new(10, 64, 20);
+        let snapshot = make_snapshot_with_block(pos, "cobbled_deepslate");
+        let (executor, _mock, _state) = setup(vec![], snapshot);
+
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, true).await;
+
+        match result {
+            Err(BotError::ToolNotFound {
+                tool_type,
+                alternatives,
+                ..
+            }) => {
+                assert_eq!(tool_type, ToolType::Pickaxe);
+                assert_eq!(alternatives, vec!["wood pickaxe".to_string()]);
+            }
+            other => panic!("expected ToolNotFound, got: {other:?}"),
+        }
+    }
     #[tokio::test]
     async fn test_mine_block_state_machine_reaches_all_states() {
         // REWRITTEN (audit H-1): previously mined DIRT bare-handed, which
         // the upgraded mock now correctly refuses (dirt needs a shovel).
-        // "ice" is hand-mineable, so the full Idle → MoveTo → Break →
-        // WaitingForResult → Completed flow still runs with no inventory.
+        // "glass" has no best tool at all, so the full Idle → MoveTo →
+        // Break → WaitingForResult → Completed flow still runs with no
+        // inventory. (The 2026-08 review round gave ice a vanilla-accurate
+        // pickaxe mapping, so it no longer qualifies.)
         let pos = BlockPos::new(5, 64, 5);
-        let snapshot = make_snapshot_with_block(pos, "ice");
+        let snapshot = make_snapshot_with_block(pos, "glass");
         let (executor, _mock, _state) = setup(vec![], snapshot);
 
         let result = CompoundOpExecutor::execute_mine_block(&executor, pos, false).await;
