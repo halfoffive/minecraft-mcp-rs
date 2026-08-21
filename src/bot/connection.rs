@@ -213,7 +213,13 @@ impl ConnectionManager {
                     .start(account, address.clone()) => result,
                 _ = start_cancel.cancelled() => {
                     info!("disconnect requested during connection attempt — aborting start");
-                    self.state.set_online(false);
+                    // M-7: start() is dropped, so azalea never fires
+                    // Event::Disconnect and handle_disconnect does not run.
+                    // Do the shared idempotent session teardown here or the
+                    // aborted session's ECS World handle / executor_busy /
+                    // connected_since / world-view cache / commands probe
+                    // leak into the next session.
+                    self.state.clear_session_state();
                     Self::request_repaint(&egui_ctx);
                     // Unlike the two disconnect checkpoints below, this
                     // branch used to break unconditionally — an agent-driven
@@ -529,6 +535,14 @@ pub(crate) fn prepare_connect_entry(state: &SharedState) {
     state.clear_last_error();
     state.reset_cancel_token();
     state.take_config_restart();
+    // M-6: discard a stale session_was_online latch. The latch is consumed
+    // after start() returns, but every cancel-token branch BREAKs the loop
+    // without consuming it — most importantly a Disconnect click while the
+    // bot is ONLINE (the latch was set by handle_spawn). Without this
+    // discard the next connect() would read the stale "was online" and a
+    // first-connect failure would silently enter the infinite backoff
+    // branch instead of the bounded 3-retry + fail-fast path.
+    state.take_session_was_online();
 }
 
 // ---------------------------------------------------------------------------
@@ -1136,6 +1150,31 @@ mod tests {
         assert!(
             !state.take_config_restart(),
             "stale restart flag must be discarded at connect entry"
+        );
+    }
+
+    // -- M-6 regression: connect entry discards a stale online latch ---------
+
+    /// Report M-6: the cancel-token branches BREAK the loop without
+    /// consuming the session_was_online latch. The important case is a
+    /// Disconnect click while the bot is ONLINE — handle_spawn latched
+    /// session_was_online, then the cancel branch broke the loop and the
+    /// latch leaked. The next session's first-connect failure would read
+    /// the stale "was online" and silently enter the infinite backoff
+    /// branch instead of the bounded 3-retry + fail-fast path.
+    /// prepare_connect_entry must discard the latch at entry.
+    #[test]
+    fn test_connect_entry_discards_stale_session_was_online() {
+        let state = SharedState::new(AppConfig::default());
+        // Session A came online, then the loop was cancelled mid-flight
+        // (Disconnect click) without consuming the latch.
+        state.mark_session_online();
+
+        prepare_connect_entry(&state);
+
+        assert!(
+            !state.take_session_was_online(),
+            "stale session_was_online latch must be discarded at connect entry"
         );
     }
 }
