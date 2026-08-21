@@ -311,9 +311,7 @@ impl CompoundOpExecutor {
             // "wood shovel"-style suggestion.
             if selection.tool_type == ToolType::Hand {
                 let required_level = selection.required_harvest_level.unwrap_or(0);
-                if required_level > 0
-                    || crate::block_data::requires_tool_for_drops(&block_type)
-                {
+                if required_level > 0 || crate::block_data::requires_tool_for_drops(&block_type) {
                     let alternatives = if required_level > 0 {
                         build_tool_alternatives(required_tool, selection.required_harvest_level)
                     } else {
@@ -1890,7 +1888,6 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════
 
     // ── State machine integration: mine block reaches all states ─────────
-
 
     /// M-16 (report): tier-0 blocks WITHOUT the
     /// requires_correct_tool_for_drops flag (dirt, sand, logs, wool,

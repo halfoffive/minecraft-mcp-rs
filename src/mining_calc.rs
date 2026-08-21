@@ -13,8 +13,7 @@
 //! predict.
 
 use crate::block_data::{
-    BLOCK_HARDNESS, BLOCK_TO_TOOL_TYPE, HARVEST_LEVEL, MATERIAL_TIER_SPEED,
-    requires_tool_for_drops,
+    BLOCK_HARDNESS, BLOCK_TO_TOOL_TYPE, HARVEST_LEVEL, MATERIAL_TIER_SPEED, requires_tool_for_drops,
 };
 use crate::types::{MaterialTier, ToolType};
 

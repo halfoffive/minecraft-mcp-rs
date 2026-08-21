@@ -377,7 +377,14 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
     // `hay_block` — the previous `hay_bale` entry never matched a real
     // snapshot block name. (Leaves variants are already mapped to Shears
     // above.)
-    for &block in &["hay_block", "sculk", "moss_block", "sponge", "wet_sponge", "shroomlight"] {
+    for &block in &[
+        "hay_block",
+        "sculk",
+        "moss_block",
+        "sponge",
+        "wet_sponge",
+        "shroomlight",
+    ] {
         m.insert(block, ToolType::Hoe);
     }
 
@@ -2039,7 +2046,10 @@ mod tests {
             "ice",
             "glass",
         ] {
-            assert!(!requires_tool_for_drops(block), "{block} must stay hand-mineable");
+            assert!(
+                !requires_tool_for_drops(block),
+                "{block} must stay hand-mineable"
+            );
         }
         // Unknown blocks are not gated (fallback semantics).
         assert!(!requires_tool_for_drops("unknown_block_xyz"));
