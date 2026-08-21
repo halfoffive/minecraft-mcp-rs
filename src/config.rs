@@ -240,8 +240,11 @@ impl AppConfig {
         if self.mc_address.is_empty() {
             return Err("mc_address must not be empty".into());
         }
-        if self.ai_username.is_empty() {
-            return Err("ai_username must not be empty".into());
+        if !valid_mc_username(&self.ai_username) {
+            return Err(
+                "ai_username must be 1-16 characters of [A-Za-z0-9_] (Minecraft username rules)"
+                    .into(),
+            );
         }
         if self.mc_port == 0 {
             return Err("mc_port must not be 0".into());
@@ -342,10 +345,10 @@ impl AppConfig {
         });
         config.ai_username =
             env_parse_or_validated("MINECRAFT_MCP_AI_USERNAME", config.ai_username, |s| {
-                if s.is_empty() {
-                    Err("must not be empty".into())
-                } else {
+                if valid_mc_username(s) {
                     Ok(())
+                } else {
+                    Err("must be 1-16 characters of [A-Za-z0-9_]".into())
                 }
             });
         // L-11: a bad bind address used to survive `from_env` and only trip
@@ -491,9 +494,41 @@ fn valid_bind_address(address: &str) -> bool {
     address == "localhost" || address.parse::<std::net::IpAddr>().is_ok()
 }
 
+/// Is `username` acceptable as a Minecraft (offline-mode) player name?
+///
+/// Minecraft's username rules: 1-16 characters, ASCII alphanumerics and
+/// underscore only. An invalid name is only discovered when the server
+/// kicks the bot mid-handshake; validating it here surfaces the problem
+/// at configuration time instead (report P3 item). Shared by
+/// `from_env`'s per-field check and `validate()` so the two can never
+/// drift (same pattern as `valid_bind_address`).
+fn valid_mc_username(username: &str) -> bool {
+    !username.is_empty()
+        && username.len() <= 16
+        && username
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Read a `String`-typed env var, falling back to `fallback` when unset.
+///
+/// An EMPTY value is treated as unset too (report M-2): empty strings used
+/// to survive `from_env`, trip `validate()`, and drag the ENTIRE
+/// configuration into `main.rs`'s full-default fallback — silently
+/// discarding every other override (notably `MINECRAFT_MCP_TOKEN`, which
+/// then restarted as a random UUID and 401'd every HTTP client).
 fn env_var_or(name: &str, fallback: String) -> String {
-    std::env::var(name).unwrap_or(fallback)
+    match std::env::var(name) {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => {
+            tracing::warn!(
+                name,
+                "empty value for environment variable; treating as unset and using default"
+            );
+            fallback
+        }
+        Err(_) => fallback,
+    }
 }
 
 /// Parse a numeric/bool env var, warning + falling back on parse failure.
@@ -1274,6 +1309,74 @@ mod tests {
         let config = AppConfig::from_env();
         assert_eq!(config.mc_address, AppConfig::default().mc_address);
         assert_eq!(config.ai_username, AppConfig::default().ai_username);
+        assert!(config.validate().is_ok());
+    }
+
+    /// Report M-2: an EMPTY `MINECRAFT_MCP_TOKEN` must be treated as unset,
+    /// not as "token = empty string". The empty value used to survive
+    /// `from_env`, fail `validate()` (auth enabled + empty token), and drag
+    /// the ENTIRE env configuration into `main.rs`'s full-default fallback —
+    /// silently discarding every other override while operators believed the
+    /// token was pinned. Now the token falls back per-field (fresh random
+    /// UUID default) and the other variables stay intact.
+    #[test]
+    fn test_from_env_empty_token_keeps_other_variables() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = [
+            EnvGuard::set("MINECRAFT_MCP_TOKEN", ""),
+            EnvGuard::set("MINECRAFT_MCP_AUTH_ENABLED", "true"),
+            EnvGuard::set("MINECRAFT_MCP_MC_ADDRESS", "mc.example.net"),
+        ];
+        let config = AppConfig::from_env();
+
+        // The empty token is treated as unset: the default (a fresh random
+        // UUID) is kept, so auth stays satisfiable and validate() passes.
+        assert!(!config.mcp_token.is_empty());
+        assert_ne!(config.mcp_token, "");
+        // The other override survives — no full-config fallback.
+        assert_eq!(config.mc_address, "mc.example.net");
+        assert!(config.mcp_auth_enabled);
+        assert!(
+            config.validate().is_ok(),
+            "empty TOKEN env must not invalidate the merged config"
+        );
+    }
+
+    /// Report P3: `ai_username` is validated against Minecraft's username
+    /// rules (1-16 chars of [A-Za-z0-9_]) both in `validate()` and per-field
+    /// in `from_env`, so an invalid name surfaces at configuration time
+    /// instead of as a mid-handshake server kick.
+    #[test]
+    fn test_validate_rejects_invalid_usernames() {
+        let mut config = AppConfig::default();
+
+        config.ai_username = "".into();
+        assert!(config.validate().is_err());
+        config.ai_username = "has space".into();
+        assert!(config.validate().is_err());
+        config.ai_username = "way_too_long_username_123".into();
+        assert!(config.validate().is_err());
+        config.ai_username = "inv@lid!".into();
+        assert!(config.validate().is_err());
+
+        config.ai_username = "Valid_Name_123".into();
+        assert!(config.validate().is_ok());
+    }
+
+    /// An invalid username env var is rejected PER-FIELD, keeping every
+    /// other variable intact (same drift-free pattern as the bind-address
+    /// fix L-11).
+    #[test]
+    fn test_from_env_bad_username_keeps_other_variables() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = [
+            EnvGuard::set("MINECRAFT_MCP_AI_USERNAME", "no spaces allowed"),
+            EnvGuard::set("MINECRAFT_MCP_MC_ADDRESS", "mc.example.net"),
+        ];
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.ai_username, AppConfig::default().ai_username);
+        assert_eq!(config.mc_address, "mc.example.net");
         assert!(config.validate().is_ok());
     }
 }
