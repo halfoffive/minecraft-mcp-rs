@@ -260,55 +260,106 @@ pub(crate) fn inner_wait_step(
     }
 }
 
-/// Headless-mode supervisor loop (runs on the `"headless-supervisor"` OS
+/// Initial backoff before retrying a FAILED bot-thread spawn (report M-8).
+pub(crate) const SPAWN_RETRY_INITIAL: Duration = Duration::from_secs(5);
+/// Cap for the failed-spawn retry backoff (report M-8).
+pub(crate) const SPAWN_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// Next backoff after another failed bot-thread spawn (report M-8):
+/// exponential, capped at [SPAWN_RETRY_MAX]. Pure so the retry schedule
+/// is unit-testable without spawning threads.
+pub(crate) fn next_spawn_backoff(current: Duration) -> Duration {
+    current.saturating_mul(2).min(SPAWN_RETRY_MAX)
+}
+
+/// Headless-mode supervisor loop (runs on the "headless-supervisor" OS
 /// thread).
 ///
 /// Responsibilities:
 /// - Auto-connect the bot on startup.
 /// - Re-spawn the connection after agent-driven config changes
-///   ([`SharedState::request_config_restart`]) — e.g. the `update_settings`
-///   MCP tool changing `mc_address` while the bot is offline.
+///   (SharedState::request_config_restart) — e.g. the update_settings
+///   MCP tool changing mc_address while the bot is offline.
 /// - Exit when the shutdown token is cancelled (the MCP thread triggers it
 ///   once the stdio transport closes).
 ///
 /// The supervisor does NOT hot-respawn in a loop: while a bot thread is
 /// running it polls the thread plus the shutdown flag (rather than
-/// blocking on a bare `join()`), so the moment the shutdown token fires it
+/// blocking on a bare join()), so the moment the shutdown token fires it
 /// can abort an in-flight azalea connect attempt via
-/// [`SharedState::request_disconnect`] — otherwise a dead Minecraft server
+/// SharedState::request_disconnect — otherwise a dead Minecraft server
 /// would keep the process alive for the duration of azalea's internal TCP
 /// retries. Online config restarts are NOT consumed here: while a bot
 /// thread lives, the connect loop inside it owns the restart flag and
 /// reconnects in-place (single-ownership rule, M-10 — the thread never
 /// exits, so the supervisor keeps polling the same handle). If the bot
 /// thread exits without a config restart (fail-fast after the bounded
-/// first-connect retries, or an explicit `disconnect_bot`), the supervisor
+/// first-connect retries, or an explicit disconnect_bot), the supervisor
 /// waits quietly for a restart or a shutdown instead of re-spawning.
+///
+/// Report M-8: an OS-THREAD CREATION FAILURE (spawn_bot_connection error —
+/// e.g. resource exhaustion) is NOT a bot-thread exit, so it must not fall
+/// into the quiet wait — nothing would ever respawn and the process would
+/// sit offline until shutdown. The supervisor retries the spawn on a
+/// shutdown-responsive capped exponential backoff instead.
 pub fn headless_supervisor(
     state: Arc<SharedState>,
     command_receiver: ReceiverSlot,
     command_sender: BotCommandSender,
 ) {
+    let mut spawn_backoff = SPAWN_RETRY_INITIAL;
     loop {
         // ── 1. Decide the next action from the current flags ──────────────
+        let mut spawn_failed = false;
         match headless_next_action(&state) {
             HeadlessAction::Shutdown => break,
             HeadlessAction::RestartWithNewConfig => continue,
             HeadlessAction::SpawnConnect => {
-                if state.try_begin_connecting()
-                    && let Err(e) = spawn_bot_connection(
+                if state.try_begin_connecting() {
+                    match spawn_bot_connection(
                         Arc::clone(&state),
                         command_receiver.clone(),
                         command_sender.clone(),
                         None,
-                    )
-                {
-                    tracing::error!(error = %e, "headless: failed to spawn bot connection");
-                    state.set_last_error(format!("failed to spawn bot connection: {e}"));
-                    state.clear_connecting();
+                    ) {
+                        Ok(()) => {
+                            // A successful spawn resets the failure backoff.
+                            spawn_backoff = SPAWN_RETRY_INITIAL;
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "headless: failed to spawn bot connection");
+                            state.set_last_error(format!("failed to spawn bot connection: {e}"));
+                            state.clear_connecting();
+                            spawn_failed = true;
+                        }
+                    }
                 }
             }
             HeadlessAction::WaitMore => {}
+        }
+
+        // ── 1b. M-8: a spawn failure must NOT fall into the thread wait /
+        //        quiet wait below — with no bot thread ever created there is
+        //        nothing to join and (crucially) no config-restart consumer,
+        //        so the supervisor would sit offline forever. Back off with
+        //        a capped exponential delay (staying responsive to shutdown)
+        //        and retry the spawn on the next round.
+        if spawn_failed {
+            let deadline = std::time::Instant::now() + spawn_backoff;
+            loop {
+                if state.shutdown_token().is_cancelled() {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            spawn_backoff = next_spawn_backoff(spawn_backoff);
+            if state.shutdown_token().is_cancelled() {
+                break;
+            }
+            continue;
         }
 
         // ── 2. Wait for the bot thread while staying responsive to
@@ -348,11 +399,11 @@ pub fn headless_supervisor(
         }
 
         // ── 3. Thread gone. Wait quietly for a restart or shutdown — an
-        //       explicit `disconnect_bot` must stay effective and a
+        //       explicit disconnect_bot must stay effective and a
         //       fail-fast must not spin the connection loop. Only here,
         //       with NO bot thread alive, does the supervisor consume the
         //       config-restart flag (single-ownership rule, M-10); the
-        //       outer loop then respawns via `headless_next_action`.
+        //       outer loop then respawns via headless_next_action.
         loop {
             if state.shutdown_token().is_cancelled() {
                 break_outer = true;
@@ -383,6 +434,28 @@ mod tests {
     use super::*;
     use crate::channel::{ReceiverSlot, create_command_channel};
     use crate::config::AppConfig;
+
+    /// M-8: the failed-spawn retry schedule doubles up to the cap and then
+    /// stays there — a persistently failing thread creation never wedges
+    /// the supervisor (it keeps retrying) and never hot-spins either.
+    #[test]
+    fn test_next_spawn_backoff_doubles_to_cap() {
+        assert_eq!(SPAWN_RETRY_INITIAL, Duration::from_secs(5));
+        assert_eq!(
+            next_spawn_backoff(SPAWN_RETRY_INITIAL),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            next_spawn_backoff(Duration::from_secs(10)),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            next_spawn_backoff(Duration::from_secs(20)),
+            Duration::from_secs(40)
+        );
+        assert_eq!(next_spawn_backoff(Duration::from_secs(40)), SPAWN_RETRY_MAX);
+        assert_eq!(next_spawn_backoff(SPAWN_RETRY_MAX), SPAWN_RETRY_MAX);
+    }
 
     /// Dropping [`ClearGuard`] clears the `bot_connecting` flag, so a
     /// panicked or finished connection thread never wedges future Connect
