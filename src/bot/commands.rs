@@ -2587,6 +2587,17 @@ fn is_command_rejection(feedback: &str) -> bool {
     PATTERNS.iter().any(|p| lower.contains(p))
 }
 
+/// Cap on the interpolated line scan's step count.
+///
+/// Validated coordinates span ±30,000,000 (WORLD_BORDER), so a cross-world
+/// SmartMove diagnostic could otherwise walk up to 60,000,000 cells × 3 Y
+/// layers on the serial executor's critical path. The scan starts at
+/// `current` and walks toward `target`, so the obstacle that actually
+/// stopped the bot is always near the start of the line — cells beyond the
+/// cap add no diagnostic value. Lines longer than the cap fall through to
+/// the 3×3×3 neighbourhood scan when the capped prefix is clear.
+const MAX_OBSTACLE_SCAN_STEPS: i64 = 10_000;
+
 /// Find the first solid block between `current` and `target` to report as
 /// the obstacle that blocked movement.
 ///
@@ -2596,14 +2607,26 @@ fn is_command_rejection(feedback: &str) -> bool {
 /// bot's feet, e.g. a ledge). If the line is clear but the bot still stopped
 /// short, falls back to scanning the 3×3×3 neighbourhood around `current`.
 /// Returns `None` only if no solid block is found anywhere.
+///
+/// All interpolation runs in `i64`: coordinates are validated to ±30,000,000,
+/// so `total_dx * i` reaches ~3.6e14 for long lines — far beyond `i32::MAX`
+/// (~2.1e9, already exceeded at `i ≈ 36` of a maximum-length line). The old
+/// all-`i32` arithmetic panicked debug builds and wrapped to garbage
+/// coordinates in release builds (S-3).
 fn find_obstacle_block(
     snapshot: &crate::types::WorldSnapshot,
     current: BlockPos,
     target: BlockPos,
 ) -> Option<ObstacleInfo> {
-    let total_dx = target.x - current.x;
-    let total_dz = target.z - current.z;
-    let steps = total_dx.abs().max(total_dz.abs());
+    let start_x = i64::from(current.x);
+    let start_z = i64::from(current.z);
+    let total_dx = i64::from(target.x) - start_x;
+    let total_dz = i64::from(target.z) - start_z;
+    // True line length in cells; the interpolation ALWAYS divides by this so
+    // each step advances exactly one cell along the line. The cap only limits
+    // how many cells are visited from current toward target.
+    let total_steps = total_dx.abs().max(total_dz.abs());
+    let steps = total_steps.min(MAX_OBSTACLE_SCAN_STEPS);
 
     // Obstacles usually sit at the bot's feet level (y), at head level (y+1),
     // or a step below (y-1). Checking all three covers ledges and low walls.
@@ -2611,11 +2634,13 @@ fn find_obstacle_block(
         let y = current.y + dy;
         if steps > 0 {
             for i in 1..=steps {
-                let pos = BlockPos::new(
-                    current.x + total_dx * i / steps,
-                    y,
-                    current.z + total_dz * i / steps,
-                );
+                // The interpolated point always lies between current and
+                // target (both validated i32 coordinates), so the narrowing
+                // conversion cannot fail; the fallback keeps the scan
+                // defensive regardless.
+                let x = i32::try_from(start_x + total_dx * i / total_steps).unwrap_or(current.x);
+                let z = i32::try_from(start_z + total_dz * i / total_steps).unwrap_or(current.z);
+                let pos = BlockPos::new(x, y, z);
                 if let Some(obstacle) = solid_block_at(snapshot, pos) {
                     return Some(obstacle);
                 }
@@ -5940,6 +5965,94 @@ mod tests {
         let info = found.expect("neighbourhood fallback must find an obstacle");
         assert_eq!(info.block_type, "cobblestone");
         assert_eq!(info.position, BlockPos::new(1, 64, 0));
+    }
+
+    /// S-3 regression: the interpolation product `total_dx * i` overflows
+    /// `i32` for long lines (coordinates are validated to ±30,000,000, so
+    /// `total_dx` reaches 60,000,000 and the product exceeds `i32::MAX` at
+    /// `i ≈ 36`). The old all-`i32` code panicked in debug builds — the
+    /// executor task died mid-command and every later command surfaced
+    /// `Offline("bot command responder dropped without reply")`. The scan now
+    /// interpolates in `i64` and must find an obstacle well inside the step
+    /// cap on a maximum-order line without overflowing.
+    #[test]
+    fn test_find_obstacle_block_long_line_no_i32_overflow() {
+        use std::collections::HashMap;
+        // 30,000,000-block line along +X. Obstacle at x=5,000 — step 5,000 of
+        // 30,000,000, comfortably inside MAX_OBSTACLE_SCAN_STEPS. In the old
+        // i32 arithmetic `total_dx * i` = 30,000,000 × 5,000 = 1.5e14
+        // overflowed (panics in debug, wraps in release).
+        let obstacle = BlockPos::new(5_000, 64, 0);
+        let mut block_index = HashMap::new();
+        block_index.insert(obstacle, 0usize);
+        let snapshot = crate::types::WorldSnapshot {
+            blocks: vec![BlockEntry {
+                position: obstacle,
+                block_type: "stone".into(),
+                block_state: None,
+            }],
+            block_index,
+            ..Default::default()
+        };
+
+        let found = find_obstacle_block(
+            &snapshot,
+            BlockPos::new(0, 64, 0),
+            BlockPos::new(30_000_000, 64, 0),
+        );
+        let info = found.expect("long-line scan must find the obstacle without overflowing");
+        assert_eq!(info.block_type, "stone");
+        assert_eq!(info.position, obstacle);
+    }
+
+    /// S-3 companion: a maximum-length negative-direction line with NO
+    /// obstacle on the capped scan prefix must not panic or wrap — it falls
+    /// through to the neighbourhood scan (also empty here → `None`).
+    #[test]
+    fn test_find_obstacle_block_max_distance_clear_line_no_panic() {
+        use std::collections::HashMap;
+        let snapshot = crate::types::WorldSnapshot {
+            blocks: Vec::new(),
+            block_index: HashMap::new(),
+            ..Default::default()
+        };
+
+        let found = find_obstacle_block(
+            &snapshot,
+            BlockPos::new(30_000_000, 64, 30_000_000),
+            BlockPos::new(-30_000_000, 64, -30_000_000),
+        );
+        assert!(found.is_none());
+    }
+
+    /// S-3 companion: proportional interpolation stays exact on a long
+    /// diagonal — the obstacle sits on the scanned cells only because both
+    /// axes interpolate proportionally (z advances at half the rate of x).
+    #[test]
+    fn test_find_obstacle_block_long_diagonal_interpolates() {
+        use std::collections::HashMap;
+        // Line (0,64,0) → (200_000,64,100_000): at step 8,000 (inside the
+        // scan cap) the scan visits (8_000, 64, 4_000) exactly.
+        let obstacle = BlockPos::new(8_000, 64, 4_000);
+        let mut block_index = HashMap::new();
+        block_index.insert(obstacle, 0usize);
+        let snapshot = crate::types::WorldSnapshot {
+            blocks: vec![BlockEntry {
+                position: obstacle,
+                block_type: "obsidian".into(),
+                block_state: None,
+            }],
+            block_index,
+            ..Default::default()
+        };
+
+        let found = find_obstacle_block(
+            &snapshot,
+            BlockPos::new(0, 64, 0),
+            BlockPos::new(200_000, 64, 100_000),
+        );
+        let info = found.expect("diagonal interpolation must hit the midpoint obstacle");
+        assert_eq!(info.position, obstacle);
     }
 
     // ═══════════════════════════════════════════════════════════════
