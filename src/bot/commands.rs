@@ -451,10 +451,29 @@ impl BotActions for RealBotClient {
 // ItemKind → item_id string
 // ═══════════════════════════════════════════════════════════════
 
+/// Cached `ItemKind` → snake_case item-id conversions (report M-24).
+///
+/// `canonical_player_inventory` (and the snapshot updater's
+/// `read_inventory`) converts every non-empty inventory slot on every
+/// snapshot build — every 500 ms while the bot processes commands — and
+/// the old implementation paid `format!("{kind:?}")` + `to_snake_case`
+/// (two allocations) per slot per build. Item kinds are a finite registry
+/// set, so the mapping is cached forever, mirroring the block-name cache
+/// (`block_state_to_name`, 1.1.4) that the snapshot updater already uses.
+static ITEM_KIND_ID_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<azalea::registry::builtin::ItemKind, String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// Convert an azalea `ItemKind` (Debug variant name like `IronPickaxe`) into
 /// the snake_case item id used by the block/tool tables (`iron_pickaxe`).
 pub(crate) fn item_kind_to_id(kind: azalea::registry::builtin::ItemKind) -> String {
-    to_snake_case(&format!("{kind:?}"))
+    let mut cache = ITEM_KIND_ID_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(id) = cache.get(&kind) {
+        return id.clone();
+    }
+    let id = to_snake_case(&format!("{kind:?}"));
+    cache.insert(kind, id.clone());
+    id
 }
 
 // ═══════════════════════════════════════════════════════════════
