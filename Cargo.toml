@@ -1,6 +1,6 @@
 [package]
 name = "minecraft-mcp-rs"
-version = "1.3.1"
+version = "1.3.2-rc.1"
 edition = "2024"
 
 [dependencies]
