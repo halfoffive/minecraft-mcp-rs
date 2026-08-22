@@ -12,7 +12,9 @@
 //! `execute_mine_block`) may observe a timeout that the estimate did not
 //! predict.
 
-use crate::block_data::{BLOCK_HARDNESS, BLOCK_TO_TOOL_TYPE, HARVEST_LEVEL, MATERIAL_TIER_SPEED};
+use crate::block_data::{
+    BLOCK_HARDNESS, BLOCK_TO_TOOL_TYPE, HARVEST_LEVEL, MATERIAL_TIER_SPEED, requires_tool_for_drops,
+};
 use crate::types::{MaterialTier, ToolType};
 
 /// Looks up the hardness value for a given block type.
@@ -38,17 +40,22 @@ pub fn is_correct_tool(tool_type: ToolType, block_type: &str) -> bool {
 /// tool to mine it efficiently.
 ///
 /// The 5× wrong-tool penalty applies only to blocks that genuinely require a
-/// tool (audit L-1). Vanilla's rule: a block "requires a tool" when it has a
-/// harvest level above 0 in [`HARVEST_LEVEL`] — i.e. mining it without the
-/// right tool never drops the block. Blocks like `dirt`, `sand`, and logs
-/// ARE in [`BLOCK_TO_TOOL_TYPE`] (they have a fastest tool) but have harvest
-/// level 0 (hand-mineable), so they incur NO wrong-tool penalty. `stone` has
+/// tool (audit L-1). Vanilla's rule: a block "requires a tool" when mining
+/// it without the right tool never drops the block — either because it has a
+/// harvest level above 0 in HARVEST_LEVEL, or because it carries vanilla's
+/// requires_correct_tool_for_drops flag (see requires_tool_for_drops — e.g.
+/// cobbled_deepslate is tier 0 but drops nothing by hand). Blocks like dirt,
+/// sand, and logs ARE in BLOCK_TO_TOOL_TYPE (they have a fastest tool) but
+/// are legal hand mines, so they incur NO wrong-tool penalty. stone has
 /// level 1 per the project's conservative convention, so its ×5 stays.
 ///
-/// Returns `false` for blocks not present in [`HARVEST_LEVEL`] (unknown
-/// blocks are treated as not requiring a tool, preserving the semantics of
-/// [`is_correct_tool`] which considers Hand correct for unknown blocks).
+/// Returns false for unknown blocks (treated as not requiring a tool,
+/// preserving the semantics of is_correct_tool which considers Hand correct
+/// for unknown blocks).
 pub fn block_requires_tool(block_type: &str) -> bool {
+    if requires_tool_for_drops(block_type) {
+        return true;
+    }
     HARVEST_LEVEL
         .get(block_type)
         .copied()

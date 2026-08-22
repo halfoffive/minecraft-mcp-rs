@@ -9,7 +9,6 @@
 //!
 //! Parsing is clap-derive based ([clap::Parser]); the flag set and the
 //! precedence rules are unchanged from the previous hand-rolled parser:
-//! `--headless` wins over `--gui`, `--stdio` alone implies headless, a
 //! `--headless` wins over `--gui`, `--stdio` alone implies headless,
 //! idempotent. `-V`/`--version` was added by clap (prints
 //! `CARGO_PKG_VERSION`).

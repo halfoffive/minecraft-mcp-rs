@@ -102,7 +102,7 @@ pub enum McpServerStatus {
 /// `get_world_view` tool checks this before re-rendering: if
 /// `snapshot_seq`, `radius`, and `scale` all match the current
 /// request, the cached PNG bytes are returned without invoking
-/// [`render_topdown`](crate::mcp::render::render_topdown) again.
+/// [render_topdown_enhanced](crate::mcp::render::render_topdown_enhanced) again using the same snapshot_seq/radius/scale cache key.
 ///
 /// Only one entry is cached (overwritten on each fresh render), keeping
 /// memory bounded — the typical 65×65 PNG is ~3 KB so even at `scale=8`
@@ -347,26 +347,11 @@ impl SharedState {
     /// The world snapshot starts empty, the bot is offline, and no container
     /// is open.
     pub fn new(config: AppConfig) -> Self {
-        let empty_snapshot = WorldSnapshot {
-            blocks: vec![],
-            entities: vec![],
-            self_player: crate::types::SelfPlayer {
-                uuid: String::new(),
-                username: String::new(),
-                position: crate::types::BlockPos::new(0, 0, 0),
-                health: 0.0,
-                hunger: 0,
-                gamemode: crate::types::GameMode::Survival,
-                held_item_slot: 0,
-                inventory: Vec::new(),
-                position_precise: None,
-                yaw: None,
-            },
-            timestamp: 0,
-            chunk_summary: vec![],
-            commands_enabled: None,
-            ..Default::default()
-        };
+        // WorldSnapshot::default() — the previous handwritten empty literal
+        // duplicated the same defaults and could drift (it did not even
+        // reset snapshot_seq / block_index explicitly; the ..Default
+        // fallback covered them by luck).
+        let empty_snapshot = WorldSnapshot::default();
 
         Self {
             world_snapshot: ArcSwap::from_pointee(empty_snapshot),
@@ -941,6 +926,31 @@ impl SharedState {
     pub fn clear_bot_ecs(&self) {
         let mut guard = self.bot_ecs.lock().unwrap_or_else(|e| e.into_inner());
         *guard = None;
+    }
+
+    /// Idempotent SharedState-level session teardown (report M-7).
+    ///
+    /// Clears every flag/handle/cache that belongs to the session that just
+    /// ended. Called from BOTH disconnect paths:
+    ///
+    /// - events::handle_disconnect (the normal azalea Event::Disconnect),
+    ///   before its executor/tick-task/injection cleanup;
+    /// - the connection loop's select! cancel branch (a Disconnect click
+    ///   while start() is still running — the azalea future is dropped and
+    ///   Event::Disconnect never fires, so without this call the ECS World
+    ///   handle leaked, executor_busy stayed phantom-true, and
+    ///   connected_since / the world-view cache / the commands probe kept
+    ///   stale values from the aborted session).
+    ///
+    /// Every operation here is a plain reset, so calling it twice (or on a
+    /// session that never spawned) is harmless.
+    pub fn clear_session_state(&self) {
+        self.set_online(false);
+        self.set_connected_since(None);
+        self.clear_world_view_cache();
+        self.clear_bot_ecs();
+        self.set_executor_busy(false);
+        self.set_commands_probe(None);
     }
 
     /// Return a clone of the bot's ECS handle, if any.
@@ -1780,6 +1790,31 @@ mod tests {
         assert_eq!(state.get_commands_probe(), Some(false));
         state.set_commands_probe(None);
         assert_eq!(state.get_commands_probe(), None);
+    }
+
+    /// Report M-7: clear_session_state is the shared idempotent teardown
+    /// both disconnect paths run. Every session flag/handle/cache it owns
+    /// must be reset — and a second call (or a call on a session that
+    /// never spawned) must stay a harmless no-op.
+    #[test]
+    fn test_clear_session_state_resets_all_session_flags() {
+        let state = SharedState::new(AppConfig::default());
+        state.set_online(true);
+        state.set_connected_since(Some(std::time::Instant::now()));
+        state.set_executor_busy(true);
+        state.set_commands_probe(Some(true));
+
+        state.clear_session_state();
+
+        assert!(!state.is_online());
+        assert!(!state.executor_busy());
+        assert_eq!(state.get_commands_probe(), None);
+        assert!(state.bot_ecs().is_none());
+
+        // Idempotent: a second call must not panic or flip anything back.
+        state.clear_session_state();
+        assert!(!state.is_online());
+        assert!(!state.executor_busy());
     }
 
     // -- session_was_online ----------------------------------------------------

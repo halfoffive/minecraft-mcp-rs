@@ -1085,7 +1085,7 @@ mod tests {
         );
     }
 
-    // ── Exhaustive match on all 34 variants ────────────────────────
+    // ── Exhaustive match on all 28 variants ────────────────────────
     //
     // These tests provide compile-time coverage: if a new BotCommand variant
     // is added, the compiler will flag these matches as non-exhaustive.

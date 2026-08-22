@@ -84,7 +84,7 @@ pub fn render_topdown(snapshot: &WorldSnapshot, radius: u8) -> Result<Vec<u8>, B
             continue;
         }
         // Skip air blocks — they shouldn't obscure lower blocks.
-        if block.block_type.eq_ignore_ascii_case("air") {
+        if is_air_block(&block.block_type) {
             continue;
         }
         let px = (dx + r) as u32;
@@ -172,7 +172,7 @@ pub const MIN_BUILD_Y: i32 = -64;
 ///   higher blocks appear slightly brighter and lower blocks slightly
 ///   darker. This gives the multimodal LLM a depth cue without colour
 ///   shifting the underlying block identity.
-/// - When `SelfPlayer::yaw` is `Some`, a 3-pixel-wide arrow is drawn at the
+/// - When `SelfPlayer::yaw` is `Some`, a heading arrow is drawn at the
 ///   player's centre pixel, pointing in the direction the bot is facing
 ///   (Minecraft yaw convention, degrees: 0 = +Z/south, +90° = -X/west).
 ///
@@ -237,7 +237,7 @@ pub fn render_topdown_enhanced(
         if dx.abs() > r as f64 || dz.abs() > r as f64 {
             continue;
         }
-        if block.block_type.eq_ignore_ascii_case("air") {
+        if is_air_block(&block.block_type) {
             continue;
         }
         // Round to nearest pixel (sub-block precision) rather than floor.
@@ -299,7 +299,7 @@ pub fn render_topdown_enhanced(
     let cy = r as u32 * scale as u32;
     paint_square(&mut img, cx, cy, scale.max(2) as u32, player_colour);
 
-    // Draw a heading arrow if yaw is available. The arrow is a 3-pixel-wide
+    // Draw a heading arrow if yaw is available. The arrow is painted as a
     // line extending `scale * 3` pixels from the centre in the direction
     // the bot is facing.
     if let Some(yaw) = snapshot.self_player.yaw {
@@ -338,7 +338,7 @@ fn paint_square(img: &mut RgbaImage, x: u32, y: u32, size: u32, colour: Rgba<u8>
     }
 }
 
-/// Draw a 3-pixel-wide heading arrow at `(cx, cy)` pointing in the
+/// Draw a heading arrow at `(cx, cy)` pointing in the
 /// direction `yaw` (DEGREES, Minecraft convention):
 /// - `0`     → facing +Z (south, downward on the image since +Z is down)
 /// - `+90°`  → facing -X (west, leftward on the image since +X is right)
@@ -373,7 +373,9 @@ fn draw_yaw_arrow(img: &mut RgbaImage, cx: u32, cy: u32, yaw: f32, scale: u8) {
         // Round to nearest pixel.
         let px_i = px.round() as i32;
         let py_i = py.round() as i32;
-        // Paint a 3-pixel-wide cross around (px, py).
+        // Paint a 5-pixel plus-cross around (px, py) — one centre pixel
+        // plus the four cardinal neighbours (3 pixels wide perpendicular
+        // to the direction, visually continuous on diagonals).
         for &(ox, oy) in &[(0i32, 0i32), (-1, 0), (1, 0), (0, -1), (0, 1)] {
             let fx = px_i + ox;
             let fy = py_i + oy;
@@ -382,6 +384,18 @@ fn draw_yaw_arrow(img: &mut RgbaImage, cx: u32, cy: u32, yaw: f32, scale: u8) {
             }
         }
     }
+}
+
+/// Is this block-type name an air variant?
+///
+/// The snapshot builder's is_air() filter (snapshot_updater) excludes
+/// cave_air / void_air too, so every renderer predicate must use the same
+/// set — otherwise those variants would win the column-best competition
+/// and paint transparent pixels, breaking the all-pixels-alpha=255
+/// invariant (the production snapshot never carries them, so this is a
+/// latent-consistency fix, not a runtime bug).
+fn is_air_block(block_type: &str) -> bool {
+    matches!(block_type, "air" | "cave_air" | "void_air")
 }
 
 /// Look up the canonical top-down colour for a block type.
@@ -1567,7 +1581,7 @@ mod tests {
     ///
     /// `SelfPlayer::yaw` is stored in DEGREES (Minecraft convention, −180..180):
     /// yaw = 90° means facing −X (west, left on the image). The arrow must be
-    /// horizontal (no vertical drift off the 3-pixel-wide cross around the
+    /// horizontal (no vertical drift off the painted cross around the
     /// centre row) and must extend leftward from the player centre. Before the
     /// unit fix the renderer consumed the value as radians, so sin(90°≈1.57
     /// "radians") pointed the arrow up-left instead of straight left.
@@ -1609,7 +1623,7 @@ mod tests {
         assert!(!arrow.is_empty(), "yaw arrow should paint white pixels");
 
         // Facing west: the arrow must stay on the horizontal centre band
-        // (the arrow is drawn as a 3-pixel-wide cross around the centre row).
+        // (the arrow is drawn as a 5-pixel plus-cross around the centre row).
         for &(px, py) in &arrow {
             assert!(
                 py >= cy.saturating_sub(1) && py <= cy + 1,

@@ -168,7 +168,14 @@ pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::R
         Event::Spawn => {
             handle_spawn(bot, &state).await;
         }
-        Event::Disconnect(_) => {
+        Event::Disconnect(reason) => {
+            // The server-provided disconnect reason is otherwise never
+            // logged, which makes diagnosing an online server kick difficult
+            // (a reason like "You are not whitelisted" in a sea of
+            // connection retries). Log it before the teardown.
+            if let Some(reason) = &reason {
+                warn!(?reason, "bot disconnected — reason provided by server");
+            }
             handle_disconnect(bot, &state).await;
         }
         Event::Tick => {
@@ -329,17 +336,12 @@ async fn abort_and_clear_tick_tasks(tick_tasks: &Mutex<tokio::task::JoinSet<()>>
 }
 
 async fn handle_disconnect(bot: Client, state: &BotState) {
-    state.shared_state.set_online(false);
-    state.shared_state.set_connected_since(None);
-
-    // Drop the cached world-view render so the UI preview panel (and a
-    // later `get_world_view` call) does not keep showing a frame from the
-    // previous connection after the bot goes offline.
-    state.shared_state.clear_world_view_cache();
-
-    // Clear the ECS handle — the bot is already disconnecting, so
-    // request_disconnect no longer needs to write AppExit::Success.
-    state.shared_state.clear_bot_ecs();
+    // Shared idempotent session teardown (report M-7): online flag,
+    // connected_since, world-view cache, ECS handle, executor_busy, and the
+    // commands probe. The connect loop's cancel branch runs the SAME
+    // teardown when Event::Disconnect never fires (a Disconnect click while
+    // start() is still running — the azalea future is dropped).
+    state.shared_state.clear_session_state();
 
     // Abort the command executor so it can't use the now-stale azalea Client
     // (which would panic when touching the ECS after disconnect). The
@@ -366,24 +368,18 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     }
 
     // Abort in-flight tick snapshot tasks and reclaim their handles. This
-    // prevents the per-tick `spawn_local` handle list from growing forever
+    // prevents the per-tick spawn_local handle list from growing forever
     // across reconnects.
     abort_and_clear_tick_tasks(&state.tick_tasks).await;
 
-    // The executor is gone — clear its busy flag so query tools don't report
-    // a phantom busy state after a disconnect.
-    state.shared_state.set_executor_busy(false);
-
-    // Drop the cached `/seed` command-availability probe: the next connection
-    // may land on a different server (or a permission that changed while
-    // offline), and a stale probe would keep `commands_enabled` frozen at the
-    // old value through `resolve_commands_enabled` until someone re-probes.
-    state.shared_state.set_commands_probe(None);
+    // (executor_busy and the commands probe were already cleared by
+    // clear_session_state at the top of this function — the teardown is
+    // idempotent on both disconnect paths.)
 
     // Clear the injected dependencies so the next connection (or a test in
-    // the same process) starts from a clean slot. With `OnceLock` the first
-    // `set` would silently win forever, leaking state across reconnects and
-    // between tests; `Mutex<Option<_>>` lets us reset here.
+    // the same process) starts from a clean slot. With OnceLock the first
+    // set would silently win forever, leaking state across reconnects and
+    // between tests; Mutex<Option<_>> lets us reset here.
     *INJECTED_SHARED_STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = None;

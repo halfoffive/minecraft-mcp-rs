@@ -328,28 +328,36 @@ pub fn update_settings(
             applied.insert("mcp_transport".into(), json!(transport_to_str(transport)));
         }
     }
+    let mut new_language: Option<Language> = None;
     if let Some(v) = input.language {
         let language = parse_language(&v)?;
         if language != candidate.language {
             candidate.language = language;
             applied.insert("language".into(), json!(language_to_str(language)));
-            // Next-frame effect in UI mode; harmless in headless mode.
-            crate::i18n::set(language);
+            new_language = Some(language);
         }
     }
 
+    // Validate BEFORE any global side effect: the old order called
+    // i18n::set() inside the loop above, so a REJECTED update had already
+    // flipped the UI language globally while leaving the config unchanged.
     candidate.validate().map_err(BotError::InvalidParams)?;
 
-    // No file persistence: `MINECRAFT_MCP_*` environment variables are the
-    // configuration source, so runtime updates live in memory only.
-
+    // Commit the validated candidate to the live in-memory config before any
+    // reconnect/restart side effects use it downstream.
     state.update_config(|cfg| *cfg = candidate.clone());
 
+    if let Some(language) = new_language {
+        // Next-frame effect in UI mode; harmless in headless mode.
+        crate::i18n::set(language);
+    }
+
+    // No file persistence: MINECRAFT_MCP_* environment variables are the
+    // configuration source, so runtime updates live in memory only.
     // Connection fields changed → the bot must reconnect to honour them.
     let connection_fields_changed = old.mc_address != candidate.mc_address
         || old.mc_port != candidate.mc_port
         || old.ai_username != candidate.ai_username;
-    // `applied` only contains fields whose values actually changed.
     let transport_restart_fields_changed = applied.contains_key("mcp_transport")
         || applied.contains_key("mcp_address")
         || applied.contains_key("mcp_port");

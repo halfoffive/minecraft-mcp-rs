@@ -13,7 +13,7 @@ use tracing::{debug, error, trace, warn};
 
 use crate::error::BotError;
 use crate::state::SharedState;
-use crate::types::{BotCommand, BotResult};
+use crate::types::{ActAction, BotCommand, BotResult};
 
 // ═══════════════════════════════════════════════════════════════
 // BotCommandWithResponder
@@ -63,9 +63,12 @@ impl BotCommandSender {
     }
 
     /// The envelope timeout for a specific command: the configured command
-    /// timeout, or the longer fly timeout for `FlyTo` (long flights exceed
-    /// 30 s; `handle_fly_to`'s internal goto uses the same fly timeout, so
-    /// the executor always replies before this envelope fires).
+    /// timeout, or the longer fly timeout for flight commands — `FlyTo` AND
+    /// `Act(Fly)` (report M-3: the unified act tool reached the same
+    /// `handle_fly_to` executor path but kept the 30 s command envelope, so
+    /// long flights reported a false CommandTimeout while the bot was still
+    /// flying). `handle_fly_to`'s internal goto uses the same fly timeout,
+    /// so the executor always replies before this envelope fires.
     ///
     /// Reads the config lock ONCE and derives both the command and fly
     /// timeouts from that single guard (L-21) — the previous
@@ -74,7 +77,9 @@ impl BotCommandSender {
     fn timeout_for(&self, cmd: &BotCommand) -> Duration {
         let cfg = self.state.read_config();
         let base = Duration::from_secs(cfg.command_timeout_secs);
-        if matches!(cmd, BotCommand::FlyTo(_)) {
+        let is_flight = matches!(cmd, BotCommand::FlyTo(_))
+            || matches!(cmd, BotCommand::Act(ActAction::Fly { .. }, _));
+        if is_flight {
             let fly = Duration::from_secs(cfg.fly_timeout_secs);
             std::cmp::max(base, fly)
         } else {
@@ -505,6 +510,39 @@ mod tests {
         assert_eq!(
             sender.timeout_for(&BotCommand::FlyTo(BlockPos::new(0, 0, 0))),
             Duration::from_secs(120)
+        );
+    }
+
+    /// Report M-3: Act(Fly) dispatches the same handle_fly_to executor
+    /// path as FlyTo, so it must share the fly envelope. Before the fix a
+    /// flight longer than 30 s via the unified act tool surfaced a false
+    /// CommandTimeout while the executor kept flying.
+    #[test]
+    fn test_timeout_for_act_fly_uses_fly_timeout() {
+        let state = make_state();
+        state.update_config(|cfg| {
+            cfg.command_timeout_secs = 10;
+            cfg.fly_timeout_secs = 60;
+        });
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
+        assert_eq!(
+            sender.timeout_for(&BotCommand::Act(
+                ActAction::Fly {
+                    target: BlockPos::new(0, 0, 0)
+                },
+                None
+            )),
+            Duration::from_secs(60)
+        );
+        // Other Act actions keep the plain command envelope.
+        assert_eq!(
+            sender.timeout_for(&BotCommand::Act(
+                ActAction::Move {
+                    target: BlockPos::new(0, 0, 0)
+                },
+                None
+            )),
+            Duration::from_secs(10)
         );
     }
 

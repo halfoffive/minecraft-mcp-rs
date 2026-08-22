@@ -451,10 +451,29 @@ impl BotActions for RealBotClient {
 // ItemKind → item_id string
 // ═══════════════════════════════════════════════════════════════
 
+/// Cached `ItemKind` → snake_case item-id conversions (report M-24).
+///
+/// `canonical_player_inventory` (and the snapshot updater's
+/// `read_inventory`) converts every non-empty inventory slot on every
+/// snapshot build — every 500 ms while the bot processes commands — and
+/// the old implementation paid `format!("{kind:?}")` + `to_snake_case`
+/// (two allocations) per slot per build. Item kinds are a finite registry
+/// set, so the mapping is cached forever, mirroring the block-name cache
+/// (`block_state_to_name`, 1.1.4) that the snapshot updater already uses.
+static ITEM_KIND_ID_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<azalea::registry::builtin::ItemKind, String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// Convert an azalea `ItemKind` (Debug variant name like `IronPickaxe`) into
 /// the snake_case item id used by the block/tool tables (`iron_pickaxe`).
 pub(crate) fn item_kind_to_id(kind: azalea::registry::builtin::ItemKind) -> String {
-    to_snake_case(&format!("{kind:?}"))
+    let mut cache = ITEM_KIND_ID_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(id) = cache.get(&kind) {
+        return id.clone();
+    }
+    let id = to_snake_case(&format!("{kind:?}"));
+    cache.insert(kind, id.clone());
+    id
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1238,12 +1257,12 @@ impl<B: BotActions> CommandExecutor<B> {
     ) -> Result<BotResult, BotError> {
         trace!(?pos, ?item_slot, ?effect_pos, "UseItemOnBlock");
         // If a hotbar slot was specified, select it before interacting so the
-        // correct item is used. Mirrors `handle_switch_hotbar_slot`'s range
+        // correct item is used. Mirrors handle_switch_hotbar_slot's range
         // check (the MCP layer also validates, but defend in depth).
         if let Some(slot) = item_slot
             && slot > 8
         {
-            // Defense-in-depth only — dispatch's central `validate_command`
+            // Defense-in-depth only — dispatch's central validate_command
             // gate rejects this first. Carry the honest variant anyway: an
             // out-of-range slot is a caller input error, not internal.
             return Err(BotError::InvalidParams(format!(
@@ -1254,21 +1273,24 @@ impl<B: BotActions> CommandExecutor<B> {
         let snapshot = self.state.read_snapshot();
 
         // Identify the item that will be used (for the confirmation gate and
-        // the result message).
+        // the result message). M-11 (report): read the LIVE inventory, not
+        // the throttled snapshot — the snapshot can lag the just-switched
+        // slot by a whole idle interval, which made the message name the
+        // previous held item (and an empty snapshot inventory read "empty"
+        // while a container window was open).
+        let held_entries = self.bot.inventory_entries();
         let used_slot = item_slot.unwrap_or(snapshot.self_player.held_item_slot);
-        let used_item = snapshot
-            .self_player
-            .inventory
-            .iter()
-            .find(|entry| entry.slot_index == used_slot)
-            .map(|entry| entry.item_id.as_str())
+        let used_item = held_entries
+            .get(used_slot as usize)
+            .and_then(|opt| opt.as_ref())
+            .map(|stack| stack.item_id.as_str())
             .unwrap_or("empty")
             .to_string();
         // M-6: whether the used item is expected to place a block/fluid. The
         // effect-cell occupancy pre-check AND the auto-approach only make
         // sense for placement items — for flint-and-steel, a cauldron-filling
         // bucket, etc. the "effect cell" is meaningless and a ceiling above
-        // the target caused a false `InvalidParams` (audit M-6).
+        // the target caused a false InvalidParams (audit M-6).
         let is_placement = item_has_placement_effect(&used_item);
 
         // Placement verification path (fluid buckets / placeable blocks).
@@ -1308,9 +1330,11 @@ impl<B: BotActions> CommandExecutor<B> {
                     let stand = match find_standable_neighbor(&fresh, pos) {
                         Some(s) => s,
                         None => {
-                            return Err(BotError::Internal(format!(
-                                "no standable position adjacent to interaction target {pos}"
-                            )));
+                            return Err(BotError::PathfindingFailed {
+                                target: pos,
+                                reason: "no standable position adjacent to interaction target"
+                                    .to_string(),
+                            });
                         }
                     };
                     // Best-effort approach: a movement failure falls through to
@@ -1656,7 +1680,7 @@ impl<B: BotActions> CommandExecutor<B> {
                 // back to slot 0 (the swap trades places, so the displaced
                 // hotbar item lands in the tool's old main-inventory slot).
                 let target = (0..=8u8)
-                    .find(|&i| entries[i as usize].is_none())
+                    .find(|&i| entries.get(i as usize).is_some_and(|slot| slot.is_none()))
                     .unwrap_or(0);
                 let moved = self.handle_move_item_to_hotbar(target, item_id, 1).await?;
                 if !moved.success {
@@ -2583,9 +2607,25 @@ fn is_command_rejection(feedback: &str) -> bool {
         "you are not allowed to use this command",
         "cannot execute",
     ];
-    let lower = feedback.to_lowercase();
-    PATTERNS.iter().any(|p| lower.contains(p))
+    // Zero-allocation ASCII fold: the feedback strings are server-provided
+    // ASCII messages and PATTERNS is lowercase, so the shared
+    // contains_ascii_case_insensitive matcher (no per-call String allocation,
+    // unlike the previous feedback.to_lowercase()) gives the same result.
+    PATTERNS
+        .iter()
+        .any(|p| crate::utils::contains_ascii_case_insensitive(feedback, p))
 }
+
+/// Cap on the interpolated line scan's step count.
+///
+/// Validated coordinates span ±30,000,000 (WORLD_BORDER), so a cross-world
+/// SmartMove diagnostic could otherwise walk up to 60,000,000 cells × 3 Y
+/// layers on the serial executor's critical path. The scan starts at
+/// `current` and walks toward `target`, so the obstacle that actually
+/// stopped the bot is always near the start of the line — cells beyond the
+/// cap add no diagnostic value. Lines longer than the cap fall through to
+/// the 3×3×3 neighbourhood scan when the capped prefix is clear.
+const MAX_OBSTACLE_SCAN_STEPS: i64 = 10_000;
 
 /// Find the first solid block between `current` and `target` to report as
 /// the obstacle that blocked movement.
@@ -2596,14 +2636,26 @@ fn is_command_rejection(feedback: &str) -> bool {
 /// bot's feet, e.g. a ledge). If the line is clear but the bot still stopped
 /// short, falls back to scanning the 3×3×3 neighbourhood around `current`.
 /// Returns `None` only if no solid block is found anywhere.
+///
+/// All interpolation runs in `i64`: coordinates are validated to ±30,000,000,
+/// so `total_dx * i` reaches ~3.6e14 for long lines — far beyond `i32::MAX`
+/// (~2.1e9, already exceeded at `i ≈ 36` of a maximum-length line). The old
+/// all-`i32` arithmetic panicked debug builds and wrapped to garbage
+/// coordinates in release builds (S-3).
 fn find_obstacle_block(
     snapshot: &crate::types::WorldSnapshot,
     current: BlockPos,
     target: BlockPos,
 ) -> Option<ObstacleInfo> {
-    let total_dx = target.x - current.x;
-    let total_dz = target.z - current.z;
-    let steps = total_dx.abs().max(total_dz.abs());
+    let start_x = i64::from(current.x);
+    let start_z = i64::from(current.z);
+    let total_dx = i64::from(target.x) - start_x;
+    let total_dz = i64::from(target.z) - start_z;
+    // True line length in cells; the interpolation ALWAYS divides by this so
+    // each step advances exactly one cell along the line. The cap only limits
+    // how many cells are visited from current toward target.
+    let total_steps = total_dx.abs().max(total_dz.abs());
+    let steps = total_steps.min(MAX_OBSTACLE_SCAN_STEPS);
 
     // Obstacles usually sit at the bot's feet level (y), at head level (y+1),
     // or a step below (y-1). Checking all three covers ledges and low walls.
@@ -2611,11 +2663,13 @@ fn find_obstacle_block(
         let y = current.y + dy;
         if steps > 0 {
             for i in 1..=steps {
-                let pos = BlockPos::new(
-                    current.x + total_dx * i / steps,
-                    y,
-                    current.z + total_dz * i / steps,
-                );
+                // The interpolated point always lies between current and
+                // target (both validated i32 coordinates), so the narrowing
+                // conversion cannot fail; the fallback keeps the scan
+                // defensive regardless.
+                let x = i32::try_from(start_x + total_dx * i / total_steps).unwrap_or(current.x);
+                let z = i32::try_from(start_z + total_dz * i / total_steps).unwrap_or(current.z);
+                let pos = BlockPos::new(x, y, z);
                 if let Some(obstacle) = solid_block_at(snapshot, pos) {
                     return Some(obstacle);
                 }
@@ -4821,7 +4875,7 @@ mod tests {
     async fn test_use_item_on_block_reports_item_used() {
         // The result message must name the item actually held so callers can
         // detect a wrong-slot interaction (the water-bucket smoke failure).
-        let (executor, sender, state, _log) = make_executor();
+        let (executor, sender, state, log) = make_executor();
         let mut snapshot = make_populated_snapshot_defaults();
         snapshot.self_player.held_item_slot = 2;
         snapshot.self_player.inventory = vec![InventorySlot {
@@ -4830,6 +4884,17 @@ mod tests {
             count: 1,
         }];
         state.update_snapshot(snapshot);
+        // The handler reads the LIVE inventory (M-11). Keep the mock
+        // inventory in sync with the snapshot's self_player inventory so
+        // production and test semantics match.
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            *inv = vec![None; 9];
+            inv[2] = Some(ItemStack {
+                item_id: "water_bucket".into(),
+                count: 1,
+            });
+        }
         let handle = spawn_executor(executor);
 
         let pos = BlockPos::new(5, 65, 5);
@@ -4871,7 +4936,7 @@ mod tests {
         // the handler must return the targeted "bucket_placement_unsupported"
         // failure (with the /setblock alternative) instead of the generic
         // "interaction was likely rejected" message.
-        let (executor, sender, state, _log) = make_executor();
+        let (executor, sender, state, log) = make_executor();
         let mut snapshot = make_populated_snapshot_defaults();
         snapshot.self_player.held_item_slot = 0;
         // Stand next to the interaction target so the auto-approach is
@@ -4883,6 +4948,14 @@ mod tests {
             item_id: "water_bucket".into(),
             count: 1,
         }];
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            *inv = vec![None; 9];
+            inv[0] = Some(ItemStack {
+                item_id: "water_bucket".into(),
+                count: 1,
+            });
+        }
         // `update_snapshot` stores the snapshot as-is (no block_index
         // rebuild), so seed the index for the interaction target + effect
         // cell lookups.
@@ -4941,6 +5014,14 @@ mod tests {
             item_id: "flint_and_steel".into(),
             count: 1,
         }];
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            *inv = vec![None; 9];
+            inv[0] = Some(ItemStack {
+                item_id: "flint_and_steel".into(),
+                count: 1,
+            });
+        }
         // The click target (5,64,0) AND the "effect" cell above it (5,65,0)
         // are both solid — the old unconditional pre-check rejected this.
         snapshot.blocks = vec![
@@ -5000,6 +5081,14 @@ mod tests {
             item_id: "stone".into(),
             count: 1,
         }];
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            *inv = vec![None; 9];
+            inv[0] = Some(ItemStack {
+                item_id: "stone".into(),
+                count: 1,
+            });
+        }
         snapshot.blocks = vec![
             BlockEntry {
                 position: BlockPos::new(5, 64, 0),
@@ -5940,6 +6029,94 @@ mod tests {
         let info = found.expect("neighbourhood fallback must find an obstacle");
         assert_eq!(info.block_type, "cobblestone");
         assert_eq!(info.position, BlockPos::new(1, 64, 0));
+    }
+
+    /// S-3 regression: the interpolation product `total_dx * i` overflows
+    /// `i32` for long lines (coordinates are validated to ±30,000,000, so
+    /// `total_dx` reaches 60,000,000 and the product exceeds `i32::MAX` at
+    /// `i ≈ 36`). The old all-`i32` code panicked in debug builds — the
+    /// executor task died mid-command and every later command surfaced
+    /// `Offline("bot command responder dropped without reply")`. The scan now
+    /// interpolates in `i64` and must find an obstacle well inside the step
+    /// cap on a maximum-order line without overflowing.
+    #[test]
+    fn test_find_obstacle_block_long_line_no_i32_overflow() {
+        use std::collections::HashMap;
+        // 30,000,000-block line along +X. Obstacle at x=5,000 — step 5,000 of
+        // 30,000,000, comfortably inside MAX_OBSTACLE_SCAN_STEPS. In the old
+        // i32 arithmetic `total_dx * i` = 30,000,000 × 5,000 = 1.5e14
+        // overflowed (panics in debug, wraps in release).
+        let obstacle = BlockPos::new(5_000, 64, 0);
+        let mut block_index = HashMap::new();
+        block_index.insert(obstacle, 0usize);
+        let snapshot = crate::types::WorldSnapshot {
+            blocks: vec![BlockEntry {
+                position: obstacle,
+                block_type: "stone".into(),
+                block_state: None,
+            }],
+            block_index,
+            ..Default::default()
+        };
+
+        let found = find_obstacle_block(
+            &snapshot,
+            BlockPos::new(0, 64, 0),
+            BlockPos::new(30_000_000, 64, 0),
+        );
+        let info = found.expect("long-line scan must find the obstacle without overflowing");
+        assert_eq!(info.block_type, "stone");
+        assert_eq!(info.position, obstacle);
+    }
+
+    /// S-3 companion: a maximum-length negative-direction line with NO
+    /// obstacle on the capped scan prefix must not panic or wrap — it falls
+    /// through to the neighbourhood scan (also empty here → `None`).
+    #[test]
+    fn test_find_obstacle_block_max_distance_clear_line_no_panic() {
+        use std::collections::HashMap;
+        let snapshot = crate::types::WorldSnapshot {
+            blocks: Vec::new(),
+            block_index: HashMap::new(),
+            ..Default::default()
+        };
+
+        let found = find_obstacle_block(
+            &snapshot,
+            BlockPos::new(30_000_000, 64, 30_000_000),
+            BlockPos::new(-30_000_000, 64, -30_000_000),
+        );
+        assert!(found.is_none());
+    }
+
+    /// S-3 companion: proportional interpolation stays exact on a long
+    /// diagonal — the obstacle sits on the scanned cells only because both
+    /// axes interpolate proportionally (z advances at half the rate of x).
+    #[test]
+    fn test_find_obstacle_block_long_diagonal_interpolates() {
+        use std::collections::HashMap;
+        // Line (0,64,0) → (200_000,64,100_000): at step 8,000 (inside the
+        // scan cap) the scan visits (8_000, 64, 4_000) exactly.
+        let obstacle = BlockPos::new(8_000, 64, 4_000);
+        let mut block_index = HashMap::new();
+        block_index.insert(obstacle, 0usize);
+        let snapshot = crate::types::WorldSnapshot {
+            blocks: vec![BlockEntry {
+                position: obstacle,
+                block_type: "obsidian".into(),
+                block_state: None,
+            }],
+            block_index,
+            ..Default::default()
+        };
+
+        let found = find_obstacle_block(
+            &snapshot,
+            BlockPos::new(0, 64, 0),
+            BlockPos::new(200_000, 64, 100_000),
+        );
+        let info = found.expect("diagonal interpolation must hit the midpoint obstacle");
+        assert_eq!(info.position, obstacle);
     }
 
     // ═══════════════════════════════════════════════════════════════
