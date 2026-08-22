@@ -98,7 +98,7 @@ pub enum McpServerStatus {
 
 /// Cached `get_world_view` response so identical re-renders return instantly.
 ///
-/// Stored in [`SharedState::last_world_view`] behind a `Mutex`. The MCP
+/// Stored in `SharedState::last_world_view` behind a `Mutex`. The MCP
 /// `get_world_view` tool checks this before re-rendering: if
 /// `snapshot_seq`, `radius`, and `scale` all match the current
 /// request, the cached PNG bytes are returned without invoking
@@ -688,7 +688,7 @@ impl SharedState {
     /// queue cannot evict a just-arrived rejection reply.
     const MAX_CHAT_MESSAGES: usize = 50;
 
-    /// Store a chat message, keeping only the last [`MAX_CHAT_MESSAGES`].
+    /// Store a chat message, keeping only the last `MAX_CHAT_MESSAGES`.
     ///
     /// Each message is assigned a monotonic sequence number (allocated under
     /// the same lock as the push) so callers can diff new arrivals by cursor
@@ -703,7 +703,7 @@ impl SharedState {
         }
     }
 
-    /// Return a copy of the last [`MAX_CHAT_MESSAGES`] chat messages.
+    /// Return a copy of the last `MAX_CHAT_MESSAGES` chat messages.
     ///
     /// The `(sender, message)` pair is the public contract consumed by
     /// `get_chat_history` and the UI; the internal sequence number is
@@ -989,8 +989,9 @@ impl SharedState {
     /// request to decide whether the cache is still valid.
     ///
     /// Returns `None` when no render has been cached yet (e.g. before the
-    /// first `get_world_view` call, or after [`clear_world_view_cache`]
-    /// was invoked).
+    /// first `get_world_view` call, or after
+    /// [`Self::clear_world_view_cache`](Self::clear_world_view_cache) was
+    /// invoked).
     pub fn get_world_view_cache(&self) -> Option<WorldViewCache> {
         let guard = self
             .last_world_view

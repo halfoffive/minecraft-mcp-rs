@@ -39,7 +39,7 @@ pub struct BotCommandWithResponder {
 /// Commands are serialized by the single `BotCommandReceiver`.
 ///
 /// The response timeout is read **at every `send_command` call** from
-/// [`SharedState::read_config::command_timeout_secs`], so the caller (and
+/// `SharedState::read_config().command_timeout_secs`, so the caller (and
 /// any `RealBotClient` reading the same [`SharedState`]) always see the
 /// latest user-configured value without re-creating the sender.
 #[derive(Debug, Clone)]
@@ -54,7 +54,7 @@ pub struct BotCommandSender {
 impl BotCommandSender {
     /// Return the current response timeout (from the shared config).
     ///
-    /// Exposed so [`crate::bot::commands::RealBotClient::goto`] (and any
+    /// Exposed so `RealBotClient::goto` (and any
     /// other long-running client method) can honour the same value the
     /// `send_command` envelope enforces, without re-reading the config
     /// independently.
@@ -94,7 +94,7 @@ impl BotCommandSender {
     /// at the moment of the call, so changing the value in the settings
     /// panel takes effect on the next command without restarting the MCP
     /// server. `FlyTo` gets its own longer envelope (see
-    /// [`timeout_for`](Self::timeout_for)).
+    /// `timeout_for`).
     ///
     /// # Errors
     /// - `BotError::Offline` if the receiver has been dropped, or if the
@@ -209,7 +209,7 @@ impl BotCommandReceiver {
 /// Create a new bot command channel with the given buffer size.
 ///
 /// The sender's response timeout is read live from
-/// [`SharedState::read_config::command_timeout_secs`] (the user-configurable
+/// `SharedState::read_config().command_timeout_secs` (the user-configurable
 /// "Command timeout" in the settings panel). A fresh [`SharedState`] is
 /// provided so [`BotCommandSender::send_command`] can look up the timeout
 /// at every call without re-creating the sender when the user changes it.

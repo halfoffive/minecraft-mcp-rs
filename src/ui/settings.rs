@@ -21,7 +21,7 @@ use crate::ui::app::EditConfig;
 /// edits and spawn the connection task).
 ///
 /// Each widget marks its [`EditConfig::dirty`] flag via egui's
-/// `Response::changed` (M-8); [`EditConfig::apply`](crate::ui::app::EditConfig::apply)
+/// `Response::changed` (M-8); `EditConfig::apply`
 /// then merges only the edited fields into the live config, so agent-driven
 /// `update_settings` changes are never rolled back by the stale buffer.
 pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -> bool {

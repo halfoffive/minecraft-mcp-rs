@@ -118,7 +118,8 @@ pub fn get_settings(state: &Arc<SharedState>) -> Result<String, BotError> {
 /// Input for the `update_settings` MCP tool.
 ///
 /// All fields are optional — only the provided fields change (partial
-/// update). Values are validated via [`AppConfig::validate`] and applied in
+/// update). Values are validated via
+/// [`AppConfig::validate`](crate::config::AppConfig::validate) and applied in
 /// memory for the running process only — restart with `MINECRAFT_MCP_*`
 /// environment variables to persist across restarts.
 #[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
@@ -214,7 +215,7 @@ fn language_to_str(language: Language) -> &'static str {
 /// Handle the `update_settings` MCP tool.
 ///
 /// Partial update: only the provided fields change. The candidate config is
-/// validated ([`AppConfig::validate`]) and applied in memory (no file
+/// validated ([`AppConfig::validate`](crate::config::AppConfig::validate)) and applied in memory (no file
 /// persistence). Changing `mc_address`/`mc_port`/`ai_username` triggers a
 /// bot reconnect when connected/connecting; changes to
 /// `mcp_transport`/`mcp_address`/`mcp_port` take effect on process restart.

@@ -2,11 +2,11 @@
 //!
 //! Orchestrates multi-step operations (mine, place, open, equip) by driving
 //! the pure state machines from [`crate::compound_ops`] and dispatching
-//! [`BotCommand`]s directly through [`CommandExecutor::dispatch`].
+//! [`BotCommand`]s directly through `CommandExecutor::dispatch`.
 //!
 //! Sub-commands are dispatched via a `&CommandExecutor` reference rather than
 //! through the [`crate::channel::BotCommandSender`] channel. The channel's
-//! only consumer is [`CommandExecutor::run_with_lease`], which processes one
+//! only consumer is `CommandExecutor::run_with_lease`, which processes one
 //! command at a time — so a compound operation that sends sub-commands
 //! through the same channel would block forever waiting for a consumer that
 //! is already awaiting the outer `dispatch` call (re-entrant deadlock).
@@ -137,7 +137,7 @@ pub(crate) async fn wait_for_block_present(
 ///
 /// Each method drives a state machine from [`crate::compound_ops`] by
 /// translating states into [`BotCommand`]s dispatched directly through
-/// [`CommandExecutor::dispatch`], and advancing the machine based on the
+/// `CommandExecutor::dispatch`, and advancing the machine based on the
 /// results.
 ///
 /// All methods are associated functions taking `&CommandExecutor<B>` as the

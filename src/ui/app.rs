@@ -105,14 +105,14 @@ pub struct EditConfig {
     /// Transport mechanism the MCP server uses to talk to clients.
     pub mcp_transport: McpTransport,
     /// Per-field dirty flags (M-8): which fields the user actually edited
-    /// since the buffer was initialised. [`EditConfig::apply`] merges ONLY
+    /// since the buffer was initialised. `EditConfig::apply` merges ONLY
     /// the dirty fields, so agent-driven changes made through the
     /// `update_settings` MCP tool are never silently rolled back by the
     /// stale buffer.
     ///
     /// The UI language deliberately has NO buffer field (M-9): the settings
     /// panel binds its dropdown directly to `config.language`, and
-    /// [`sync_language_from_config`] is the single writer for
+    /// `sync_language_from_config` is the single writer for
     /// `i18n::current()`.
     pub dirty: EditConfigDirty,
 }
@@ -120,7 +120,7 @@ pub struct EditConfig {
 /// Per-field dirty flags for the settings-panel edit buffer (M-8).
 ///
 /// Each settings widget marks its field dirty when the user actually edits
-/// it (egui's [`egui::Response::changed`]). [`EditConfig::apply`] then
+/// it (egui's [`egui::Response::changed`]). `EditConfig::apply` then
 /// merges only the dirty fields into a fresh `state.read_config().clone()`,
 /// and clears all flags after a successful apply.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

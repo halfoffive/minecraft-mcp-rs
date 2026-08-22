@@ -611,7 +611,7 @@ impl ServerHandler for McpBotServer {
 ///
 /// This function blocks until the transport is closed, the shutdown token
 /// fires, an OS Ctrl+C is received, or — headless only — the idle watchdog
-/// fires after [`HEADLESS_IDLE_TIMEOUT`] without any MCP request activity.
+/// fires after `HEADLESS_IDLE_TIMEOUT` without any MCP request activity.
 /// It does NOT simply wait for stdin EOF: on Windows a client host may hold
 /// both pipe ends open so EOF never arrives, hence the raced exit paths.
 /// All logging goes to stderr; stdout is reserved for MCP JSON-RPC
@@ -624,7 +624,7 @@ impl ServerHandler for McpBotServer {
 /// MCP client has gone away (stdin EOF never arrives on Windows, and the
 /// client may hold both pipe ends open) would otherwise linger forever.
 /// With the watchdog the process exits once no MCP request has been received
-/// for [`HEADLESS_IDLE_TIMEOUT`] — see [`is_headless_idle`].
+/// for `HEADLESS_IDLE_TIMEOUT` — see `is_headless_idle`.
 pub async fn serve_stdio(
     state: Arc<SharedState>,
     sender: BotCommandSender,
