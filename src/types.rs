@@ -424,6 +424,12 @@ pub struct EntityEntry {
     pub health: Option<f32>,
 }
 
+/// Sentinel used when an entity has no Minecraft entity ID in the live ECS
+/// index (F-27). `u32::MAX` can never be a valid vanilla entity ID (they fit
+/// in `i32::MAX`), so consumers can distinguish "unknown id" from a real
+/// entity whose id happens to be zero.
+pub const UNKNOWN_ENTITY_ID: u32 = u32::MAX;
+
 // ═══════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════

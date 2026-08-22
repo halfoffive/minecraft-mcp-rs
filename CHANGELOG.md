@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`BotError::EntityNotFound` / `UNKNOWN_ENTITY_ID`:** entity-not-found now
+  travels as `RESOURCE_NOT_FOUND` with `reason: entity_not_found` + `entity_id`
+  (F-34), and entities missing from the live ECS index use the `u32::MAX`
+  sentinel instead of collapsing to id 0 (F-27).
+- **Real JSON-RPC dispatch-layer tests:** the generated 41-tool registry is
+  snapshotted (names + read/destructive annotations), `tools/call` is driven
+  through an in-memory rmcp duplex transport (happy path, unknown tool, and
+  malformed arguments), and the axum auth wrapper's 401 shape is exercised
+  with `tower::ServiceExt::oneshot` (F-3). `tower` is now a dev-dependency.
+
 - **`BotActions::goto_with_deadline`:** the fly timeout now reaches the
   pathfinder itself (audit M-1). `goto_with_margin_with_timeout` passes its
   deadline through to the new `goto_with_deadline` (default: plain `goto`),
@@ -48,6 +58,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`send_chat` rejects `/`-prefixed messages** (F-2): azalea forwards a
+  leading `/` as a server command packet, which would bypass
+  `execute_command`'s rejection-feedback verification. The MCP layer now
+  returns `InvalidParams` and points callers at `execute_command`.
+- **Compound `Act` envelopes and budgets (F-1):** `Act(Mine)` /
+  `Act(CollectItems)` use the longer `max(command, fly)` envelope like
+  `Act(Fly)`; `execute_mine_block_with_budget` returns an honest partial
+  result before dispatching `BreakBlock` when the mine sleep + verification
+  cannot fit, and `collect_items` never rounds a per-target share above the
+  remaining budget (the 2 s floor now stops the loop instead).
+- **Mining-time model corrected (F-7/F-20):** wrong-tool / under-tier
+  breaking now uses vanilla's independent 100-tick branch
+  (`hardness × 5 / speed`, e.g. stone by hand = 7.5 s, not 11.25 s), and
+  `calculate_mine_time` prices a correct-but-too-weak tool (wood pickaxe on
+  iron ore) as non-harvest breaking.
+- **`modify_snapshot` rebuilds `block_index`** after the mutation closure, so
+  callers that mutate `blocks` no longer inherit a stale index (F-6).
+- **Config validation hardened:** HTTP + non-loopback bind + auth disabled is
+  rejected (F-9); `mc_address` must be a real IP/hostname (F-23);
+  `from_env` reconciles `reconnect_max_delay_ms` up to
+  `reconnect_initial_delay_ms` so one bad cross-field pair cannot discard the
+  whole env config (F-8); the post-validation fallback re-applies `--stdio`
+  (F-8).
+- **Snapshot scanner uses the dimension's real `min_y`** (F-11), deferred
+  overflow chunks keep their individual dirty-block entries until the full
+  scan runs (F-26), and failed snapshot builds retry after 250 ms instead of
+  a full interval (F-31).
+- **`place_block` success message:** a verified placement whose snapshot
+  inventory has not caught up reports the hotbar slot instead of the
+  misleading "(empty slot)" label (F-33).
+- **`walk_direction` computes its origin from the live position** with the
+  snapshot as fallback (F-25).
+- **Command chat/command lines are capped at 256 characters** so an LLM
+  cannot trigger the vanilla "Chat message too long" disconnect (F-22).
+- **Timeout documentation:** the command channel now explicitly documents
+  that a timeout is not cancellation and retries can duplicate side effects
+  (F-10).
 - **`place_block` now places the block AT exactly `(x, y, z)`** (breaking
   wire change, audit H-2): the executor right-clicks the cell below the
   target (azalea's fixed Up-face convention), pre-checks `y` in `-63..=320`
@@ -71,6 +118,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cancel-window config restarts consume `session_was_online`** (F-12): a
+  leaked latch previously made the next first-connect failure enter the
+  infinite-backoff branch while clearing `last_error` (silent permanent
+  reconnect).
+- **`test_goto_notify_clone_shares_state` now actually polls the waiter**
+  (F-15); proptest properties that were tautological or had an INFINITY
+  escape hatch were strengthened (F-16); the duplicated inline throttle
+  tests in `events.rs` were removed in favour of the real
+  `SnapshotUpdater` coverage (F-17); process-wide i18n mutations are
+  serialised by `I18N_TEST_LOCK` (F-18).
+- **UI settings coverage:** a parameterized case for every `EditConfig`
+  field drives dirty → apply → `read_config`, so a field whose widget forgets
+  the dirty flag is caught (F-5).
+- **Docs/comment drift:** rmcp version and the 41-tool count in
+  `server.rs`, the truncated `cli.rs` doc sentence, the duplicated
+  `plan_dirty_chunk_scan` docs, and the bogus `SeqCst` atomic-toggle comment
+  were fixed; `src/mcp/mod.rs` (dead file shadowed by the inline module) was
+  removed; `ConnectionManager::disconnect` was renamed to
+  `simulate_offline_for_tests` and restricted to tests (F-24/F-28/F-29/F-35/
+  F-37).
 - **Compound mine flow no longer fails when the best tool is only in the
   main inventory (H-1):** the mining wait was computed with the best tool's
   speed while the bot actually dug with its hand-held item, so

@@ -79,7 +79,16 @@ impl BotCommandSender {
         let base = Duration::from_secs(cfg.command_timeout_secs);
         let is_flight = matches!(cmd, BotCommand::FlyTo(_))
             || matches!(cmd, BotCommand::Act(ActAction::Fly { .. }, _));
-        if is_flight {
+        // F-1: compound act actions (mine, collect) are multi-leg operations
+        // whose movement + mining/verification phases routinely exceed the
+        // plain command envelope. They share the longer flight envelope so a
+        // far-away target no longer produces a guaranteed client-side
+        // CommandTimeout while the serial executor keeps working.
+        let is_compound_act = matches!(
+            cmd,
+            BotCommand::Act(ActAction::Mine { .. } | ActAction::CollectItems { .. }, _)
+        );
+        if is_flight || is_compound_act {
             let fly = Duration::from_secs(cfg.fly_timeout_secs);
             std::cmp::max(base, fly)
         } else {
@@ -101,6 +110,15 @@ impl BotCommandSender {
     ///   responder side drops the oneshot without sending (channel closed).
     /// - `BotError::CommandTimeout` if no response arrives within the
     ///   currently-configured command timeout.
+    ///
+    /// # Timeout is not cancellation (F-10)
+    ///
+    /// A timeout only stops the SENDER from waiting. The command has already
+    /// been queued and the serial executor may still run it to completion;
+    /// its response is simply dropped. A client that retries a timed-out
+    /// command can therefore observe the side effect twice (e.g. `DropItem`
+    /// dropping double the intended count). Callers should prefer idempotent
+    /// commands or verify state before retrying.
     pub async fn send_command(&self, cmd: BotCommand) -> Result<BotResult, BotError> {
         let timeout_dur = self.timeout_for(&cmd);
         self.send_command_with_timeout(cmd, timeout_dur).await
@@ -115,7 +133,8 @@ impl BotCommandSender {
     /// shared config.
     ///
     /// # Errors
-    /// Same as [`send_command`](Self::send_command).
+    /// Same as [`send_command`](Self::send_command). The same timeout-is-not-
+    /// cancellation caveat applies.
     pub async fn send_command_with_timeout(
         &self,
         cmd: BotCommand,
@@ -534,7 +553,7 @@ mod tests {
             )),
             Duration::from_secs(60)
         );
-        // Other Act actions keep the plain command envelope.
+        // Other movement-only Act actions keep the plain command envelope.
         assert_eq!(
             sender.timeout_for(&BotCommand::Act(
                 ActAction::Move {
@@ -543,6 +562,26 @@ mod tests {
                 None
             )),
             Duration::from_secs(10)
+        );
+
+        // F-1: compound actions (mine / collect items) share the long
+        // envelope so their multi-leg duration is not guaranteed to
+        // overrun the client's wait.
+        assert_eq!(
+            sender.timeout_for(&BotCommand::Act(
+                ActAction::Mine {
+                    block_pos: BlockPos::new(0, 0, 0)
+                },
+                None
+            )),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            sender.timeout_for(&BotCommand::Act(
+                ActAction::CollectItems { radius: 16 },
+                None
+            )),
+            Duration::from_secs(60)
         );
     }
 

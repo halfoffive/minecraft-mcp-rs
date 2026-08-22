@@ -718,6 +718,17 @@ impl<B: BotActions> CommandExecutor<B> {
         trace!("command executor loop ended (channel closed)");
     }
 
+    /// Read the live player inventory directly from the bot trait.
+    ///
+    /// Compound operations call this instead of dispatching
+    /// [`BotCommand::QueryInventory`] and re-parsing its JSON array (F-30):
+    /// the JSON round-trip exists for cross-process MCP clients, while an
+    /// internal sub-command would also pollute `RunStats` with a synthetic
+    /// QueryInventory entry.
+    pub(crate) fn inventory_entries_live(&self) -> Vec<Option<ItemStack>> {
+        self.bot.inventory_entries()
+    }
+
     /// Dispatch a single command and record it in the run stats.
     ///
     /// Every command that reaches the executor (including compound-operation
@@ -925,7 +936,17 @@ impl<B: BotActions> CommandExecutor<B> {
         // are not supported by azalea's pathfinder and surface a clear error.
         match direction_to_vector(dir) {
             Some((dx, dy, dz)) => {
-                let origin = self.state.read_snapshot().self_player.position;
+                // F-25: prefer the live position for the vector origin, like
+                // every other movement result in this module. A throttled
+                // snapshot can lag a previous move and make WalkDirection
+                // compute its target from a stale coordinate.
+                let origin = self
+                    .bot
+                    .position()
+                    .map(|[x, y, z]| {
+                        BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32)
+                    })
+                    .unwrap_or_else(|| self.state.read_snapshot().self_player.position);
                 // Clamp to i32 range so a malicious or malformed `distance`
                 // (u32 > i32::MAX) doesn't silently wrap to a negative
                 // offset, which would make the bot walk in the opposite
@@ -1816,9 +1837,7 @@ impl<B: BotActions> CommandExecutor<B> {
             // cannot see in the snapshot is a parameter error, not a bot
             // failure — the ID may be stale or fabricated.
             drop(snapshot);
-            return Err(BotError::InvalidParams(format!(
-                "Entity with ID {entity_id} not found in current world snapshot"
-            )));
+            return Err(BotError::EntityNotFound(entity_id));
         };
         let entity_pos = entity.position;
         let distance = distance_between(entity_pos, snapshot.self_player.position);
@@ -1839,9 +1858,7 @@ impl<B: BotActions> CommandExecutor<B> {
         // tick. Attack only when the target is within reach *now*.
         let fresh = self.state.read_snapshot();
         let Some(current_entity) = fresh.entities.iter().find(|e| e.id == entity_id) else {
-            return Err(BotError::InvalidParams(format!(
-                "Entity with ID {entity_id} no longer in the world snapshot"
-            )));
+            return Err(BotError::EntityNotFound(entity_id));
         };
         let fresh_distance = distance_between(current_entity.position, fresh.self_player.position);
         if fresh_distance > MAX_ATTACK_REACH {
@@ -2012,8 +2029,9 @@ impl<B: BotActions> CommandExecutor<B> {
     fn handle_query_inventory(&self) -> Result<BotResult, BotError> {
         trace!("QueryInventory");
         // Read the live inventory from the azalea client. The result is a
-        // 36-element JSON array (index = slot, null = empty slot), matching
-        // the format parsed by `compound_ops::query_inventory`.
+        // 36-element JSON array (index = slot, null = empty slot) for the
+        // MCP tool; internal callers use `inventory_entries_live` directly
+        // (F-30).
         let entries = self.bot.inventory_entries();
         let arr: Vec<serde_json::Value> = entries
             .iter()
@@ -2264,16 +2282,19 @@ impl<B: BotActions> CommandExecutor<B> {
         let item_count = item_targets.len();
 
         for (i, target) in item_targets.iter().enumerate() {
-            // Split the remaining budget across the targets still to visit,
-            // with a 2-second floor so a single short hop never gets a
-            // sub-second window.
+            // Split the remaining budget across the targets still to visit.
+            // The 2-second floor guarantees a meaningful pathfinding window,
+            // but unlike the old `max(2s)` allocation it never exceeds the
+            // remaining budget: when a share would drop below the floor the
+            // loop stops instead of overrunning the command envelope (F-1).
             let remaining_targets = item_count - i;
-            let per_target = remaining_budget
-                .checked_div(remaining_targets as u32)
-                .map(|d| d.max(Duration::from_secs(2)))
-                .unwrap_or(Duration::from_secs(2));
+            let Some(per_target) = collect_target_budget(remaining_budget, remaining_targets)
+            else {
+                timed_out = true;
+                break;
+            };
             match self
-                .goto_with_margin_with_timeout(*target, Some(per_target.as_secs().max(1)))
+                .goto_with_margin_with_timeout(*target, Some(per_target.as_secs()))
                 .await
             {
                 GotoOutcome::TimedOut { .. } => {
@@ -2362,12 +2383,26 @@ impl<B: BotActions> CommandExecutor<B> {
                 //
                 // `Box::pin` is required because `dispatch` is recursive
                 // through this call: `dispatch` → `handle_act` →
-                // `execute_mine_block` → `query_inventory` → `dispatch`. Without
-                // indirection the compiler cannot size the resulting future
-                // (E0733). Boxing just this edge keeps the rest of `dispatch`
-                // zero-cost.
-                match Box::pin(CompoundOpExecutor::execute_mine_block(
-                    self, block_pos, true,
+                // `execute_mine_block` still recursively awaits `dispatch`
+                // for its movement/tool sub-commands. Without indirection the
+                // compiler cannot size the resulting future (E0733). Boxing
+                // just this edge keeps the rest of `dispatch` zero-cost.
+                // F-1: pass the long-command envelope (minus the reply margin)
+                // into the compound operation. `timeout_for` gives Act(Mine)
+                // the same max(command, fly) envelope as Act(Fly), so the
+                // operation can bound its mining sleep + verification against
+                // a deadline the caller will actually still be listening at.
+                let compound_budget = {
+                    let cfg = self.state.read_config();
+                    let base = Duration::from_secs(cfg.command_timeout_secs);
+                    let fly = Duration::from_secs(cfg.fly_timeout_secs);
+                    std::cmp::max(base, fly).saturating_sub(MOVEMENT_REPLY_MARGIN)
+                };
+                match Box::pin(CompoundOpExecutor::execute_mine_block_with_budget(
+                    self,
+                    block_pos,
+                    true,
+                    Some(compound_budget),
                 ))
                 .await
                 {
@@ -2518,6 +2553,23 @@ const COMMAND_FEEDBACK_WAIT_MS: u64 = 400;
 /// client sees a bare `CommandTimeout` instead of the structured partial
 /// result (`position`, `distance`, ...) this executor builds.
 const MOVEMENT_REPLY_MARGIN: Duration = Duration::from_secs(1);
+
+/// Minimum window assigned to one collect target (F-1).
+///
+/// `goto_with_margin_with_timeout` subtracts the reply margin from this
+/// window, so anything below 2 s leaves a sub-second (or zero) pathfinding
+/// window. When the remaining budget cannot afford the floor, collect stops
+/// and reports the honest partial count instead of repeatedly allocating
+/// 2 s per target and overshooting the command envelope.
+const MIN_COLLECT_TARGET_BUDGET: Duration = Duration::from_secs(2);
+
+/// Split the remaining collect budget evenly across the targets still to
+/// visit. Returns `None` when a target can no longer receive the minimum
+/// window — the loop must stop there.
+fn collect_target_budget(remaining: Duration, remaining_targets: usize) -> Option<Duration> {
+    let share = remaining.checked_div(u32::try_from(remaining_targets).ok()?)?;
+    (share >= MIN_COLLECT_TARGET_BUDGET).then_some(share)
+}
 
 /// Pause between the first and the single retry of a smart_move whose first
 /// attempt stopped short — lets the server settle a transient misread (e.g.
@@ -3530,6 +3582,28 @@ mod tests {
         assert_eq!(goto_calls[0], BlockPos::new(0, 64, -1));
     }
 
+    /// F-25: the walk target is computed from the LIVE position when one is
+    /// available; the throttled snapshot may still carry a pre-move origin.
+    #[tokio::test]
+    async fn test_walk_direction_uses_live_position_as_origin() {
+        let (executor, sender, state, log) = make_executor();
+        make_populated_snapshot(&state);
+        // The snapshot says (0, 64, 0) but the client component says
+        // (10.9, 64.2, -5.1): the offset must be applied to the live floor.
+        *log.live_position.lock().unwrap() = Some([10.9, 64.2, -5.1]);
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::WalkDirection(Direction::North, 2)).await;
+        assert!(result.is_ok());
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+
+        let goto_calls = log.goto_calls.lock().unwrap();
+        assert_eq!(goto_calls.len(), 1);
+        assert_eq!(goto_calls[0], BlockPos::new(10, 64, -8));
+    }
+
     #[tokio::test]
     async fn test_walk_direction_reports_live_end_position() {
         // R-12 regression: the result data must carry the bot's end
@@ -4316,7 +4390,7 @@ mod tests {
         handle.await.expect("executor should finish");
     }
 
-    /// An entity absent from the snapshot is rejected as `InvalidParams`
+    /// An entity absent from the snapshot is rejected as `EntityNotFound`
     /// before any attack attempt (defence-in-depth; the MCP layer already
     /// enforces the same existence check).
     #[tokio::test]
@@ -4326,7 +4400,7 @@ mod tests {
         let handle = spawn_executor(executor);
 
         let result = send_and_await(&sender, BotCommand::AttackEntity(999)).await;
-        assert!(matches!(result, Err(BotError::InvalidParams(_))));
+        assert!(matches!(result, Err(BotError::EntityNotFound(999))));
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -5858,17 +5932,37 @@ mod tests {
         assert!(log.goto_calls.lock().unwrap().is_empty());
     }
 
+    /// F-1: the per-target budget is capped by the remaining total — a
+    /// too-small share returns `None` (stop and report partial) rather than
+    /// being rounded up to the 2 s floor and overshooting the envelope.
+    #[test]
+    fn test_collect_target_budget_never_overshoots() {
+        assert_eq!(
+            collect_target_budget(Duration::from_secs(6), 3),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(collect_target_budget(Duration::from_secs(5), 3), None);
+        assert_eq!(collect_target_budget(Duration::from_secs(0), 3), None);
+        assert_eq!(
+            collect_target_budget(Duration::from_secs(4), 2),
+            Some(Duration::from_secs(2))
+        );
+    }
+
     #[tokio::test]
     async fn test_collect_items_partial_visits_reported() {
         // M-5: collect_items with several targets must not race the whole
         // command envelope (the raw `goto` loop could exceed it entirely, and
         // a success at the deadline was misreported as CommandTimeout). A
         // per-target budget — the remaining envelope budget split across the
-        // remaining targets, floored at 2 s — stops the loop on the first
+        // remaining targets, with a 2 s minimum window that must still fit
+        // inside the remaining budget (F-1) — stops the loop on the first
         // timeout and reports the partial visit count honestly: an Ok result,
-        // not an Err, and not a fake "visited all".
+        // not an Err, and not a fake "visited all". `command_timeout_secs=7`
+        // leaves a 6 s total movement budget, so the first of three targets
+        // gets the 2 s minimum and the second times out mid-loop.
         let config = AppConfig {
-            command_timeout_secs: 2,
+            command_timeout_secs: 7,
             ..AppConfig::default()
         };
         let state = Arc::new(SharedState::new(config));

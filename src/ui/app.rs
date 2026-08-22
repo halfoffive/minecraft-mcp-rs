@@ -515,6 +515,178 @@ mod tests {
         assert_eq!(edit.dirty, EditConfigDirty::default());
     }
 
+    /// F-5: every edit-buffer field (one case per field) must survive the
+    /// dirty-flag → `apply` → `read_config` round-trip. The old test only
+    /// hand-picked five fields, so a newly added field whose settings widget
+    /// forgot to set its dirty flag could silently never persist.
+    ///
+    /// Keep this list in lock-step with [`EditConfig`]: each case mutates
+    /// exactly one field and its dirty flag, then verifies the persisted
+    /// [`AppConfig`] value. (The UI language is intentionally absent from
+    /// `EditConfig` — see M-9.)
+    #[test]
+    fn test_edit_config_every_field_dirty_apply_roundtrip() {
+        type Case = (
+            String,
+            Box<dyn Fn(&mut EditConfig)>,
+            Box<dyn Fn(&AppConfig)>,
+        );
+        type Cases = Vec<Case>;
+
+        fn case<M, C>(name: &str, mutate: M, check: C) -> Case
+        where
+            M: Fn(&mut EditConfig) + 'static,
+            C: Fn(&AppConfig) + 'static,
+        {
+            (name.to_string(), Box::new(mutate), Box::new(check))
+        }
+
+        let cases: Cases = vec![
+            case(
+                "mc_address",
+                |e| {
+                    e.mc_address = "mc.example.com".into();
+                    e.dirty.mc_address = true;
+                },
+                |c| assert_eq!(c.mc_address, "mc.example.com"),
+            ),
+            case(
+                "mc_port",
+                |e| {
+                    e.mc_port = 25566;
+                    e.dirty.mc_port = true;
+                },
+                |c| assert_eq!(c.mc_port, 25566),
+            ),
+            case(
+                "ai_username",
+                |e| {
+                    e.ai_username = "Robot".into();
+                    e.dirty.ai_username = true;
+                },
+                |c| assert_eq!(c.ai_username, "Robot"),
+            ),
+            case(
+                "mcp_address",
+                |e| {
+                    e.mcp_address = "127.0.0.2".into();
+                    e.dirty.mcp_address = true;
+                },
+                |c| assert_eq!(c.mcp_address, "127.0.0.2"),
+            ),
+            case(
+                "mcp_port",
+                |e| {
+                    e.mcp_port = 9011;
+                    e.dirty.mcp_port = true;
+                },
+                |c| assert_eq!(c.mcp_port, 9011),
+            ),
+            case(
+                "task_name",
+                |e| {
+                    e.task_name = "patrol".into();
+                    e.dirty.task_name = true;
+                },
+                |c| assert_eq!(c.task_name, "patrol"),
+            ),
+            case(
+                "chunk_scan_radius",
+                |e| {
+                    e.chunk_scan_radius = 10;
+                    e.dirty.chunk_scan_radius = true;
+                },
+                |c| assert_eq!(c.chunk_scan_radius, 10),
+            ),
+            case(
+                "block_perception_radius",
+                |e| {
+                    e.block_perception_radius = 40;
+                    e.dirty.block_perception_radius = true;
+                },
+                |c| assert_eq!(c.block_perception_radius, 40),
+            ),
+            case(
+                "snapshot_interval_ms",
+                |e| {
+                    e.snapshot_interval_ms = 750;
+                    e.dirty.snapshot_interval_ms = true;
+                },
+                |c| assert_eq!(c.snapshot_interval_ms, 750),
+            ),
+            case(
+                "reconnect_initial_delay_ms",
+                |e| {
+                    e.reconnect_initial_delay_ms = 7000;
+                    e.dirty.reconnect_initial_delay_ms = true;
+                },
+                |c| assert_eq!(c.reconnect_initial_delay_ms, 7000),
+            ),
+            case(
+                "reconnect_max_delay_ms",
+                |e| {
+                    e.reconnect_max_delay_ms = 120000;
+                    e.dirty.reconnect_max_delay_ms = true;
+                },
+                |c| assert_eq!(c.reconnect_max_delay_ms, 120000),
+            ),
+            case(
+                "command_timeout_secs",
+                |e| {
+                    e.command_timeout_secs = 42;
+                    e.dirty.command_timeout_secs = true;
+                },
+                |c| assert_eq!(c.command_timeout_secs, 42),
+            ),
+            case(
+                "fly_timeout_secs",
+                |e| {
+                    e.fly_timeout_secs = 90;
+                    e.dirty.fly_timeout_secs = true;
+                },
+                |c| assert_eq!(c.fly_timeout_secs, 90),
+            ),
+            case(
+                "mcp_token",
+                |e| {
+                    e.mcp_token = "token-123".into();
+                    e.dirty.mcp_token = true;
+                },
+                |c| assert_eq!(c.mcp_token, "token-123"),
+            ),
+            case(
+                "mcp_auth_enabled",
+                |e| {
+                    e.mcp_auth_enabled = true;
+                    e.dirty.mcp_auth_enabled = true;
+                },
+                |c| assert!(c.mcp_auth_enabled),
+            ),
+            case(
+                "mcp_transport",
+                |e| {
+                    e.mcp_transport = McpTransport::Stdio;
+                    e.dirty.mcp_transport = true;
+                },
+                |c| assert_eq!(c.mcp_transport, McpTransport::Stdio),
+            ),
+        ];
+
+        for (name, mutate, check) in cases {
+            let state = SharedState::new(AppConfig::default());
+            let mut edit = EditConfig::from(&state.read_config().clone());
+            mutate(&mut edit);
+            edit.apply(&state)
+                .unwrap_or_else(|err| panic!("{name}: apply failed: {err}"));
+            check(&state.read_config());
+            assert_eq!(
+                edit.dirty,
+                EditConfigDirty::default(),
+                "{name}: dirty flags must clear"
+            );
+        }
+    }
+
     /// An invalid edit (empty `mc_address`) is rejected and leaves the
     /// stored config untouched.
     #[test]
@@ -565,6 +737,9 @@ mod tests {
     /// never calls `i18n::set` with a stale value.
     #[test]
     fn test_language_change_via_config_not_fought_by_panel() {
+        let _lock = crate::i18n::I18N_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         crate::i18n::set(Language::En);
         let state = SharedState::new(AppConfig::default());
         // Agent changed the language via update_settings.

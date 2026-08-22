@@ -38,6 +38,14 @@ pub enum BotError {
     /// A block was not found at the given position.
     BlockNotFound(BlockPos),
 
+    /// The requested entity was not found in the current world snapshot.
+    ///
+    /// A not-found condition, not a malformed parameter: the ID is a valid
+    /// Minecraft entity ID, but the snapshot no longer contains it (stale or
+    /// fabricated ID). Maps to `RESOURCE_NOT_FOUND` so MCP clients can branch
+    /// on the error code instead of parsing `InvalidParams` messages (F-34).
+    EntityNotFound(u32),
+
     /// The chunk containing the position is not loaded.
     ChunkNotLoaded(BlockPos),
 
@@ -133,6 +141,7 @@ impl Display for BotError {
                 write!(f, "Command `{command}` timed out after {timeout_secs}s")
             }
             BotError::BlockNotFound(pos) => write!(f, "Block not found at {pos}"),
+            BotError::EntityNotFound(id) => write!(f, "Entity not found with id {id}"),
             BotError::ChunkNotLoaded(pos) => write!(f, "Chunk not loaded at {pos}"),
             BotError::ToolNotFound {
                 tool_type,
@@ -204,6 +213,7 @@ impl Display for BotError {
 // | -32000 | `CODE_OFFLINE`                   | `Offline`              | `bot_disconnected`   | true      | —                                    |
 // | -32001 | `CODE_COMMAND_TIMEOUT`           | `CommandTimeout`       | `command_timeout`    | true      | `command`, `timeout_secs`            |
 // | -32002 | `ErrorCode::RESOURCE_NOT_FOUND`  | `BlockNotFound`        | `block_not_found`    | false     | `x`, `y`, `z`                        |
+// | -32002 | `ErrorCode::RESOURCE_NOT_FOUND`  | `EntityNotFound`       | `entity_not_found`   | false     | `entity_id`                          |
 // | -32003 | `CODE_CHUNK_NOT_LOADED`          | `ChunkNotLoaded`       | `chunk_not_loaded`   | true      | `x`, `y`, `z`                        |
 // | -32004 | `CODE_INVENTORY_FULL`            | `InventoryFull`        | `inventory_full`     | false     | —                                    |
 // | -32005 | `CODE_MINING_INTERRUPTED`        | `MiningInterrupted`    | `mining_interrupted` | false     | `detail`                             |
@@ -276,6 +286,15 @@ impl From<BotError> for ErrorData {
                     "x": pos.x,
                     "y": pos.y,
                     "z": pos.z,
+                }),
+            ),
+
+            BotError::EntityNotFound(entity_id) => (
+                ErrorCode::RESOURCE_NOT_FOUND,
+                serde_json::json!({
+                    "reason": "entity_not_found",
+                    "retryable": false,
+                    "entity_id": entity_id,
                 }),
             ),
 
@@ -420,6 +439,11 @@ impl From<BotError> for ErrorData {
     }
 }
 
+// F-32: this is a deliberate project contract, documented in the table above:
+// tool-level failures travel as JSON-RPC `ErrorData` with structured `reason`
+// codes instead of an MCP `is_error: true` `CallToolResult`. The error code
+// is branchable and every payload carries `reason` + `retryable`; MCP client
+// authors should read `error.data.reason`, not only `error.code`.
 impl rmcp::handler::server::tool::IntoCallToolResult for BotError {
     fn into_call_tool_result(self) -> Result<rmcp::model::CallToolResult, ErrorData> {
         Err(self.into())
@@ -467,6 +491,12 @@ mod tests {
         };
         let err = BotError::BlockNotFound(pos);
         assert_eq!(err.to_string(), format!("Block not found at {pos}"));
+    }
+
+    #[test]
+    fn test_display_entity_not_found() {
+        let err = BotError::EntityNotFound(42);
+        assert_eq!(err.to_string(), "Entity not found with id 42");
     }
 
     #[test]
@@ -703,6 +733,15 @@ mod tests {
         assert_eq!(data["x"], 1);
         assert_eq!(data["y"], 2);
         assert_eq!(data["z"], 3);
+    }
+
+    #[test]
+    fn test_into_mcp_error_entity_not_found() {
+        let err = BotError::EntityNotFound(42);
+        let mcp: ErrorData = err.into();
+        assert_eq!(mcp.code, ErrorCode::RESOURCE_NOT_FOUND);
+        let data = assert_contract(&mcp, "entity_not_found", false);
+        assert_eq!(data["entity_id"], 42);
     }
 
     #[test]

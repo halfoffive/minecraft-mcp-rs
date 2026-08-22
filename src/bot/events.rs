@@ -656,36 +656,11 @@ mod tests {
 
     // -- Throttle logic ------------------------------------------------------
 
-    #[test]
-    fn test_tick_throttle_skips_fast_updates() {
-        let state = BotState::default();
-        state.shared_state.set_online(true);
-
-        // Manually set last snapshot time to now.
-        *state.last_snapshot_time.lock().unwrap() = Instant::now();
-
-        // Should not update because interval hasn't passed.
-        let should_update = {
-            let last = state.last_snapshot_time.lock().unwrap();
-            last.elapsed() >= Duration::from_millis(state.snapshot_interval_ms)
-        };
-        assert!(!should_update);
-    }
-
-    #[test]
-    fn test_tick_throttle_allows_slow_updates() {
-        let state = BotState::default();
-        state.shared_state.set_online(true);
-
-        // Set last snapshot time far in the past.
-        *state.last_snapshot_time.lock().unwrap() = Instant::now() - Duration::from_secs(10);
-
-        let should_update = {
-            let last = state.last_snapshot_time.lock().unwrap();
-            last.elapsed() >= Duration::from_millis(state.snapshot_interval_ms)
-        };
-        assert!(should_update);
-    }
+    // F-17: the two former "throttle" tests re-implemented the comparison
+    // inline and therefore tested their own copy, not `handle_tick` or the
+    // real throttle. The real gate is `SnapshotUpdater::check_and_update_timer`
+    // and is covered by six tests in `snapshot_updater.rs`; `handle_tick`
+    // additionally has the force-refresh bypass covered here.
 
     // -- Idle snapshot relaxation (L-23 monotonic probes) -------------------
 

@@ -57,10 +57,9 @@ pub async fn handle_attack_entity(
         let snap = state.read_snapshot();
         let found = snap.entities.iter().any(|e| e.id == input.entity_id);
         if !found {
-            return Err(BotError::InvalidParams(format!(
-                "Entity with ID {} not found in current world snapshot",
-                input.entity_id
-            )));
+            // F-34: the ID is in the valid range but absent from the
+            // snapshot — a not-found condition, not a malformed parameter.
+            return Err(BotError::EntityNotFound(input.entity_id));
         }
     }
 
@@ -220,9 +219,7 @@ mod tests {
         // No entities in default snapshot
         let input = AttackEntityInput { entity_id: 99 };
         let result = handle_attack_entity(&state, &sender, input).await;
-        assert!(
-            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("not found"))
-        );
+        assert!(matches!(result, Err(BotError::EntityNotFound(99))));
     }
 
     #[tokio::test]

@@ -14,7 +14,7 @@
 //! sub-command handlers run inline on the same call stack.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{debug, trace, warn};
 
@@ -190,49 +190,17 @@ impl CompoundOpExecutor {
             .unwrap_or(0)
     }
 
-    /// Query the bot's inventory by dispatching [`BotCommand::QueryInventory`].
+    /// Query the bot's live player inventory through the executor's direct
+    /// trait accessor.
+    ///
+    /// F-30: internal callers must not dispatch `QueryInventory` and parse
+    /// the JSON array — that round-trip exists for the cross-process MCP
+    /// tool and each internal dispatch would also fabricate a RunStats entry
+    /// for a sub-step the caller never issued.
     async fn query_inventory<B: BotActions>(
         executor: &CommandExecutor<B>,
     ) -> Result<Vec<Option<ItemStack>>, BotError> {
-        let result = executor.dispatch(BotCommand::QueryInventory).await?;
-        let data = result.data.unwrap_or(serde_json::Value::Null);
-
-        if let Some(arr) = data.as_array() {
-            let inventory: Vec<Option<ItemStack>> = arr
-                .iter()
-                .map(|item| {
-                    if item.is_null() {
-                        None
-                    } else {
-                        let item_id = match item.get("item_id").and_then(|v| v.as_str()) {
-                            Some(id) => id.to_string(),
-                            None => {
-                                warn!(?item, "inventory item missing item_id field");
-                                return None;
-                            }
-                        };
-                        let count_raw = match item.get("count").and_then(|v| v.as_u64()) {
-                            Some(c) => c,
-                            None => {
-                                warn!(?item, "inventory item missing or invalid count field");
-                                return None;
-                            }
-                        };
-                        let count = match u8::try_from(count_raw) {
-                            Ok(c) => c,
-                            Err(_) => {
-                                warn!(count_raw, "inventory item count out of u8 range");
-                                return None;
-                            }
-                        };
-                        Some(ItemStack { item_id, count })
-                    }
-                })
-                .collect();
-            Ok(inventory)
-        } else {
-            Ok(vec![])
-        }
+        Ok(executor.inventory_entries_live())
     }
 
     // -----------------------------------------------------------------------
@@ -253,12 +221,39 @@ impl CompoundOpExecutor {
     /// 9. Wait for mining completion (sleep calculated from [`mining_calc`](crate::mining_calc)).
     /// 10. Verify the block is broken.
     /// 11. Return success or failure.
+    #[cfg(test)]
     pub(crate) async fn execute_mine_block<B: BotActions>(
         executor: &CommandExecutor<B>,
         pos: BlockPos,
         use_best_tool: bool,
     ) -> Result<BotResult, BotError> {
+        Self::execute_mine_block_with_budget(executor, pos, use_best_tool, None).await
+    }
+
+    /// [`execute_mine_block`](Self::execute_mine_block) with an explicit
+    /// end-to-end budget.
+    ///
+    /// `envelope_budget` is the time remaining until the caller's command
+    /// envelope fires (already reduced by the reply margin). When the
+    /// movement/tool steps have consumed so much of it that the mine-time
+    /// sleep plus the verification poll can no longer fit, the operation
+    /// returns an honest `success:false` result BEFORE dispatching
+    /// `BreakBlock` — the caller receives a real outcome instead of a
+    /// `CommandTimeout`, and the serial executor does not keep working on a
+    /// command nobody is listening for (F-1).
+    pub(crate) async fn execute_mine_block_with_budget<B: BotActions>(
+        executor: &CommandExecutor<B>,
+        pos: BlockPos,
+        use_best_tool: bool,
+        envelope_budget: Option<Duration>,
+    ) -> Result<BotResult, BotError> {
         trace!(?pos, use_best_tool, "execute_mine_block start");
+
+        // F-1: deadline for the whole compound operation. The envelope is
+        // only approximate here (queueing time is unknown to the executor),
+        // but bounding the sleep + verification phase prevents the unbounded
+        // "ghost timeout" case where the client has already given up.
+        let deadline = envelope_budget.map(|budget| Instant::now() + budget);
 
         // Step 1: Check online
         if !executor.state.is_online() {
@@ -375,6 +370,25 @@ impl CompoundOpExecutor {
         // `ToolAlreadyInInventory` instead of `Arrived`.
 
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
+            // F-1: the movement leg can consume most of the envelope. Bail
+            // out with a structured partial result instead of starting (or
+            // continuing) the mining phase that is guaranteed to overrun.
+            if let Some(deadline) = deadline {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(BotResult {
+                        success: false,
+                        message: format!(
+                            "Mining budget exhausted while reaching {pos} (block {block_type} untouched)"
+                        ),
+                        data: Some(serde_json::json!({
+                            "reason": "mining_budget_exhausted",
+                            "position": executor.state.read_snapshot().self_player.position,
+                            "target": pos,
+                        })),
+                    });
+                }
+            }
             match op.current_action(&state) {
                 Some(BotCommand::MoveTo(_)) => {
                     // M-4: walk to a standable neighbour of the target, not
@@ -503,6 +517,61 @@ impl CompoundOpExecutor {
                 }
                 Some(BotCommand::BreakBlock(bp)) => {
                     trace!(?bp, "dispatching BreakBlock");
+
+                    // Step 9: compute the mining/verification cost BEFORE
+                    // dispatching so an insufficient remaining budget can
+                    // return a structured partial result instead of starting
+                    // work that is guaranteed to overrun the envelope (F-1).
+                    let mine_time = calculate_mine_time(&block_type, tool_type, material);
+                    trace!(mine_time, "waiting for mining completion");
+
+                    // Unbreakable blocks (e.g. bedrock) yield INFINITY, which
+                    // would panic `Duration::from_secs_f64`. Fail fast with a
+                    // clear error instead of crashing the bot thread.
+                    if !mine_time.is_finite() {
+                        state = op.advance(
+                            state,
+                            OperationEvent::Failed(BotError::MiningInterrupted {
+                                reason: format!(
+                                    "block {block_type} is unbreakable (infinite mine time)"
+                                ),
+                            }),
+                        );
+                        continue;
+                    }
+
+                    // Verification budget: poll the snapshot with a bounded
+                    // budget instead of deciding from a single possibly-stale
+                    // read (the broken state lands on the next periodic
+                    // snapshot rebuild). `wait_for_block_gone` treats absence
+                    // from the index as gone (audit L-4: production snapshots
+                    // filter air entries) and goes through `block_index`
+                    // (M-12).
+                    let verification_budget =
+                        Duration::from_millis(executor.state.read_config().snapshot_interval_ms)
+                            + Duration::from_millis(250);
+                    let mine_sleep = Duration::from_secs_f64(mine_time);
+
+                    if let Some(deadline) = deadline {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        let minimum_needed = verification_budget.saturating_add(mine_sleep);
+                        if remaining < minimum_needed {
+                            return Ok(BotResult {
+                                success: false,
+                                message: format!(
+                                    "Mining budget exhausted before mining {block_type} at {pos} (needed ~{mine_sleep:?} plus verification)"
+                                ),
+                                data: Some(serde_json::json!({
+                                    "reason": "mining_budget_exhausted",
+                                    "position": executor.state.read_snapshot().self_player.position,
+                                    "target": pos,
+                                    "block_type": block_type,
+                                    "mine_time_secs": mine_time,
+                                })),
+                            });
+                        }
+                    }
+
                     // Task 2.6: same `?` → state.advance(Failed(e)) rewrite.
                     let result = match executor.dispatch(BotCommand::BreakBlock(bp)).await {
                         Ok(r) => r,
@@ -524,26 +593,8 @@ impl CompoundOpExecutor {
                     // Advance to WaitingForResult (ExecutingAction + ActionStarted → WaitingForResult)
                     state = op.advance(state, OperationEvent::ActionStarted);
 
-                    // Step 9: Wait for mining completion.
-                    let mine_time = calculate_mine_time(&block_type, tool_type, material);
-                    trace!(mine_time, "waiting for mining completion");
-
-                    // Unbreakable blocks (e.g. bedrock) yield INFINITY, which
-                    // would panic `Duration::from_secs_f64`. Fail fast with a
-                    // clear error instead of crashing the bot thread.
-                    if !mine_time.is_finite() {
-                        state = op.advance(
-                            state,
-                            OperationEvent::Failed(BotError::MiningInterrupted {
-                                reason: format!(
-                                    "block {block_type} is unbreakable (infinite mine time)"
-                                ),
-                            }),
-                        );
-                        continue;
-                    }
                     tokio::select! {
-                        _ = sleep(Duration::from_secs_f64(mine_time)) => {}
+                        _ = sleep(mine_sleep) => {}
                         _ = async {
                             while executor.state.is_online() {
                                 sleep(Duration::from_millis(100)).await;
@@ -563,13 +614,7 @@ impl CompoundOpExecutor {
                     // snapshot with a bounded budget instead of deciding
                     // from a single possibly-stale read (the broken state
                     // lands on the next periodic snapshot rebuild).
-                    // `wait_for_block_gone` treats absence from the index
-                    // as gone (audit L-4: production snapshots filter air
-                    // entries) and goes through `block_index` (M-12).
-                    let budget =
-                        Duration::from_millis(executor.state.read_config().snapshot_interval_ms)
-                            + Duration::from_millis(250);
-                    if wait_for_block_gone(&executor.state, pos, budget).await {
+                    if wait_for_block_gone(&executor.state, pos, verification_budget).await {
                         state = op.advance(state, OperationEvent::BlockBroken);
                     } else {
                         warn!(?pos, "block still present after mining time");
@@ -1379,6 +1424,43 @@ mod tests {
         assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
+    /// F-1: with a zero remaining budget the compound operation must stop
+    /// after the movement leg and return an honest `success:false` partial
+    /// result — not dispatch `BreakBlock`, keep sleeping, and let the caller
+    /// time out while the serial executor performs unobserved work.
+    #[tokio::test]
+    async fn test_mine_block_zero_budget_stops_before_breaking() {
+        let pos = BlockPos::new(10, 64, 20);
+        let (executor, _mock, state) = setup(vec![], make_snapshot_with_block(pos, "stone"));
+
+        let result = CompoundOpExecutor::execute_mine_block_with_budget(
+            &executor,
+            pos,
+            false,
+            Some(Duration::ZERO),
+        )
+        .await
+        .expect("budget exhaustion is a structured BotResult, not an Err");
+
+        assert!(!result.success, "got: {result:?}");
+        assert!(
+            result.message.contains("budget exhausted"),
+            "got: {}",
+            result.message
+        );
+        let data = result.data.expect("partial result carries structured data");
+        assert_eq!(data["reason"], "mining_budget_exhausted");
+        assert_eq!(
+            data["target"],
+            serde_json::json!({"x": pos.x, "y": pos.y, "z": pos.z})
+        );
+
+        // The BreakBlock dispatch never ran: the target block is untouched.
+        let snap = state.read_snapshot();
+        let idx = snap.block_index.get(&pos).expect("target still indexed");
+        assert_eq!(snap.blocks[*idx].block_type, "stone");
+    }
+
     // ── execute_mine_block: block not found ───────────────────────────────
 
     #[tokio::test]
@@ -2044,12 +2126,13 @@ mod tests {
 
     /// Task 1.5 (P1-#6) + audit H-1: the `needs_move_to_hotbar` path must
     /// NOT reset `tool_type` to `Hand` and `material` to `Wood` — doing so
-    /// applies a 5× wrong-tool penalty (`MiningInterrupted`'s "stone" time
-    /// goes from 0.375s with an iron pickaxe to 11.25s with bare hands).
-    /// H-1 additionally moves the main-inventory tool into the hotbar and
-    /// switches to it, so the mine-time model (iron pickaxe speed) matches
-    /// what the bot actually holds, and the elapsed wall time is ~0.375s +
-    /// the swap overhead, well under 11.25s.
+    /// switches from the 30-tick harvest branch to the 100-tick non-harvest
+    /// branch (`MiningInterrupted`'s "stone" time goes from 0.375s with an
+    /// iron pickaxe to 7.5s with bare hands). H-1 additionally moves the
+    /// main-inventory tool into the hotbar and switches to it, so the
+    /// mine-time model (iron pickaxe speed) matches what the bot actually
+    /// holds, and the elapsed wall time is ~0.375s + the swap overhead,
+    /// well under 7.5s.
     #[tokio::test]
     async fn test_mine_block_preserves_tool_type_when_hotbar_move_needed() {
         use std::time::Instant;
@@ -2071,15 +2154,13 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(result.is_ok(), "expected success, got: {:?}", result);
-        // The 11.25s Hand-on-stone-with-penalty number is the smoking gun
+        // The 7.5s Hand-on-stone non-harvest number is the smoking gun
         // for the old bug; with `tool_type = Pickaxe, material = Iron` the
         // actual mine time is 0.375s, so the executor's elapsed wall time
-        // must be well under 11.25s.
+        // must be well under 7.5s.
         assert!(
-            elapsed.as_secs_f64() < 11.25,
-            "execute_mine_block took {elapsed:?} — the 5× wrong-tool \
-             penalty was re-applied (tool_type was reset to Hand). \
-             Expected < 11.25s with iron pickaxe (~0.375s)."
+            elapsed.as_secs_f64() < 7.5,
+            "execute_mine_block took {elapsed:?} — the non-harvest mining              branch was used (tool_type was reset to Hand).              Expected < 7.5s with iron pickaxe (~0.375s)."
         );
     }
 

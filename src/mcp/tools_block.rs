@@ -175,18 +175,29 @@ pub async fn handle_place_block(
             // the snapshot inventory here (the MCP layer has snapshot access;
             // the executor does not) and rewrite the message to name it.
             if result.success {
+                // F-33: the executor's success is already backed by the
+                // server-confirmation poll, so the placement is authoritative
+                // even when the throttled snapshot has not caught up yet.
+                // Name the item when the snapshot inventory can resolve it;
+                // otherwise fall back to the slot — never the misleading
+                // "(empty slot)" label on a verified success.
                 let item_id = state
                     .read_snapshot()
                     .self_player
                     .inventory
                     .iter()
                     .find(|entry| entry.slot_index == input.item_slot)
-                    .map(|entry| entry.item_id.clone())
-                    .unwrap_or_else(|| "(empty slot)".to_string());
-                result.message = format!(
-                    "Placed {} at ({}, {}, {})",
-                    item_id, input.x, input.y, input.z
-                );
+                    .map(|entry| entry.item_id.clone());
+                result.message = match item_id {
+                    Some(item_id) => format!(
+                        "Placed {} at ({}, {}, {})",
+                        item_id, input.x, input.y, input.z
+                    ),
+                    None => format!(
+                        "Placed item from hotbar slot {} at ({}, {}, {}) (snapshot inventory not yet updated)",
+                        input.item_slot, input.x, input.y, input.z
+                    ),
+                };
             }
             serde_json::to_string(&result)
                 .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
@@ -601,10 +612,12 @@ mod tests {
         );
     }
 
-    /// An empty hotbar slot is reported honestly instead of pretending a
-    /// block was placed.
+    /// F-33: a verified-success result whose snapshot inventory has not yet
+    /// caught up must not be relabelled "(empty slot)" — the executor's
+    /// server-confirmation poll is the authority. It falls back to the slot
+    /// with an explicit "snapshot not yet updated" qualifier.
     #[tokio::test]
-    async fn test_place_block_message_empty_slot_is_honest() {
+    async fn test_place_block_message_missing_snapshot_inventory_keeps_slot() {
         let (state, sender) = make_echo_channel();
         make_online(&state);
         // Snapshot inventory does not contain slot 7.
@@ -616,12 +629,10 @@ mod tests {
         };
         let result = handle_place_block(&state, &sender, input).await.unwrap();
         let v: Value = serde_json::from_str(&result).expect("valid JSON");
+        let message = v["message"].as_str().expect("message present");
         assert!(
-            v["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("(empty slot)"),
-            "empty slot must be surfaced, got: {v}"
+            message.contains("hotbar slot 7") && !message.contains("(empty slot)"),
+            "a verified success must never be labelled empty slot: {message}"
         );
     }
 

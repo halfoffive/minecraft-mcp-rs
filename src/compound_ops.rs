@@ -232,6 +232,12 @@ impl MineBlockOperation {
     }
 
     /// Return the `BotCommand` that should be issued for the current state.
+    ///
+    /// F-21 contract: `MovingToTarget` returns the RAW mining target for
+    /// pure-state-machine callers and backward compatibility. Real executors
+    /// MUST override the emitted `MoveTo` with a standable neighbour
+    /// (`find_standable_neighbor`) — walking into the target itself is a
+    /// pathfinder collision. See `CompoundOpExecutor::execute_mine_block`.
     pub fn current_action(&self, state: &OperationState) -> Option<BotCommand> {
         match state {
             OperationState::MovingToTarget => Some(BotCommand::MoveTo(self.target)),
@@ -298,6 +304,13 @@ impl PlaceBlockOperation {
         }
     }
 
+    /// Return the `BotCommand` that should be issued for the current state.
+    ///
+    /// F-21 contract: `MovingToTarget` returns the RAW placement target for
+    /// pure-state-machine callers. Real executors MUST override it with a
+    /// standable neighbour (`find_standable_neighbor`) — the bot must not
+    /// path into the effect cell. See
+    /// `CompoundOpExecutor::execute_place_block`.
     pub fn current_action(&self, state: &OperationState) -> Option<BotCommand> {
         match state {
             OperationState::EquippingTool => Some(BotCommand::EquipTool(self.tool)),
@@ -443,6 +456,22 @@ mod tests {
 
     // ── OperationState variant tests ────────────────────────
 
+    /// Exhaustive compile-time guard: adding an [`OperationState`] variant
+    /// makes this match fail to compile, so the test below can never drift
+    /// silently like the previous hand-maintained array-length check (F-37).
+    #[allow(unreachable_code)]
+    fn require_all_operation_states(state: &OperationState) -> u32 {
+        match state {
+            OperationState::Idle => 1,
+            OperationState::MovingToTarget => 1,
+            OperationState::EquippingTool => 1,
+            OperationState::ExecutingAction => 1,
+            OperationState::WaitingForResult => 1,
+            OperationState::Completed => 1,
+            OperationState::Failed(_) => 1,
+        }
+    }
+
     #[test]
     fn test_operation_state_variants() {
         let states = [
@@ -454,6 +483,9 @@ mod tests {
             OperationState::Completed,
             OperationState::Failed(test_err()),
         ];
+        for state in &states {
+            assert_eq!(require_all_operation_states(state), 1);
+        }
         assert_eq!(states.len(), 7);
     }
 
@@ -474,6 +506,22 @@ mod tests {
 
     // ── OperationEvent variant tests ────────────────────────
 
+    /// Same exhaustive compile-time guard for [`OperationEvent`] (F-37).
+    #[allow(unreachable_code)]
+    fn require_all_operation_events(event: &OperationEvent) -> u32 {
+        match event {
+            OperationEvent::Start => 1,
+            OperationEvent::Arrived => 1,
+            OperationEvent::ToolEquipped => 1,
+            OperationEvent::ToolAlreadyInInventory => 1,
+            OperationEvent::ActionStarted => 1,
+            OperationEvent::BlockBroken => 1,
+            OperationEvent::BlockPlaced => 1,
+            OperationEvent::ContainerOpened => 1,
+            OperationEvent::Failed(_) => 1,
+        }
+    }
+
     #[test]
     fn test_operation_event_variants() {
         let events = [
@@ -487,6 +535,9 @@ mod tests {
             OperationEvent::ContainerOpened,
             OperationEvent::Failed(test_err()),
         ];
+        for event in &events {
+            assert_eq!(require_all_operation_events(event), 1);
+        }
         assert_eq!(events.len(), 9);
     }
 

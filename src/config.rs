@@ -237,8 +237,11 @@ impl AppConfig {
     /// Validate all config fields and return an error message for the first
     /// invalid value found.
     pub fn validate(&self) -> Result<(), String> {
-        if self.mc_address.is_empty() {
-            return Err("mc_address must not be empty".into());
+        if !valid_mc_address(&self.mc_address) {
+            return Err(
+                "mc_address must be a valid IP address or hostname (e.g. 127.0.0.1 or mc.example.com)"
+                    .into(),
+            );
         }
         if !valid_mc_username(&self.ai_username) {
             return Err(
@@ -255,6 +258,19 @@ impl AppConfig {
         if self.mcp_address != "localhost" && !valid_bind_address(&self.mcp_address) {
             return Err(
                 "mcp_address must be a valid IP address (e.g. 127.0.0.1 or 0.0.0.0) or \"localhost\""
+                    .into(),
+            );
+        }
+        // F-9: the MCP control surface can execute game commands and read the
+        // world state. Over plain HTTP on a non-loopback bind there is no
+        // TLS and (by default) no authentication, so reject the combination
+        // instead of letting `0.0.0.0` silently expose the control plane.
+        if self.mcp_transport == McpTransport::Http
+            && !is_loopback_bind_address(&self.mcp_address)
+            && !self.mcp_auth_enabled
+        {
+            return Err(
+                "mcp_auth_enabled must be true when the HTTP MCP server binds to a non-loopback address"
                     .into(),
             );
         }
@@ -330,10 +346,10 @@ impl AppConfig {
         let mut config = AppConfig::default();
         config.mc_address =
             env_parse_or_validated("MINECRAFT_MCP_MC_ADDRESS", config.mc_address, |s| {
-                if s.is_empty() {
-                    Err("must not be empty".into())
-                } else {
+                if valid_mc_address(s) {
                     Ok(())
+                } else {
+                    Err("must be a valid IP address or hostname".into())
                 }
             });
         config.mc_port = env_parse_or_validated("MINECRAFT_MCP_MC_PORT", config.mc_port, |v| {
@@ -477,6 +493,21 @@ impl AppConfig {
                 );
             }
         }
+
+        // F-8 cross-field reconciliation: each numeric variable is validated
+        // on its own, so `initial=120000` with `max` unset (default 60000)
+        // would fail the final validate() and make main.rs discard the ENTIRE
+        // env config — including unrelated overrides such as the bearer token.
+        // Raise max to initial (the permissive reading) instead of losing the
+        // configuration; validate() therefore cannot fail on this pair alone.
+        if config.reconnect_max_delay_ms < config.reconnect_initial_delay_ms {
+            tracing::warn!(
+                initial_ms = config.reconnect_initial_delay_ms,
+                max_ms = config.reconnect_max_delay_ms,
+                "reconnect initial delay exceeds max delay; raising max to initial"
+            );
+            config.reconnect_max_delay_ms = config.reconnect_initial_delay_ms;
+        }
         config
     }
 }
@@ -492,6 +523,38 @@ impl AppConfig {
 /// can never drift): `localhost` or a parseable [`std::net::IpAddr`].
 fn valid_bind_address(address: &str) -> bool {
     address == "localhost" || address.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// Is `address` a loopback-only bind address?
+fn is_loopback_bind_address(address: &str) -> bool {
+    address == "localhost"
+        || address
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+/// Is `address` acceptable as a Minecraft server address?
+///
+/// Accepts loopback / numeric IPs (with optional port handled by the caller's
+/// port field) and DNS hostnames. Rejects empty strings and anything
+/// containing characters that cannot appear in a hostname, which catches
+/// accidental `host:port` or `ws://...` entries at configuration time.
+fn valid_mc_address(address: &str) -> bool {
+    if address.is_empty() || address.len() > 253 {
+        return false;
+    }
+    if address.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let mut labels = address.split('.');
+    labels.all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
 }
 
 /// Is `username` acceptable as a Minecraft (offline-mode) player name?
@@ -895,11 +958,8 @@ mod tests {
             "invalid mcp_address should fail validation"
         );
 
-        config.mcp_address = "0.0.0.0".to_string();
-        assert!(config.validate().is_ok(), "valid IPv4 should pass");
-
         config.mcp_address = "::1".to_string();
-        assert!(config.validate().is_ok(), "valid IPv6 should pass");
+        assert!(config.validate().is_ok(), "loopback IPv6 should pass");
     }
 
     #[test]
@@ -912,10 +972,34 @@ mod tests {
         );
     }
 
+    /// F-9: plain HTTP on a non-loopback bind without auth is the one
+    /// combination that exposes the MCP control surface to the network.
+    #[test]
+    fn test_validate_rejects_non_loopback_http_without_auth() {
+        let mut config = AppConfig::default();
+        config.mcp_transport = McpTransport::Http;
+        config.mcp_auth_enabled = false;
+        config.mcp_address = "0.0.0.0".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("non-loopback") && err.contains("auth"),
+            "got: {err}"
+        );
+
+        // Enabling auth makes the same bind valid.
+        config.mcp_auth_enabled = true;
+        assert!(config.validate().is_ok());
+
+        // Stdio transport is not a network exposure risk.
+        config.mcp_transport = McpTransport::Stdio;
+        config.mcp_auth_enabled = false;
+        assert!(config.validate().is_ok());
+    }
+
     // -- Validation: ports -------------------------------------------------
 
     #[test]
-    fn test_validate_rejects_port_too_high() {
+    fn test_validate_accepts_port_65535() {
         let mut config = AppConfig::default();
         config.mcp_port = 65535;
         assert!(config.validate().is_ok(), "port 65535 should be valid");
@@ -1222,6 +1306,49 @@ mod tests {
         assert_eq!(config.fly_timeout_secs, defaults.fly_timeout_secs);
         // The resulting config must pass full validation too.
         assert!(config.validate().is_ok());
+    }
+
+    /// F-8: `reconnect_initial_delay_ms` above the default (or an explicitly
+    /// configured) `max` must reconcile in `from_env` instead of surviving
+    /// to main.rs's final validate() and discarding the whole env config.
+    #[test]
+    fn test_from_env_raises_reconnect_max_to_initial() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = [
+            EnvGuard::set("MINECRAFT_MCP_RECONNECT_INITIAL_DELAY_MS", "120000"),
+            EnvGuard::set("MINECRAFT_MCP_TOKEN", "survives"),
+        ];
+        let config = AppConfig::from_env();
+        assert_eq!(config.reconnect_initial_delay_ms, 120000);
+        assert_eq!(config.reconnect_max_delay_ms, 120000);
+        assert_eq!(config.mcp_token, "survives");
+        assert!(
+            config.validate().is_ok(),
+            "from_env must reconcile the cross-field pair: {}",
+            config.validate().unwrap_err()
+        );
+    }
+
+    /// F-23: a Minecraft server address may be a hostname or an IP, but an
+    /// accidental `host:port` / URL / whitespace entry must be rejected at
+    /// configuration time, like the MCP bind address is.
+    #[test]
+    fn test_validate_rejects_invalid_mc_address_format() {
+        let mut config = AppConfig::default();
+        for bad in [
+            "",
+            "host:25565",
+            "ws://example.com",
+            "bad host",
+            "-bad.example.com",
+        ] {
+            config.mc_address = bad.to_string();
+            assert!(config.validate().is_err(), "{bad:?} should fail");
+        }
+        for good in ["127.0.0.1", "::1", "localhost", "mc.example.com"] {
+            config.mc_address = good.to_string();
+            assert!(config.validate().is_ok(), "{good:?} should pass");
+        }
     }
 
     #[test]
