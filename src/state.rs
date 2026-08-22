@@ -102,7 +102,7 @@ pub enum McpServerStatus {
 /// `get_world_view` tool checks this before re-rendering: if
 /// `snapshot_seq`, `radius`, and `scale` all match the current
 /// request, the cached PNG bytes are returned without invoking
-/// [render_topdown_enhanced](crate::mcp::render::render_topdown_enhanced) again using the same snapshot_seq/radius/scale cache key. 
+/// [render_topdown_enhanced](crate::mcp::render::render_topdown_enhanced) again using the same snapshot_seq/radius/scale cache key.
 ///
 /// Only one entry is cached (overwritten on each fresh render), keeping
 /// memory bounded — the typical 65×65 PNG is ~3 KB so even at `scale=8`

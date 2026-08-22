@@ -299,7 +299,7 @@ pub fn render_topdown_enhanced(
     let cy = r as u32 * scale as u32;
     paint_square(&mut img, cx, cy, scale.max(2) as u32, player_colour);
 
-// Draw a heading arrow if yaw is available. The arrow is painted as a
+    // Draw a heading arrow if yaw is available. The arrow is painted as a
     // line extending `scale * 3` pixels from the centre in the direction
     // the bot is facing.
     if let Some(yaw) = snapshot.self_player.yaw {

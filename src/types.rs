@@ -463,21 +463,16 @@ mod tests {
             ..Default::default()
         };
         let json = serde_json::to_string(&snapshot).expect("snapshot must serialize");
-        let mut back: WorldSnapshot = serde_json::from_str(&json).expect("snapshot must round-trip");
+        let mut back: WorldSnapshot =
+            serde_json::from_str(&json).expect("snapshot must round-trip");
         // What the report's deserialisation trap looks like: empty index.
         assert!(back.block_index.is_empty());
         assert!(back.snapshot_seq == 0);
 
         back.rebuild_block_index();
 
-        assert_eq!(
-            back.block_index.get(&BlockPos::new(1, 64, 2)),
-            Some(&0)
-        );
-        assert_eq!(
-            back.block_index.get(&BlockPos::new(3, 64, 4)),
-            Some(&1)
-        );
+        assert_eq!(back.block_index.get(&BlockPos::new(1, 64, 2)), Some(&0));
+        assert_eq!(back.block_index.get(&BlockPos::new(3, 64, 4)), Some(&1));
         assert_eq!(back.block_index.len(), 2);
     }
 

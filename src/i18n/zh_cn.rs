@@ -221,7 +221,7 @@ mod tests {
             TextKey::Copy,
             TextKey::CopyHint,
             TextKey::NpxConfig,
-TextKey::BunxConfig,
+            TextKey::BunxConfig,
             TextKey::Language,
             TextKey::LangEn,
             TextKey::LangZhCn,
