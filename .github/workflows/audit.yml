@@ -1,0 +1,47 @@
+# Supply-chain audit: runs `cargo audit` (RustSec advisory database) over
+# every committed lockfile - the root one plus the vendored patches
+# (patches/rmcp, patches/rsa), which carry their own Cargo.lock files.
+#
+# Advisory-only for now: the job is marked continue-on-error so new
+# advisories surface as failed-job annotations without blocking merges.
+# Once the current findings are triaged, remove continue-on-error to make
+# this a blocking gate.
+name: Security audit
+
+on:
+  push:
+    paths:
+      - 'Cargo.lock'
+      - 'patches/*/Cargo.lock'
+      - '.github/workflows/audit.yml'
+  schedule:
+    # Weekly, Mondays 04:23 UTC (off the top of the hour to reduce load).
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    name: cargo audit (${{ matrix.lockfile }})
+    runs-on: ubuntu-latest
+    continue-on-error: true # advisory-only for now; see header comment
+    strategy:
+      fail-fast: false
+      matrix:
+        lockfile:
+          - Cargo.lock
+          - patches/rmcp/Cargo.lock
+          - patches/rsa/Cargo.lock
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Audit ${{ matrix.lockfile }}
+        run: cargo audit --file '${{ matrix.lockfile }}'
