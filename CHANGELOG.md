@@ -62,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`get_nearby_entities` returns an object** (breaking wire change, audit
   L-13): `{"entities": [...], "count": N, "truncated": bool}` instead of a
   bare JSON array, matching `get_nearby_blocks`' object shape.
+- **Rustdoc link hygiene:** all 27 `cargo doc` warnings fixed — unresolved
+  intra-doc links resolved or demoted to plain code spans, public docs no
+  longer link private items, one redundant explicit link target removed;
+  a new `[lints.rustdoc]` baseline denies `broken_intra_doc_links`,
+  `private_intra_doc_links` and `redundant_explicit_links` so
+  `cargo doc --no-deps` stays warning-free.
 
 ### Fixed
 
@@ -199,6 +205,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bun install` (which ignores `package-lock.json`) is replaced by
   `npm ci`; `actions/configure-pages` bumped to v5; leftover VitePress
   template comments removed.
+- **Lint gate covers rustdoc + doctests and stops hiding failures:** the
+  develop lint job now runs `cargo doc --locked --no-deps` (kept at zero
+  warnings by the `[lints.rustdoc]` deny baseline), runs tests with
+  `--no-fail-fast` so one broken target no longer masks the results of the
+  remaining ones, and covers doctests explicitly via `cargo test --doc`
+  (they are not part of `--all-targets`).
+- **Weekly supply-chain audit (`audit.yml`):** new workflow runs
+  `cargo audit` over every committed lockfile (root plus vendored
+  `patches/rmcp` / `patches/rsa`) on Cargo.lock changes, a weekly schedule,
+  or manual dispatch; advisory-only (`continue-on-error`) until the current
+  findings are triaged, then tighten to a blocking gate.
 
 ## [1.3.1] - 2026-08-16
 
