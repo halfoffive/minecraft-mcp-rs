@@ -1,2 +1,7 @@
+# Pinned nightly DATE (not bare "nightly"): a newer upstream nightly broke
+# azalea-core 0.15.1 compilation (const-generic inference, E0284) in CI on
+# 2026-08-22. Bumping this pin is part of dependency-upgrade work: change the
+# date, then verify azalea builds and the full gate suite passes.
+# Known-good: 1.98.0-nightly (cced03bfd 2026-05-28).
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-05-28"

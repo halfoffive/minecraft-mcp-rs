@@ -109,7 +109,7 @@ impl SnapshotUpdater {
     /// this to trigger a UI repaint).
     ///
     /// The caller is expected to have passed the
-    /// [`check_and_update_timer`](Self::check_and_update_timer) gate first
+    /// `check_and_update_timer` gate first
     /// — this method does not throttle.
     pub async fn build_and_store(&self, bot: &Client) -> bool {
         match build_snapshot_inner(bot, &self.shared_state, &self.dirty_tracker).await {

@@ -87,7 +87,7 @@ impl ConnectionManager {
     /// - **User-initiated disconnect** (`is_disconnect_requested()`): stop
     ///   immediately without writing an error — unless a config restart was
     ///   requested (see below).
-    /// - **Config restart** ([`should_restart_after_disconnect`]): an agent
+    /// - **Config restart** (`should_restart_after_disconnect`): an agent
     ///   changed connection settings via `update_settings` while online;
     ///   consume the restart flag, clear the disconnect request, reset the
     ///   cancel token and stale error, reset attempt counters, and reconnect

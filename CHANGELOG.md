@@ -62,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`get_nearby_entities` returns an object** (breaking wire change, audit
   L-13): `{"entities": [...], "count": N, "truncated": bool}` instead of a
   bare JSON array, matching `get_nearby_blocks`' object shape.
+- **Rustdoc link hygiene:** all 27 `cargo doc` warnings fixed — unresolved
+  intra-doc links resolved or demoted to plain code spans, public docs no
+  longer link private items, one redundant explicit link target removed;
+  a new `[lints.rustdoc]` baseline denies `broken_intra_doc_links`,
+  `private_intra_doc_links` and `redundant_explicit_links` so
+  `cargo doc --no-deps` stays warning-free.
 
 ### Fixed
 
@@ -199,6 +205,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bun install` (which ignores `package-lock.json`) is replaced by
   `npm ci`; `actions/configure-pages` bumped to v5; leftover VitePress
   template comments removed.
+- **Lint gate covers rustdoc + doctests and stops hiding failures:** the
+  develop lint job now runs `cargo doc --locked --no-deps` (kept at zero
+  warnings by the `[lints.rustdoc]` deny baseline), runs tests with
+  `--no-fail-fast` so one broken target no longer masks the results of the
+  remaining ones, and covers doctests explicitly via `cargo test --doc`
+  (they are not part of `--all-targets`).
+- **Weekly supply-chain audit (`audit.yml`):** new workflow runs
+  `cargo audit` over every committed lockfile (root plus vendored
+  `patches/rmcp` / `patches/rsa`) on Cargo.lock changes, a weekly schedule,
+  or manual dispatch. Blocking gate: the first run's findings were triaged —
+  `webbrowser` bumped to 1.2.4 (RUSTSEC-2026-0257) and `event-listener` to
+  5.4.2 (RUSTSEC-2026-0221); the unfixable remainder (hickory-proto pinned
+  by azalea, quick-xml pinned by wayland-scanner, unmaintained paste /
+  ttf-parser) is documented per-entry in the new `.cargo/audit.toml` (the
+  only location cargo-audit 0.22 discovers). Each
+  audit leg runs in its lockfile's directory so per-directory triage
+  configs stay isolated.
+- **Nightly toolchain pinned to a DATE (`nightly-2026-05-28`):** a bare
+  `nightly` let CI pick up the 2026-08-21 upstream compiler, which breaks
+  `azalea-core` 0.15.1 compilation (E0284, const-generic inference in
+  `FixedBitSet`) — nothing this repo can patch. The pin makes CI builds
+  reproducible; both workflows now install via
+  `actions-rust-lang/setup-rust-toolchain@v1`, which honors
+  `rust-toolchain.toml` (the previous `dtolnay/rust-toolchain@nightly`
+  always forced the latest nightly via `RUSTUP_TOOLCHAIN`, ignoring the
+  pin). Bumping the date is part of dependency-upgrade work.
 
 ## [1.3.1] - 2026-08-16
 

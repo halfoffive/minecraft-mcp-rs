@@ -19,14 +19,14 @@ An MCP (Model Context Protocol) server backed by an actual Minecraft bot via the
 | Lint | `cargo clippy --all-targets` |
 | Doc | `cargo doc --no-deps` |
 
-Requires Rust nightly (edition 2024; `rust-toolchain.toml` pins nightly — azalea 0.15.1's build script enforces this). Dev profile uses `opt-level = 1` (with `opt-level = 3` for dependencies) for faster iteration.
+Requires Rust nightly (edition 2024; `rust-toolchain.toml` pins a nightly **date** — azalea 0.15.1's build script enforces nightly, and a bare `nightly` let a fresh upstream compiler break azalea-core in CI on 2026-08-22, E0284 in `FixedBitSet`). Bumping the pinned date is part of dependency-upgrade work: change `channel`, then verify azalea builds and the gate suite passes. Dev profile uses `opt-level = 1` (with `opt-level = 3` for dependencies) for faster iteration.
 
 ## Development workflow
 
 **默认流程：任何修改都在新分支上进行，提交 Pull Request，经用户审阅通过后合并。分支模型（详见 `CONTRIBUTING.md`）：`develop`（集成）→ `release`（预发布通道，push 即自动预发布）→ `master`（稳定版，tag 即稳定发布）。**
 
 1. **建分支** — 功能/修复/文档分支从 `develop`（或已同步的 `master`）创建，命名建议：`feat/<slug>`、`fix/<slug>`、`docs/<slug>`。禁止直接向 `master` / `release` 提交；**禁止使用 `release/<X.Y.Z>` 分支名**（git refs 命名空间与 `release` 分支冲突，按版本准备分支改用 `hotfix/<X.Y.Z>` 等前缀）。
-2. **开发** — 遵循下方「Conventions」与「规范」：`cargo fmt` → `cargo test`（全过）→ `cargo clippy --all-targets`（零警告）→ 更新 `README.md` / `CHANGELOG.md` / `AGENTS.md`。
+2. **开发** — 遵循下方「Conventions」与「规范」：`cargo fmt` → `cargo test`（全过）→ `cargo clippy --all-targets`（零警告）→ `cargo doc --no-deps`（零警告，`[lints.rustdoc]` deny 基线）→ 更新 `README.md` / `CHANGELOG.md` / `AGENTS.md`。
 3. **提交** — 按 S-16 的原子提交拆分（CI → AGENTS.md → Cargo+npm → markdown 引脚/表 → CHANGELOG），每条提交只做一件事。
 4. **PR** — `git push -u origin <branch>` 后用 `gh pr create` 提交 PR（默认目标 `develop`），PR 描述写明改动内容、验证结果（`cargo test` / `clippy` 输出）、影响面（含 wire 破坏性变更）。**必须等待用户审阅。**
 5. **合并** — 用户审阅（可能要求修改）通过后合入 `develop`。
@@ -98,6 +98,7 @@ tests/
 - **Naming:** Types PascalCase, enums PascalCase, functions/methods snake_case, module file names snake_case.
 - **MCP tools:** Each tool module (tools_*.rs) exposes a builder function; tool parameters annotated with `#[derive(schemars::JsonSchema)]`.
 - **Formatting:** No `.rustfmt.toml` — uses default `rustfmt`.
+- **Rustdoc links:** `cargo doc --no-deps` must stay warning-free — `[lints.rustdoc]` denies broken/private intra-doc links and redundant explicit targets. Link private items as plain code spans (`` `item` ``), not `[]` links. The build.yml lint job enforces this plus `--no-fail-fast` tests and doctests; `audit.yml` runs `cargo audit` weekly over every committed lockfile (advisory-only for now).
 
 ## Notes
 

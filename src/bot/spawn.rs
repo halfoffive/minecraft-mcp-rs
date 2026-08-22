@@ -12,7 +12,7 @@
 //! # Responsibilities
 //!
 //! [`spawn_bot_connection`] owns the thread body (runtime creation,
-//! [`ConnectionManager`](crate::bot::connection::ConnectionManager) setup,
+//! [`ConnectionManager`] setup,
 //! error logging) and stores the resulting [`JoinHandle`] in
 //! [`SharedState`] via
 //! [`store_bot_thread_handle`](crate::state::SharedState::store_bot_thread_handle).
@@ -25,7 +25,7 @@
 //!   [`clear_connecting`](crate::state::SharedState::clear_connecting) if
 //!   the spawn itself fails (the helper returns the `io::Error` without
 //!   touching the flag on that path). On a successful spawn the thread
-//!   clears the flag itself via [`ClearGuard`] when it exits.
+//!   clears the flag itself via `ClearGuard` when it exits.
 
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -101,7 +101,7 @@ impl Drop for ClearGuard<'_> {
 /// The thread body (preserved verbatim from the original
 /// `MinecraftApp::connect_bot` implementation):
 ///
-/// 1. Installs a [`ClearGuard`] so the connecting flag is cleared even on
+/// 1. Installs a `ClearGuard` so the connecting flag is cleared even on
 ///    panic.
 /// 2. Creates a tokio [`Runtime`](tokio::runtime::Runtime); on failure
 ///    logs the error and returns (the guard clears the flag).
