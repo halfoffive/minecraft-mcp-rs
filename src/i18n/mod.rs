@@ -6,8 +6,9 @@
 //! `gettext`-style runtime string parsing, and no trait-based message bundle.
 //! Instead each language lives in its own `.rs` file (`en.rs`, `zh_cn.rs`)
 //! that exposes a single `lookup(key: TextKey) -> &'static str` function.
-//! The lookup is a plain `match`, exhaustive per language with a catch-all
-//! fallback to [`key_name`] so `tr` can **never panic**.
+//! Each lookup is a plain `match` that is **exhaustive with no catch-all
+//! arm**: adding a [`TextKey`] variant fails to COMPILE until it is
+//! translated in both language files — the compile-time completeness guard.
 //!
 //! The currently-active language is stored in a process-wide [`RwLock`]
 //! (`static CURRENT`).  Reads are cheap (a short-lived read lock); writes
@@ -19,8 +20,8 @@
 //! - [`TextKey`] — the set of translatable UI strings.
 //! - [`current`] / [`set`] — read or change the active language at runtime.
 //! - [`tr`] — translate a [`TextKey`] using the active language.
-//! - [`key_name`] — the variant name of a [`TextKey`] (used as the fallback
-//!   for unknown keys inside each language's `lookup`).
+//! - [`key_name`] — the variant name of a [`TextKey`] (kept for debugging /
+//!   tests; the language lookups no longer fall back to it).
 //!
 //! Adding a new language is a four-step process:
 //! 1. Add a variant to [`Language`] (and update [`Language::default`] if you
@@ -93,6 +94,8 @@ pub enum TextKey {
     McpConfig,
     /// Label above the npm / npx (no Rust toolchain) MCP config snippet.
     NpxConfig,
+    /// Label above the bunx (Bun runtime) MCP config snippet.
+    BunxConfig,
 
     // ── Minecraft server section ───────────────────────────────────
     /// "Minecraft Server" section header.
@@ -307,10 +310,10 @@ pub fn set(lang: Language) {
 
 /// Translate `key` using the currently-active language.
 ///
-/// Dispatches to `en::lookup` or `zh_cn::lookup`.  Each language's
-/// `lookup` is total (uses a catch-all `_ =>` arm that calls [`key_name`]),
-/// so this function can **never panic** — even if a new [`TextKey`] variant
-/// is added before every language file is updated.
+/// Dispatches to `en::lookup` or `zh_cn::lookup`.  Each language's `lookup`
+/// is an exhaustive match with no catch-all arm, so a new [`TextKey`]
+/// variant is a **compile error** in both language files until translated —
+/// `tr` can never be asked for an untranslated key.
 pub fn tr(key: TextKey) -> &'static str {
     match current() {
         Language::En => en::lookup(key),
@@ -320,9 +323,8 @@ pub fn tr(key: TextKey) -> &'static str {
 
 /// Return the [`TextKey`] variant name as a static string.
 ///
-/// Used as the fallback inside each language's `lookup` (so a missing
-/// translation surfaces the key name rather than panicking) and useful for
-/// debugging which key failed to translate.
+/// Retained for debugging and the unit test below (the language `lookup`s no
+/// longer fall back to it — they are exhaustive matches).
 pub fn key_name(key: TextKey) -> &'static str {
     match key {
         TextKey::AppTitle => "AppTitle",
@@ -330,6 +332,7 @@ pub fn key_name(key: TextKey) -> &'static str {
         TextKey::Status => "Status",
         TextKey::McpConfig => "McpConfig",
         TextKey::NpxConfig => "NpxConfig",
+        TextKey::BunxConfig => "BunxConfig",
         TextKey::MinecraftServer => "MinecraftServer",
         TextKey::Address => "Address",
         TextKey::Port => "Port",
@@ -407,6 +410,12 @@ pub fn key_name(key: TextKey) -> &'static str {
 // Tests
 // ════════════════════════════════════════════════════════════════════
 
+/// Serialises every unit test that mutates the process-wide `CURRENT`
+/// language (F-18). Same pattern as `config::tests::ENV_LOCK` and
+/// `tools_query::tests::CACHE_TEST_LOCK`.
+#[cfg(test)]
+pub(crate) static I18N_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +424,7 @@ mod tests {
     /// value), and `current()` reflects that initial state.
     #[test]
     fn test_tr_returns_english_by_default() {
+        let _lock = I18N_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Force a known starting state in case another test mutated CURRENT.
         set(Language::En);
         assert_eq!(current(), Language::En);
@@ -427,6 +437,7 @@ mod tests {
     /// `current()` reflects the change.
     #[test]
     fn test_set_zh_cn_changes_tr_output() {
+        let _lock = I18N_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set(Language::ZhCn);
         assert_eq!(current(), Language::ZhCn);
         assert_eq!(tr(TextKey::AppTitle), "Minecraft MCP 服务器");
@@ -437,6 +448,7 @@ mod tests {
     /// Switching back to `En` restores the English strings.
     #[test]
     fn test_set_en_reverts_to_english() {
+        let _lock = I18N_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set(Language::ZhCn);
         assert_eq!(tr(TextKey::AppTitle), "Minecraft MCP 服务器");
         set(Language::En);
@@ -447,6 +459,7 @@ mod tests {
     /// `current()` reflects whatever was last passed to `set()`.
     #[test]
     fn test_current_reflects_set() {
+        let _lock = I18N_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set(Language::ZhCn);
         assert_eq!(current(), Language::ZhCn);
         set(Language::En);

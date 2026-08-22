@@ -14,7 +14,8 @@ use azalea::container::ContainerHandle;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::sync::{Arc, LazyLock, Mutex, RwLock, RwLockReadGuard};
+use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -97,11 +98,11 @@ pub enum McpServerStatus {
 
 /// Cached `get_world_view` response so identical re-renders return instantly.
 ///
-/// Stored in [`SharedState::last_world_view`] behind a `Mutex`. The MCP
+/// Stored in `SharedState::last_world_view` behind a `Mutex`. The MCP
 /// `get_world_view` tool checks this before re-rendering: if
 /// `snapshot_seq`, `radius`, and `scale` all match the current
 /// request, the cached PNG bytes are returned without invoking
-/// [`render_topdown`](crate::mcp::render::render_topdown) again.
+/// [render_topdown_enhanced](crate::mcp::render::render_topdown_enhanced) again using the same snapshot_seq/radius/scale cache key.
 ///
 /// Only one entry is cached (overwritten on each fresh render), keeping
 /// memory bounded — the typical 65×65 PNG is ~3 KB so even at `scale=8`
@@ -130,6 +131,26 @@ pub struct WorldViewCache {
     /// multi-content response (centre coords, radius, scale, yaw,
     /// timestamp). Stored so a cache hit can return both image + text
     /// without re-running the renderer.
+    pub annotation_json: String,
+}
+
+/// Cheap view of [`WorldViewCache`] WITHOUT the (potentially ~700 KB at
+/// `scale=8`) base64 PNG payload (M-11).
+///
+/// The UI preview panel reads this every frame to decide whether the
+/// texture must be rebuilt; cloning the whole [`WorldViewCache`] — including
+/// `png_base64` — every frame was the M-11 hotspot. The full cache is
+/// fetched (via [`SharedState::get_world_view_cache`]) only when a rebuild
+/// is actually needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldViewCacheMeta {
+    /// `WorldSnapshot::snapshot_seq` of the snapshot the render came from.
+    pub snapshot_seq: u64,
+    /// Half-extent of the cached render.
+    pub radius: u8,
+    /// Pixel-per-block scale of the cached render.
+    pub scale: u8,
+    /// The annotation JSON (centre coords, radius, scale, yaw, timestamp).
     pub annotation_json: String,
 }
 
@@ -277,12 +298,14 @@ pub struct SharedState {
     /// by `get_server_info` (and other query tools) so clients can tell that
     /// a `force` snapshot refresh may return pre-command state.
     executor_busy: AtomicBool,
-    /// Epoch-millis timestamp of the last dispatched bot command
-    /// (0 = never). The snapshot updater reads this to relax its rebuild
-    /// interval while the bot is idle.
+    /// Monotonic stamp of the last dispatched bot command: nanoseconds
+    /// elapsed since the process-start [`ACTIVITY_ANCHOR`] (0 = never).
+    /// The snapshot updater reads this to relax its rebuild interval while
+    /// the bot is idle.
     last_command_at: AtomicU64,
-    /// Epoch-millis timestamp of the last MCP *request* (initialize /
-    /// ping / list_tools / call_tool). Semantically independent of
+    /// Monotonic stamp of the last MCP *request* (initialize / ping /
+    /// list_tools / call_tool): nanoseconds elapsed since the process-start
+    /// [`ACTIVITY_ANCHOR`] (0 = never). Semantically independent of
     /// `last_command_at`: the headless idle watchdog keys on MCP activity,
     /// because a client host may hold a connection open and send requests
     /// while never dispatching a bot command (e.g. ZCode's per-session
@@ -297,32 +320,38 @@ pub struct SharedState {
     next_snapshot_seq: AtomicU64,
 }
 
+// ---------------------------------------------------------------------------
+// Monotonic activity probes (L-23)
+// ---------------------------------------------------------------------------
+
+/// Process-start anchor for the monotonic activity stamps.
+///
+/// Every activity stamp stores nanoseconds elapsed since this anchor
+/// (via [`activity_elapsed_nanos`]) instead of wall-clock epoch millis.
+/// Monotonic time is immune to NTP jumps: a backward jump can no longer
+/// make `now - last` saturate to 0 (which kept the fast snapshot interval
+/// forever — "perpetually active"), and a forward jump cannot fire the
+/// headless idle watchdog early.
+static ACTIVITY_ANCHOR: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// Nanoseconds elapsed since the process-start [`ACTIVITY_ANCHOR`].
+///
+/// Fits comfortably in a [`u64`] (wraps only after ~584 years of uptime).
+fn activity_elapsed_nanos() -> u64 {
+    ACTIVITY_ANCHOR.elapsed().as_nanos() as u64
+}
+
 impl SharedState {
     /// Create a new [`SharedState`] with the given config.
     ///
     /// The world snapshot starts empty, the bot is offline, and no container
     /// is open.
     pub fn new(config: AppConfig) -> Self {
-        let empty_snapshot = WorldSnapshot {
-            blocks: vec![],
-            entities: vec![],
-            self_player: crate::types::SelfPlayer {
-                uuid: String::new(),
-                username: String::new(),
-                position: crate::types::BlockPos::new(0, 0, 0),
-                health: 0.0,
-                hunger: 0,
-                gamemode: crate::types::GameMode::Survival,
-                held_item_slot: 0,
-                inventory: Vec::new(),
-                position_precise: None,
-                yaw: None,
-            },
-            timestamp: 0,
-            chunk_summary: vec![],
-            commands_enabled: None,
-            ..Default::default()
-        };
+        // WorldSnapshot::default() — the previous handwritten empty literal
+        // duplicated the same defaults and could drift (it did not even
+        // reset snapshot_seq / block_index explicitly; the ..Default
+        // fallback covered them by luck).
+        let empty_snapshot = WorldSnapshot::default();
 
         Self {
             world_snapshot: ArcSwap::from_pointee(empty_snapshot),
@@ -391,6 +420,12 @@ impl SharedState {
         self.world_snapshot.rcu(|curr| {
             let mut snap = (**curr).clone();
             f(&mut snap);
+            // F-6: the closure may have mutated any field, including `blocks`.
+            // Rebuild the derived index unconditionally so a mutation that
+            // adds/removes/reorders blocks never leaves `block_index` pointing
+            // at stale positions (which could return the wrong entry or make
+            // indexed callers observe an out-of-bounds index).
+            snap.rebuild_block_index();
             // The snapshot content changed, so bump the revision even though
             // the mutation may only touch a field that is not rendered. The
             // extra render-invalidation is negligible (modify_snapshot is
@@ -659,7 +694,7 @@ impl SharedState {
     /// queue cannot evict a just-arrived rejection reply.
     const MAX_CHAT_MESSAGES: usize = 50;
 
-    /// Store a chat message, keeping only the last [`MAX_CHAT_MESSAGES`].
+    /// Store a chat message, keeping only the last `MAX_CHAT_MESSAGES`.
     ///
     /// Each message is assigned a monotonic sequence number (allocated under
     /// the same lock as the push) so callers can diff new arrivals by cursor
@@ -674,7 +709,7 @@ impl SharedState {
         }
     }
 
-    /// Return a copy of the last [`MAX_CHAT_MESSAGES`] chat messages.
+    /// Return a copy of the last `MAX_CHAT_MESSAGES` chat messages.
     ///
     /// The `(sender, message)` pair is the public contract consumed by
     /// `get_chat_history` and the UI; the internal sequence number is
@@ -786,41 +821,47 @@ impl SharedState {
         self.executor_busy.load(Ordering::Relaxed)
     }
 
-    /// Record that a bot command was dispatched right now (epoch millis).
+    /// Record that a bot command was dispatched right now (monotonic).
     ///
     /// Called by the command executor on every dispatch; the snapshot
     /// updater keeps the fast rebuild interval only while commands keep
-    /// arriving.
+    /// arriving. The stamp is elapsed monotonic time since the process
+    /// start anchor (L-23), so wall-clock NTP jumps cannot affect the
+    /// activity decision.
     pub fn mark_command_activity(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        self.last_command_at.store(now, Ordering::Relaxed);
+        self.last_command_at
+            .store(activity_elapsed_nanos(), Ordering::Relaxed);
     }
 
-    /// Epoch-millis timestamp of the last dispatched command (0 = never).
-    pub fn last_command_at_ms(&self) -> u64 {
-        self.last_command_at.load(Ordering::Relaxed)
+    /// Monotonic [`Instant`] of the last dispatched command, or `None` if
+    /// no command has ever been dispatched.
+    ///
+    /// Age is measured with [`Instant::elapsed`] — never by comparing
+    /// wall-clock epoch values.
+    pub fn last_command_at(&self) -> Option<Instant> {
+        let nanos = self.last_command_at.load(Ordering::Relaxed);
+        (nanos != 0).then(|| *ACTIVITY_ANCHOR + Duration::from_nanos(nanos))
     }
 
-    /// Record that an MCP request was received right now (epoch millis).
+    /// Record that an MCP request was received right now (monotonic).
     ///
     /// Called at the entry of every `ServerHandler` request method
     /// (initialize / ping / list_tools / call_tool). The headless idle
     /// watchdog uses this instead of [`mark_command_activity`](Self::mark_command_activity)
     /// so a connected-but-commandless client session is never judged idle.
     pub fn mark_mcp_activity(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        self.mcp_activity_at.store(now, Ordering::Relaxed);
+        self.mcp_activity_at
+            .store(activity_elapsed_nanos(), Ordering::Relaxed);
     }
 
-    /// Epoch-millis timestamp of the last MCP request (0 = never).
-    pub fn mcp_activity_at_ms(&self) -> u64 {
-        self.mcp_activity_at.load(Ordering::Relaxed)
+    /// Monotonic [`Instant`] of the last MCP request, or `None` if no
+    /// request has ever been received.
+    ///
+    /// Age is measured with [`Instant::elapsed`] — never by comparing
+    /// wall-clock epoch values.
+    pub fn mcp_activity_at(&self) -> Option<Instant> {
+        let nanos = self.mcp_activity_at.load(Ordering::Relaxed);
+        (nanos != 0).then(|| *ACTIVITY_ANCHOR + Duration::from_nanos(nanos))
     }
 
     /// Store the last error message reported by the bot/MCP layer.
@@ -893,6 +934,31 @@ impl SharedState {
         *guard = None;
     }
 
+    /// Idempotent SharedState-level session teardown (report M-7).
+    ///
+    /// Clears every flag/handle/cache that belongs to the session that just
+    /// ended. Called from BOTH disconnect paths:
+    ///
+    /// - events::handle_disconnect (the normal azalea Event::Disconnect),
+    ///   before its executor/tick-task/injection cleanup;
+    /// - the connection loop's select! cancel branch (a Disconnect click
+    ///   while start() is still running — the azalea future is dropped and
+    ///   Event::Disconnect never fires, so without this call the ECS World
+    ///   handle leaked, executor_busy stayed phantom-true, and
+    ///   connected_since / the world-view cache / the commands probe kept
+    ///   stale values from the aborted session).
+    ///
+    /// Every operation here is a plain reset, so calling it twice (or on a
+    /// session that never spawned) is harmless.
+    pub fn clear_session_state(&self) {
+        self.set_online(false);
+        self.set_connected_since(None);
+        self.clear_world_view_cache();
+        self.clear_bot_ecs();
+        self.set_executor_busy(false);
+        self.set_commands_probe(None);
+    }
+
     /// Return a clone of the bot's ECS handle, if any.
     ///
     /// Returns `None` if no handle is stored (e.g. before `Event::Spawn` or
@@ -929,14 +995,35 @@ impl SharedState {
     /// request to decide whether the cache is still valid.
     ///
     /// Returns `None` when no render has been cached yet (e.g. before the
-    /// first `get_world_view` call, or after [`clear_world_view_cache`]
-    /// was invoked).
+    /// first `get_world_view` call, or after
+    /// [`Self::clear_world_view_cache`](Self::clear_world_view_cache) was
+    /// invoked).
     pub fn get_world_view_cache(&self) -> Option<WorldViewCache> {
         let guard = self
             .last_world_view
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         guard.clone()
+    }
+
+    /// Read the cached `get_world_view` entry's cheap metadata WITHOUT
+    /// cloning the (potentially ~700 KB) `png_base64` payload (M-11).
+    ///
+    /// Returns the snapshot sequence, radius, scale and annotation JSON —
+    /// everything the UI preview panel needs to decide whether to rebuild
+    /// its texture — without paying for a full [`WorldViewCache`] clone on
+    /// every frame. Returns `None` when no render has been cached.
+    pub fn world_view_cache_meta(&self) -> Option<WorldViewCacheMeta> {
+        let guard = self
+            .last_world_view
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(|c| WorldViewCacheMeta {
+            snapshot_seq: c.snapshot_seq,
+            radius: c.radius,
+            scale: c.scale,
+            annotation_json: c.annotation_json.clone(),
+        })
     }
 
     /// Store a freshly-rendered `get_world_view` response, overwriting any
@@ -1187,6 +1274,46 @@ mod tests {
         assert_eq!(snap.timestamp, 1);
     }
 
+    /// F-6: `modify_snapshot` documents that the closure may mutate any
+    /// field, so a mutation of `blocks` must leave `block_index` consistent
+    /// instead of pointing at the pre-mutation positions.
+    #[test]
+    fn test_modify_snapshot_rebuilds_block_index_after_block_mutation() {
+        let state = SharedState::new(AppConfig::default());
+        let first = crate::types::BlockEntry {
+            position: crate::types::BlockPos::new(1, 64, 1),
+            block_type: "stone".into(),
+            block_state: None,
+        };
+        let second = crate::types::BlockEntry {
+            position: crate::types::BlockPos::new(2, 64, 2),
+            block_type: "dirt".into(),
+            block_state: None,
+        };
+        state.update_snapshot(crate::types::WorldSnapshot {
+            blocks: vec![first.clone(), second.clone()],
+            ..Default::default()
+        });
+
+        state.modify_snapshot(|snap| {
+            snap.blocks.swap(0, 1);
+        });
+
+        let snap = state.read_snapshot();
+        let idx = snap
+            .block_index
+            .get(&second.position)
+            .copied()
+            .expect("indexed");
+        assert_eq!(snap.blocks[idx].block_type, "dirt");
+        let idx = snap
+            .block_index
+            .get(&first.position)
+            .copied()
+            .expect("indexed");
+        assert_eq!(snap.blocks[idx].block_type, "stone");
+    }
+
     #[test]
     fn test_modify_snapshot_concurrent_no_loss() {
         // Two threads mutate different fields concurrently; both updates
@@ -1292,9 +1419,12 @@ mod tests {
             h.join().unwrap();
         }
 
-        // After all toggles, the value is deterministic because SeqCst
-        // ordering makes the last store visible.  We just verify no panic.
-        let _ = state.is_online();
+        // Every thread's final operation is `set_online(false)` and all
+        // handles are joined before this read, so the last store in the
+        // global order is guaranteed to be `false`; SeqCst makes that store
+        // visible here. The assertion pins the actual contract instead of
+        // merely checking "no panic" (F-37).
+        assert!(!state.is_online());
     }
 
     // -- Config RwLock -------------------------------------------------------
@@ -1449,20 +1579,33 @@ mod tests {
     }
 
     #[test]
-    fn test_mark_mcp_activity_stamps_timestamp() {
-        // The headless idle watchdog keys on MCP-request activity; the stamp
-        // must advance after a request arrives.
+    fn test_activity_probes_monotonic() {
+        // L-23: activity probes must come from a monotonic clock, so a
+        // wall-clock (NTP) jump can neither keep the bot "perpetually
+        // active" (backward jump: `now - last` saturates to 0) nor fire the
+        // headless idle watchdog early (forward jump). The probes return an
+        // `Instant` (None before the first mark) whose age is measured by
+        // elapsed monotonic time — never by comparing epoch values.
         let state = SharedState::new(AppConfig::default());
-        assert_eq!(state.mcp_activity_at_ms(), 0, "never touched → 0");
-        state.mark_mcp_activity();
-        let stamped = state.mcp_activity_at_ms();
-        assert!(stamped > 0, "mark must stamp a non-zero epoch millis");
-        // A second mark must advance (or at least not go backwards).
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        state.mark_mcp_activity();
+
+        // Never touched → no stamp at all (the old code reported 0).
+        assert!(state.last_command_at().is_none());
+        assert!(state.mcp_activity_at().is_none());
+
+        // A mark stamps an instant in the (monotonic) present, so the
+        // stamp's age is tiny — regardless of what the wall clock says.
+        state.mark_command_activity();
+        let command_at = state.last_command_at().expect("marked → Some");
         assert!(
-            state.mcp_activity_at_ms() >= stamped,
-            "activity stamp must be monotonic"
+            command_at.elapsed() < std::time::Duration::from_secs(1),
+            "command stamp must be in the recent monotonic past"
+        );
+
+        state.mark_mcp_activity();
+        let mcp_at = state.mcp_activity_at().expect("marked → Some");
+        assert!(
+            mcp_at.elapsed() < std::time::Duration::from_secs(1),
+            "mcp stamp must be in the recent monotonic past"
         );
     }
 
@@ -1623,20 +1766,24 @@ mod tests {
         notified.await.expect("waiter task should finish");
     }
 
-    #[test]
-    fn test_goto_notify_clone_shares_state() {
+    /// F-15: the previous test never polled the `Notified` future, so it
+    /// asserted nothing about notification propagation. Await it under a
+    /// short timeout: `notify_waiters` through one Arc clone must wake a
+    /// waiter created from the other clone.
+    #[tokio::test]
+    async fn test_goto_notify_clone_shares_state() {
         let state = SharedState::new(AppConfig::default());
         let notify1 = state.goto_notify();
         let notify2 = state.goto_notify();
 
-        // Notifying through one Arc must wake waiters on the other Arc.
         let waiter = notify2.notified();
         notify1.notify_waiters();
-        // The future returned by notified() should be ready after notify_waiters.
-        // We can't easily await in a sync test, but we verify both Arcs are
-        // non-null and distinct clones.
+        tokio::time::timeout(std::time::Duration::from_millis(100), waiter)
+            .await
+            .expect(
+                "notify_waiters through one Arc clone must wake a waiter created from the other",
+            );
         assert!(Arc::strong_count(&state.goto_notify) >= 2);
-        drop(waiter);
     }
 
     // -- snapshot force-refresh -------------------------------------------------
@@ -1697,6 +1844,31 @@ mod tests {
         assert_eq!(state.get_commands_probe(), Some(false));
         state.set_commands_probe(None);
         assert_eq!(state.get_commands_probe(), None);
+    }
+
+    /// Report M-7: clear_session_state is the shared idempotent teardown
+    /// both disconnect paths run. Every session flag/handle/cache it owns
+    /// must be reset — and a second call (or a call on a session that
+    /// never spawned) must stay a harmless no-op.
+    #[test]
+    fn test_clear_session_state_resets_all_session_flags() {
+        let state = SharedState::new(AppConfig::default());
+        state.set_online(true);
+        state.set_connected_since(Some(std::time::Instant::now()));
+        state.set_executor_busy(true);
+        state.set_commands_probe(Some(true));
+
+        state.clear_session_state();
+
+        assert!(!state.is_online());
+        assert!(!state.executor_busy());
+        assert_eq!(state.get_commands_probe(), None);
+        assert!(state.bot_ecs().is_none());
+
+        // Idempotent: a second call must not panic or flip anything back.
+        state.clear_session_state();
+        assert!(!state.is_online());
+        assert!(!state.executor_busy());
     }
 
     // -- session_was_online ----------------------------------------------------
@@ -1769,5 +1941,46 @@ mod tests {
             .expect("trivial thread should join cleanly");
         // Second take returns None (the handle was moved out).
         assert!(state.take_bot_thread_handle().is_none());
+    }
+
+    // -- World view cache meta (M-11) ---------------------------------------
+
+    /// The cheap meta accessor returns the cache's key fields WITHOUT the
+    /// (potentially ~700 KB at scale=8) base64 PNG payload. The preview
+    /// panel calls this every frame; cloning the whole `WorldViewCache`
+    /// (including `png_base64`) every frame was the M-11 hotspot.
+    #[test]
+    fn test_world_view_cache_meta_excludes_png() {
+        let state = SharedState::new(AppConfig::default());
+        state.set_world_view_cache(WorldViewCache {
+            snapshot_seq: 7,
+            radius: 8,
+            scale: 4,
+            png_base64: "A".repeat(100_000),
+            block_count: 3,
+            entity_count: 2,
+            annotation_json: "ann".into(),
+        });
+
+        let meta = state.world_view_cache_meta().expect("meta must be present");
+        assert_eq!(meta.snapshot_seq, 7);
+        assert_eq!(meta.radius, 8);
+        assert_eq!(meta.scale, 4);
+        assert_eq!(meta.annotation_json, "ann");
+
+        // The full cache (with the PNG) remains available on demand — the
+        // meta path must not have disturbed it.
+        let full = state.get_world_view_cache().expect("full cache present");
+        assert_eq!(full.png_base64.len(), 100_000);
+        assert_eq!(full.block_count, 3);
+        assert_eq!(full.entity_count, 2);
+    }
+
+    /// No cached render → no meta (the preview panel treats this as
+    /// "clear the stale texture").
+    #[test]
+    fn test_world_view_cache_meta_none_when_empty() {
+        let state = SharedState::new(AppConfig::default());
+        assert!(state.world_view_cache_meta().is_none());
     }
 }

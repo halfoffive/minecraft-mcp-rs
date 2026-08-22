@@ -13,7 +13,7 @@ use tracing::{debug, error, trace, warn};
 
 use crate::error::BotError;
 use crate::state::SharedState;
-use crate::types::{BotCommand, BotResult};
+use crate::types::{ActAction, BotCommand, BotResult};
 
 // ═══════════════════════════════════════════════════════════════
 // BotCommandWithResponder
@@ -39,7 +39,7 @@ pub struct BotCommandWithResponder {
 /// Commands are serialized by the single `BotCommandReceiver`.
 ///
 /// The response timeout is read **at every `send_command` call** from
-/// [`SharedState::read_config::command_timeout_secs`], so the caller (and
+/// `SharedState::read_config().command_timeout_secs`, so the caller (and
 /// any `RealBotClient` reading the same [`SharedState`]) always see the
 /// latest user-configured value without re-creating the sender.
 #[derive(Debug, Clone)]
@@ -54,7 +54,7 @@ pub struct BotCommandSender {
 impl BotCommandSender {
     /// Return the current response timeout (from the shared config).
     ///
-    /// Exposed so [`crate::bot::commands::RealBotClient::goto`] (and any
+    /// Exposed so `RealBotClient::goto` (and any
     /// other long-running client method) can honour the same value the
     /// `send_command` envelope enforces, without re-reading the config
     /// independently.
@@ -63,13 +63,33 @@ impl BotCommandSender {
     }
 
     /// The envelope timeout for a specific command: the configured command
-    /// timeout, or the longer fly timeout for `FlyTo` (long flights exceed
-    /// 30 s; `handle_fly_to`'s internal goto uses the same fly timeout, so
-    /// the executor always replies before this envelope fires).
+    /// timeout, or the longer fly timeout for flight commands — `FlyTo` AND
+    /// `Act(Fly)` (report M-3: the unified act tool reached the same
+    /// `handle_fly_to` executor path but kept the 30 s command envelope, so
+    /// long flights reported a false CommandTimeout while the bot was still
+    /// flying). `handle_fly_to`'s internal goto uses the same fly timeout,
+    /// so the executor always replies before this envelope fires.
+    ///
+    /// Reads the config lock ONCE and derives both the command and fly
+    /// timeouts from that single guard (L-21) — the previous
+    /// implementation called `read_config` twice (once via `timeout()`,
+    /// once for `fly_timeout_secs`).
     fn timeout_for(&self, cmd: &BotCommand) -> Duration {
-        let base = self.timeout();
-        if matches!(cmd, BotCommand::FlyTo(_)) {
-            let fly = Duration::from_secs(self.state.read_config().fly_timeout_secs);
+        let cfg = self.state.read_config();
+        let base = Duration::from_secs(cfg.command_timeout_secs);
+        let is_flight = matches!(cmd, BotCommand::FlyTo(_))
+            || matches!(cmd, BotCommand::Act(ActAction::Fly { .. }, _));
+        // F-1: compound act actions (mine, collect) are multi-leg operations
+        // whose movement + mining/verification phases routinely exceed the
+        // plain command envelope. They share the longer flight envelope so a
+        // far-away target no longer produces a guaranteed client-side
+        // CommandTimeout while the serial executor keeps working.
+        let is_compound_act = matches!(
+            cmd,
+            BotCommand::Act(ActAction::Mine { .. } | ActAction::CollectItems { .. }, _)
+        );
+        if is_flight || is_compound_act {
+            let fly = Duration::from_secs(cfg.fly_timeout_secs);
             std::cmp::max(base, fly)
         } else {
             base
@@ -82,55 +102,88 @@ impl BotCommandSender {
     /// [`AppConfig::command_timeout_secs`](crate::config::AppConfig::command_timeout_secs)
     /// at the moment of the call, so changing the value in the settings
     /// panel takes effect on the next command without restarting the MCP
-    /// server.
+    /// server. `FlyTo` gets its own longer envelope (see
+    /// `timeout_for`).
     ///
     /// # Errors
     /// - `BotError::Offline` if the receiver has been dropped, or if the
     ///   responder side drops the oneshot without sending (channel closed).
     /// - `BotError::CommandTimeout` if no response arrives within the
     ///   currently-configured command timeout.
+    ///
+    /// # Timeout is not cancellation (F-10)
+    ///
+    /// A timeout only stops the SENDER from waiting. The command has already
+    /// been queued and the serial executor may still run it to completion;
+    /// its response is simply dropped. A client that retries a timed-out
+    /// command can therefore observe the side effect twice (e.g. `DropItem`
+    /// dropping double the intended count). Callers should prefer idempotent
+    /// commands or verify state before retrying.
     pub async fn send_command(&self, cmd: BotCommand) -> Result<BotResult, BotError> {
+        let timeout_dur = self.timeout_for(&cmd);
+        self.send_command_with_timeout(cmd, timeout_dur).await
+    }
+
+    /// Send a command with an explicit envelope timeout.
+    ///
+    /// Identical semantics to [`send_command`](Self::send_command) except
+    /// the response envelope is exactly `timeout_dur` (no `timeout_for`
+    /// lookup). Exposed so callers can give long-running commands their own
+    /// budget (e.g. `fly_to`'s `fly_timeout_secs`) without mutating the
+    /// shared config.
+    ///
+    /// # Errors
+    /// Same as [`send_command`](Self::send_command). The same timeout-is-not-
+    /// cancellation caveat applies.
+    pub async fn send_command_with_timeout(
+        &self,
+        cmd: BotCommand,
+        timeout_dur: Duration,
+    ) -> Result<BotResult, BotError> {
         let (respond_to, rx) = oneshot::channel();
-        // Keep a clone for lazy logging — `cmd` is moved into `wrapped` below.
-        // Using `?cmd_for_log` in tracing macros defers the Debug formatting
-        // until a log level is enabled, avoiding the unconditional `format!`
-        // allocation that the previous implementation paid on every call.
-        let cmd_for_log = cmd.clone();
+
+        // L-21: the `CommandTimeout` error message must render the real
+        // command's Debug form — that is part of the error contract, pinned
+        // by `tests/integration.rs::test_command_timeout_responder_alive_but_slow`.
+        // The channel also needs an owned `BotCommand`, so exactly ONE clone
+        // per call is unavoidable (both consumers need a command). What IS
+        // avoided: the eager `format!` (S-5) and the redundant second
+        // `read_config` in `timeout_for`. The tracing macros reference `cmd`
+        // lazily (`?cmd` defers the Debug formatting until a level is
+        // enabled), so the ORIGINAL command is kept alive here and the
+        // channel receives a clone — the log lines and the error message
+        // both render the exact command that was sent.
         let wrapped = BotCommandWithResponder {
-            command: cmd,
+            command: cmd.clone(),
             respond_to,
         };
 
-        trace!(command = ?cmd_for_log, "sending bot command");
+        trace!(command = ?cmd, "sending bot command");
 
         if self.tx.send(wrapped).await.is_err() {
             error!("bot command channel closed — receiver dropped");
             return Err(BotError::Offline("bot command channel closed".into()));
         }
 
-        // Read the timeout fresh on every call so the UI's "Command
-        // timeout" setting takes effect immediately. We store the
-        // Duration (not the raw u64) so sub-second values like
-        // `0.2` work — `Duration::from_secs(0)` would otherwise
-        // truncate them to zero and the timeout would fire instantly.
-        // FlyTo gets its own (longer) envelope timeout.
-        let timeout_dur = self.timeout_for(&cmd_for_log);
+        // The caller-supplied envelope is used verbatim (L-18-prep); the
+        // `Duration` (not a raw u64) supports sub-second timeouts like
+        // 200ms without truncation.
         let timeout_secs = timeout_dur.as_secs();
         match timeout(timeout_dur, rx).await {
             Ok(Ok(result)) => {
-                debug!(command = ?cmd_for_log, ?result, "bot command completed");
+                debug!(command = ?cmd, ?result, "bot command completed");
                 result
             }
             Ok(Err(_)) => {
-                warn!(command = ?cmd_for_log, "bot command responder dropped without reply");
+                warn!(command = ?cmd, "bot command responder dropped without reply");
                 Err(BotError::Offline(
                     "bot command responder dropped without reply".into(),
                 ))
             }
             Err(_) => {
-                error!(command = ?cmd_for_log, timeout_secs, "bot command timed out");
+                error!(command = ?cmd, timeout_secs, "bot command timed out");
                 Err(BotError::CommandTimeout {
-                    command: format!("{:?}", cmd_for_log),
+                    command: format!("{cmd:?}"),
                     timeout_secs,
                 })
             }
@@ -175,7 +228,7 @@ impl BotCommandReceiver {
 /// Create a new bot command channel with the given buffer size.
 ///
 /// The sender's response timeout is read live from
-/// [`SharedState::read_config::command_timeout_secs`] (the user-configurable
+/// `SharedState::read_config().command_timeout_secs` (the user-configurable
 /// "Command timeout" in the settings panel). A fresh [`SharedState`] is
 /// provided so [`BotCommandSender::send_command`] can look up the timeout
 /// at every call without re-creating the sender when the user changes it.
@@ -419,6 +472,137 @@ mod tests {
 
         // Wait for the responder task to finish cleanly.
         responder.await.expect("responder task should complete");
+    }
+
+    // ── L-18-prep: send_command_with_timeout ─────────────────────
+
+    /// The given envelope timeout must be used verbatim: a responder that
+    /// replies after the given short duration triggers `CommandTimeout`
+    /// reporting THAT duration (0s for a 100ms envelope), NOT the config's
+    /// 30s command timeout. This is the contract another agent's wave-2
+    /// consumer relies on (per-command timeouts without touching the
+    /// config).
+    #[tokio::test]
+    async fn test_send_command_with_timeout_uses_given_envelope() {
+        let (sender, mut receiver) = create_command_channel(10, make_state());
+
+        let responder = tokio::spawn(async move {
+            let wrapped = receiver.recv().await.expect("should receive command");
+            // Hold the responder 5× longer than the given 100ms envelope.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            drop(wrapped);
+        });
+
+        let result = sender
+            .send_command_with_timeout(BotCommand::Jump, Duration::from_millis(100))
+            .await;
+        assert!(result.is_err(), "expected a timeout, got: {result:?}");
+        match result {
+            Err(BotError::CommandTimeout { timeout_secs, .. }) => {
+                assert_eq!(
+                    timeout_secs, 0,
+                    "must report the GIVEN 100ms envelope (0s), not the 30s config default"
+                );
+            }
+            other => panic!("expected BotError::CommandTimeout, got: {other:?}"),
+        }
+        responder.await.expect("responder task should complete");
+    }
+
+    // ── L-21: timeout_for reads config once, honours max semantics ──
+
+    /// FlyTo gets the longer of the command and fly timeouts.
+    #[test]
+    fn test_timeout_for_flyto_uses_max_of_command_and_fly() {
+        let state = make_state();
+        state.update_config(|cfg| {
+            cfg.command_timeout_secs = 10;
+            cfg.fly_timeout_secs = 60;
+        });
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
+        assert_eq!(
+            sender.timeout_for(&BotCommand::FlyTo(BlockPos::new(0, 0, 0))),
+            Duration::from_secs(60)
+        );
+        // When the command timeout is longer, it wins.
+        state.update_config(|cfg| cfg.command_timeout_secs = 120);
+        assert_eq!(
+            sender.timeout_for(&BotCommand::FlyTo(BlockPos::new(0, 0, 0))),
+            Duration::from_secs(120)
+        );
+    }
+
+    /// Report M-3: Act(Fly) dispatches the same handle_fly_to executor
+    /// path as FlyTo, so it must share the fly envelope. Before the fix a
+    /// flight longer than 30 s via the unified act tool surfaced a false
+    /// CommandTimeout while the executor kept flying.
+    #[test]
+    fn test_timeout_for_act_fly_uses_fly_timeout() {
+        let state = make_state();
+        state.update_config(|cfg| {
+            cfg.command_timeout_secs = 10;
+            cfg.fly_timeout_secs = 60;
+        });
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
+        assert_eq!(
+            sender.timeout_for(&BotCommand::Act(
+                ActAction::Fly {
+                    target: BlockPos::new(0, 0, 0)
+                },
+                None
+            )),
+            Duration::from_secs(60)
+        );
+        // Other movement-only Act actions keep the plain command envelope.
+        assert_eq!(
+            sender.timeout_for(&BotCommand::Act(
+                ActAction::Move {
+                    target: BlockPos::new(0, 0, 0)
+                },
+                None
+            )),
+            Duration::from_secs(10)
+        );
+
+        // F-1: compound actions (mine / collect items) share the long
+        // envelope so their multi-leg duration is not guaranteed to
+        // overrun the client's wait.
+        assert_eq!(
+            sender.timeout_for(&BotCommand::Act(
+                ActAction::Mine {
+                    block_pos: BlockPos::new(0, 0, 0)
+                },
+                None
+            )),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            sender.timeout_for(&BotCommand::Act(
+                ActAction::CollectItems { radius: 16 },
+                None
+            )),
+            Duration::from_secs(60)
+        );
+    }
+
+    /// Non-FlyTo commands use exactly the configured command timeout —
+    /// the fly timeout must not leak into their envelope.
+    #[test]
+    fn test_timeout_for_non_fly_uses_command_timeout() {
+        let state = make_state();
+        state.update_config(|cfg| {
+            cfg.command_timeout_secs = 10;
+            cfg.fly_timeout_secs = 60;
+        });
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
+        assert_eq!(
+            sender.timeout_for(&BotCommand::Jump),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            sender.timeout_for(&BotCommand::BreakBlock(BlockPos::new(1, 2, 3))),
+            Duration::from_secs(10)
+        );
     }
 
     // ── Offline ─────────────────────────────────────────────

@@ -121,8 +121,13 @@ pub struct AppConfig {
     /// (default: [`McpTransport::Http`]).
     #[serde(default)]
     pub mcp_transport: McpTransport,
-    /// UI display language (default: [`Language::En`]).
-    #[serde(default)]
+    /// UI display language (default: the host system locale via
+    /// [`Language::from_system_locale`], matching [`AppConfig::default`]).
+    ///
+    /// L-30: the serde default previously drifted to [`Language::En`] while
+    /// `AppConfig::default()` followed the system locale — deserializing an
+    /// old config on a Chinese system silently got English.
+    #[serde(default = "Language::from_system_locale")]
     pub language: Language,
 }
 
@@ -232,11 +237,17 @@ impl AppConfig {
     /// Validate all config fields and return an error message for the first
     /// invalid value found.
     pub fn validate(&self) -> Result<(), String> {
-        if self.mc_address.is_empty() {
-            return Err("mc_address must not be empty".into());
+        if !valid_mc_address(&self.mc_address) {
+            return Err(
+                "mc_address must be a valid IP address or hostname (e.g. 127.0.0.1 or mc.example.com)"
+                    .into(),
+            );
         }
-        if self.ai_username.is_empty() {
-            return Err("ai_username must not be empty".into());
+        if !valid_mc_username(&self.ai_username) {
+            return Err(
+                "ai_username must be 1-16 characters of [A-Za-z0-9_] (Minecraft username rules)"
+                    .into(),
+            );
         }
         if self.mc_port == 0 {
             return Err("mc_port must not be 0".into());
@@ -244,10 +255,24 @@ impl AppConfig {
         if self.mcp_port == 0 {
             return Err("mcp_port must not be 0".into());
         }
-        if self.mcp_address != "localhost" {
-            self.mcp_address
-                .parse::<std::net::IpAddr>()
-                .map_err(|_| "mcp_address must be a valid IP address (e.g. 127.0.0.1 or 0.0.0.0) or \"localhost\"")?;
+        if self.mcp_address != "localhost" && !valid_bind_address(&self.mcp_address) {
+            return Err(
+                "mcp_address must be a valid IP address (e.g. 127.0.0.1 or 0.0.0.0) or \"localhost\""
+                    .into(),
+            );
+        }
+        // F-9: the MCP control surface can execute game commands and read the
+        // world state. Over plain HTTP on a non-loopback bind there is no
+        // TLS and (by default) no authentication, so reject the combination
+        // instead of letting `0.0.0.0` silently expose the control plane.
+        if self.mcp_transport == McpTransport::Http
+            && !is_loopback_bind_address(&self.mcp_address)
+            && !self.mcp_auth_enabled
+        {
+            return Err(
+                "mcp_auth_enabled must be true when the HTTP MCP server binds to a non-loopback address"
+                    .into(),
+            );
         }
         if self.chunk_scan_radius < 1 || self.chunk_scan_radius > 16 {
             return Err(format!(
@@ -319,7 +344,14 @@ impl AppConfig {
     /// app from starting; validation happens where settings are applied.
     pub fn from_env() -> AppConfig {
         let mut config = AppConfig::default();
-        config.mc_address = env_var_or("MINECRAFT_MCP_MC_ADDRESS", config.mc_address);
+        config.mc_address =
+            env_parse_or_validated("MINECRAFT_MCP_MC_ADDRESS", config.mc_address, |s| {
+                if valid_mc_address(s) {
+                    Ok(())
+                } else {
+                    Err("must be a valid IP address or hostname".into())
+                }
+            });
         config.mc_port = env_parse_or_validated("MINECRAFT_MCP_MC_PORT", config.mc_port, |v| {
             if *v == 0 {
                 Err("must be greater than 0".into())
@@ -327,8 +359,26 @@ impl AppConfig {
                 Ok(())
             }
         });
-        config.ai_username = env_var_or("MINECRAFT_MCP_AI_USERNAME", config.ai_username);
-        config.mcp_address = env_var_or("MINECRAFT_MCP_MCP_ADDRESS", config.mcp_address);
+        config.ai_username =
+            env_parse_or_validated("MINECRAFT_MCP_AI_USERNAME", config.ai_username, |s| {
+                if valid_mc_username(s) {
+                    Ok(())
+                } else {
+                    Err("must be 1-16 characters of [A-Za-z0-9_]".into())
+                }
+            });
+        // L-11: a bad bind address used to survive `from_env` and only trip
+        // `main.rs`'s final validate(), which then discarded the ENTIRE env
+        // config. It is now rejected per-field (same rule as validate())
+        // with a warning, keeping every other variable intact.
+        config.mcp_address =
+            env_parse_or_validated("MINECRAFT_MCP_MCP_ADDRESS", config.mcp_address, |s| {
+                if valid_bind_address(s) {
+                    Ok(())
+                } else {
+                    Err("must be a valid IP address or \"localhost\"".into())
+                }
+            });
         config.mcp_port = env_parse_or_validated("MINECRAFT_MCP_MCP_PORT", config.mcp_port, |v| {
             if *v == 0 {
                 Err("must be greater than 0".into())
@@ -443,6 +493,21 @@ impl AppConfig {
                 );
             }
         }
+
+        // F-8 cross-field reconciliation: each numeric variable is validated
+        // on its own, so `initial=120000` with `max` unset (default 60000)
+        // would fail the final validate() and make main.rs discard the ENTIRE
+        // env config — including unrelated overrides such as the bearer token.
+        // Raise max to initial (the permissive reading) instead of losing the
+        // configuration; validate() therefore cannot fail on this pair alone.
+        if config.reconnect_max_delay_ms < config.reconnect_initial_delay_ms {
+            tracing::warn!(
+                initial_ms = config.reconnect_initial_delay_ms,
+                max_ms = config.reconnect_max_delay_ms,
+                "reconnect initial delay exceeds max delay; raising max to initial"
+            );
+            config.reconnect_max_delay_ms = config.reconnect_initial_delay_ms;
+        }
         config
     }
 }
@@ -451,9 +516,82 @@ impl AppConfig {
 // Environment-variable helpers
 // ---------------------------------------------------------------------------
 
+/// Is `address` acceptable for the MCP HTTP bind address?
+///
+/// Mirrors the rule [`AppConfig::validate`] applies (L-11 extracted the
+/// predicate so `from_env`'s per-field check and the final validation gate
+/// can never drift): `localhost` or a parseable [`std::net::IpAddr`].
+fn valid_bind_address(address: &str) -> bool {
+    address == "localhost" || address.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// Is `address` a loopback-only bind address?
+fn is_loopback_bind_address(address: &str) -> bool {
+    address == "localhost"
+        || address
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+/// Is `address` acceptable as a Minecraft server address?
+///
+/// Accepts loopback / numeric IPs (with optional port handled by the caller's
+/// port field) and DNS hostnames. Rejects empty strings and anything
+/// containing characters that cannot appear in a hostname, which catches
+/// accidental `host:port` or `ws://...` entries at configuration time.
+fn valid_mc_address(address: &str) -> bool {
+    if address.is_empty() || address.len() > 253 {
+        return false;
+    }
+    if address.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let mut labels = address.split('.');
+    labels.all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
+}
+
+/// Is `username` acceptable as a Minecraft (offline-mode) player name?
+///
+/// Minecraft's username rules: 1-16 characters, ASCII alphanumerics and
+/// underscore only. An invalid name is only discovered when the server
+/// kicks the bot mid-handshake; validating it here surfaces the problem
+/// at configuration time instead (report P3 item). Shared by
+/// `from_env`'s per-field check and `validate()` so the two can never
+/// drift (same pattern as `valid_bind_address`).
+fn valid_mc_username(username: &str) -> bool {
+    !username.is_empty()
+        && username.len() <= 16
+        && username
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Read a `String`-typed env var, falling back to `fallback` when unset.
+///
+/// An EMPTY value is treated as unset too (report M-2): empty strings used
+/// to survive `from_env`, trip `validate()`, and drag the ENTIRE
+/// configuration into `main.rs`'s full-default fallback — silently
+/// discarding every other override (notably `MINECRAFT_MCP_TOKEN`, which
+/// then restarted as a random UUID and 401'd every HTTP client).
 fn env_var_or(name: &str, fallback: String) -> String {
-    std::env::var(name).unwrap_or(fallback)
+    match std::env::var(name) {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => {
+            tracing::warn!(
+                name,
+                "empty value for environment variable; treating as unset and using default"
+            );
+            fallback
+        }
+        Err(_) => fallback,
+    }
 }
 
 /// Parse a numeric/bool env var, warning + falling back on parse failure.
@@ -640,6 +778,10 @@ mod tests {
         // A JSON payload lacking the `language` field (as written by older
         // binaries before i18n existed) must still deserialize, with the
         // field falling back to its `#[serde(default)]` value.
+        //
+        // L-30: the serde default now matches `AppConfig::default()` (the
+        // system locale) instead of a hardcoded `En` — rewritten to assert
+        // the aligned behaviour so it is robust on Chinese systems too.
         let json = r#"{
             "mc_address": "127.0.0.1",
             "mc_port": 25565,
@@ -657,7 +799,8 @@ mod tests {
             "mcp_transport": "Http"
         }"#;
         let config: AppConfig = serde_json::from_str(json).expect("must deserialize");
-        assert_eq!(config.language, Language::En);
+        assert_eq!(config.language, Language::from_system_locale());
+        assert_eq!(config.language, AppConfig::default().language);
     }
 
     #[test]
@@ -815,11 +958,8 @@ mod tests {
             "invalid mcp_address should fail validation"
         );
 
-        config.mcp_address = "0.0.0.0".to_string();
-        assert!(config.validate().is_ok(), "valid IPv4 should pass");
-
         config.mcp_address = "::1".to_string();
-        assert!(config.validate().is_ok(), "valid IPv6 should pass");
+        assert!(config.validate().is_ok(), "loopback IPv6 should pass");
     }
 
     #[test]
@@ -832,10 +972,34 @@ mod tests {
         );
     }
 
+    /// F-9: plain HTTP on a non-loopback bind without auth is the one
+    /// combination that exposes the MCP control surface to the network.
+    #[test]
+    fn test_validate_rejects_non_loopback_http_without_auth() {
+        let mut config = AppConfig::default();
+        config.mcp_transport = McpTransport::Http;
+        config.mcp_auth_enabled = false;
+        config.mcp_address = "0.0.0.0".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("non-loopback") && err.contains("auth"),
+            "got: {err}"
+        );
+
+        // Enabling auth makes the same bind valid.
+        config.mcp_auth_enabled = true;
+        assert!(config.validate().is_ok());
+
+        // Stdio transport is not a network exposure risk.
+        config.mcp_transport = McpTransport::Stdio;
+        config.mcp_auth_enabled = false;
+        assert!(config.validate().is_ok());
+    }
+
     // -- Validation: ports -------------------------------------------------
 
     #[test]
-    fn test_validate_rejects_port_too_high() {
+    fn test_validate_accepts_port_65535() {
         let mut config = AppConfig::default();
         config.mcp_port = 65535;
         assert!(config.validate().is_ok(), "port 65535 should be valid");
@@ -1144,6 +1308,49 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
+    /// F-8: `reconnect_initial_delay_ms` above the default (or an explicitly
+    /// configured) `max` must reconcile in `from_env` instead of surviving
+    /// to main.rs's final validate() and discarding the whole env config.
+    #[test]
+    fn test_from_env_raises_reconnect_max_to_initial() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = [
+            EnvGuard::set("MINECRAFT_MCP_RECONNECT_INITIAL_DELAY_MS", "120000"),
+            EnvGuard::set("MINECRAFT_MCP_TOKEN", "survives"),
+        ];
+        let config = AppConfig::from_env();
+        assert_eq!(config.reconnect_initial_delay_ms, 120000);
+        assert_eq!(config.reconnect_max_delay_ms, 120000);
+        assert_eq!(config.mcp_token, "survives");
+        assert!(
+            config.validate().is_ok(),
+            "from_env must reconcile the cross-field pair: {}",
+            config.validate().unwrap_err()
+        );
+    }
+
+    /// F-23: a Minecraft server address may be a hostname or an IP, but an
+    /// accidental `host:port` / URL / whitespace entry must be rejected at
+    /// configuration time, like the MCP bind address is.
+    #[test]
+    fn test_validate_rejects_invalid_mc_address_format() {
+        let mut config = AppConfig::default();
+        for bad in [
+            "",
+            "host:25565",
+            "ws://example.com",
+            "bad host",
+            "-bad.example.com",
+        ] {
+            config.mc_address = bad.to_string();
+            assert!(config.validate().is_err(), "{bad:?} should fail");
+        }
+        for good in ["127.0.0.1", "::1", "localhost", "mc.example.com"] {
+            config.mc_address = good.to_string();
+            assert!(config.validate().is_ok(), "{good:?} should pass");
+        }
+    }
+
     #[test]
     fn test_from_env_transport_case_insensitive() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1158,5 +1365,145 @@ mod tests {
         config.fly_timeout_secs = 0;
         let err = config.validate().unwrap_err();
         assert!(err.contains("fly_timeout_secs"), "got: {err}");
+    }
+
+    // -- L-30: language serde default vs AppConfig::default -------------------
+
+    /// A config missing the `language` field must deserialize to the SAME
+    /// value as [`AppConfig::default`] — which follows the system locale —
+    /// not a hardcoded [`Language::En`]. The `#[serde(default)]` on
+    /// `language` previously diverged from `AppConfig::default()`.
+    #[test]
+    fn test_deserialized_absent_language_equals_default_language() {
+        let json = r#"{
+            "mc_address": "127.0.0.1",
+            "mc_port": 25565,
+            "ai_username": "AI_Bot",
+            "mcp_address": "127.0.0.1",
+            "mcp_port": 3000,
+            "task_name": "mining",
+            "chunk_scan_radius": 8,
+            "block_perception_radius": 32,
+            "snapshot_interval_ms": 500,
+            "reconnect_initial_delay_ms": 5000,
+            "reconnect_max_delay_ms": 60000,
+            "command_timeout_secs": 30,
+            "mcp_token": "minecraft-mcp-rs",
+            "mcp_transport": "Http"
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).expect("must deserialize");
+        assert_eq!(config.language, AppConfig::default().language);
+        assert_eq!(config.language, Language::from_system_locale());
+    }
+
+    // -- L-11: per-field string env validation --------------------------------
+
+    /// L-11: a semantically invalid string env var (bad `mcp_address`) must
+    /// be rejected PER-FIELD inside `from_env`, keeping the OTHER variables
+    /// and never degrading the whole config to defaults — which is what
+    /// happened before, because the bad value survived `from_env` and only
+    /// `main.rs`'s final `validate()` (replacing the ENTIRE config with
+    /// defaults) caught it.
+    #[test]
+    fn test_from_env_bad_mcp_address_keeps_other_variables() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = [
+            EnvGuard::set("MINECRAFT_MCP_MCP_ADDRESS", "not-an-ip"),
+            EnvGuard::set("MINECRAFT_MCP_MC_PORT", "25566"),
+        ];
+        let config = AppConfig::from_env();
+        assert_eq!(config.mc_port, 25566, "valid sibling variable must survive");
+        assert_eq!(
+            config.mcp_address,
+            AppConfig::default().mcp_address,
+            "bad mcp_address must fall back to the default"
+        );
+        assert!(
+            config.validate().is_ok(),
+            "per-field fallback must leave a fully valid config"
+        );
+    }
+
+    /// Empty `mc_address` / `ai_username` are rejected per-field (mirroring
+    /// [`AppConfig::validate`]) and fall back to their defaults.
+    #[test]
+    fn test_from_env_empty_mc_address_falls_back() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = [
+            EnvGuard::set("MINECRAFT_MCP_MC_ADDRESS", ""),
+            EnvGuard::set("MINECRAFT_MCP_AI_USERNAME", ""),
+        ];
+        let config = AppConfig::from_env();
+        assert_eq!(config.mc_address, AppConfig::default().mc_address);
+        assert_eq!(config.ai_username, AppConfig::default().ai_username);
+        assert!(config.validate().is_ok());
+    }
+
+    /// Report M-2: an EMPTY `MINECRAFT_MCP_TOKEN` must be treated as unset,
+    /// not as "token = empty string". The empty value used to survive
+    /// `from_env`, fail `validate()` (auth enabled + empty token), and drag
+    /// the ENTIRE env configuration into `main.rs`'s full-default fallback —
+    /// silently discarding every other override while operators believed the
+    /// token was pinned. Now the token falls back per-field (fresh random
+    /// UUID default) and the other variables stay intact.
+    #[test]
+    fn test_from_env_empty_token_keeps_other_variables() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = [
+            EnvGuard::set("MINECRAFT_MCP_TOKEN", ""),
+            EnvGuard::set("MINECRAFT_MCP_AUTH_ENABLED", "true"),
+            EnvGuard::set("MINECRAFT_MCP_MC_ADDRESS", "mc.example.net"),
+        ];
+        let config = AppConfig::from_env();
+
+        // The empty token is treated as unset: the default (a fresh random
+        // UUID) is kept, so auth stays satisfiable and validate() passes.
+        assert!(!config.mcp_token.is_empty());
+        assert_ne!(config.mcp_token, "");
+        // The other override survives — no full-config fallback.
+        assert_eq!(config.mc_address, "mc.example.net");
+        assert!(config.mcp_auth_enabled);
+        assert!(
+            config.validate().is_ok(),
+            "empty TOKEN env must not invalidate the merged config"
+        );
+    }
+
+    /// Report P3: `ai_username` is validated against Minecraft's username
+    /// rules (1-16 chars of [A-Za-z0-9_]) both in `validate()` and per-field
+    /// in `from_env`, so an invalid name surfaces at configuration time
+    /// instead of as a mid-handshake server kick.
+    #[test]
+    fn test_validate_rejects_invalid_usernames() {
+        let mut config = AppConfig::default();
+
+        config.ai_username = "".into();
+        assert!(config.validate().is_err());
+        config.ai_username = "has space".into();
+        assert!(config.validate().is_err());
+        config.ai_username = "way_too_long_username_123".into();
+        assert!(config.validate().is_err());
+        config.ai_username = "inv@lid!".into();
+        assert!(config.validate().is_err());
+
+        config.ai_username = "Valid_Name_123".into();
+        assert!(config.validate().is_ok());
+    }
+
+    /// An invalid username env var is rejected PER-FIELD, keeping every
+    /// other variable intact (same drift-free pattern as the bind-address
+    /// fix L-11).
+    #[test]
+    fn test_from_env_bad_username_keeps_other_variables() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guards = [
+            EnvGuard::set("MINECRAFT_MCP_AI_USERNAME", "no spaces allowed"),
+            EnvGuard::set("MINECRAFT_MCP_MC_ADDRESS", "mc.example.net"),
+        ];
+        let config = AppConfig::from_env();
+
+        assert_eq!(config.ai_username, AppConfig::default().ai_username);
+        assert_eq!(config.mc_address, "mc.example.net");
+        assert!(config.validate().is_ok());
     }
 }

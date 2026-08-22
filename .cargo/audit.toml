@@ -1,0 +1,33 @@
+# Triage for `cargo audit` - see .github/workflows/audit.yml
+#
+# NOTE: cargo-audit (0.22.x) discovers this file ONLY as
+# ./.cargo/audit.toml (or ~/.cargo/audit.toml) - NOT as a repo-root
+# audit.toml.
+#
+# Every entry here is a finding that CANNOT be fixed by a lockfile bump
+# today. Each carries the blocking dependency and the revisit condition.
+# Re-audit this list whenever azalea / egui / wayland-stack bump theirs.
+
+[advisories]
+ignore = [
+    # hickory-proto 0.25.x - pinned by azalea-protocol 0.15.1 (azalea 0.15.1
+    # requires hickory-resolver 0.25). Fix needs azalea to adopt 0.26+.
+    # RUSTSEC-2026-0118 additionally has NO fixed release at all.
+    # Revisit: next azalea release that moves hickory-resolver.
+    "RUSTSEC-2026-0119", # O(n^2) name compression CPU exhaustion
+    "RUSTSEC-2026-0118", # NSEC3 unbounded loop (no upstream fix yet)
+
+    # quick-xml 0.39.x - pinned by wayland-scanner (Linux Wayland build
+    # dependency of the egui/winit stack). Never compiled on Windows/macOS;
+    # on Linux it parses Wayland protocol XML at BUILD time, not
+    # attacker-controlled input at runtime. Fix needs wayland-scanner 0.41+.
+    # Revisit: next smol-wayland / winit stack release.
+    "RUSTSEC-2026-0194", # quadratic duplicate-attribute scan
+    "RUSTSEC-2026-0195", # unbounded namespace-declaration allocation
+
+    # Unmaintained crates pulled in by the image / egui stacks - no fix
+    # exists; removal requires upstream migrations.
+    # Revisit: image (EXR codec drops pulp/paste) and egui (ab_glyph).
+    "RUSTSEC-2024-0436", # paste <- pulp/rav1e <- image EXR codec
+    "RUSTSEC-2026-0192", # ttf-parser <- ab_glyph <- egui font stack
+]

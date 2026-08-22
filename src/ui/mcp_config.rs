@@ -9,15 +9,97 @@
 //! - `Stdio` — emits the classic `command` + `args` block for local
 //!   subprocess clients (Claude Desktop / Cursor).
 //!
-//! The JSON is regenerated every frame from the current [`EditConfig`]
-//! values, so edits in the Settings panel (token, port, transport) are
-//! reflected immediately in the MCP Config panel.
+//! The JSON is cached (L-19) and rebuilt only when a JSON-affecting
+//! [`EditConfig`] value changes; the npx/bunx snippets and the executable
+//! path are constants resolved once via [`LazyLock`].
 
 use egui::{FontId, TextEdit, Ui};
+use std::sync::LazyLock;
 
 use crate::config::McpTransport;
 use crate::i18n::{self, TextKey};
 use crate::ui::app::EditConfig;
+
+/// The absolute path of the running executable, resolved ONCE (L-19).
+///
+/// Previously the stdio JSON called [`std::env::current_exe`] on every
+/// frame. Falls back to `"minecraft-mcp-rs"` when the platform cannot
+/// resolve the path.
+static EXE_PATH: LazyLock<String> = LazyLock::new(|| {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "minecraft-mcp-rs".to_owned())
+});
+
+/// The npx launcher JSON — a compile-time constant (pinned to
+/// `CARGO_PKG_VERSION`), never rebuilt (L-19).
+static NPX_JSON: LazyLock<String> = LazyLock::new(build_npx_config_json);
+
+/// The bunx launcher JSON — a compile-time constant (pinned to
+/// `CARGO_PKG_VERSION`), never rebuilt (L-19).
+static BUNX_JSON: LazyLock<String> = LazyLock::new(build_bunx_config_json);
+
+/// Cache for the MCP Config panel's pretty-printed JSON (L-19).
+///
+/// Rebuilding the JSON every frame was a per-frame `serde_json::to_string_pretty`
+/// call; combined with the per-frame [`std::env::current_exe`] (now a
+/// [`LazyLock`]) this was pure waste when nothing changed. The cache keys on
+/// the JSON-affecting [`EditConfig`] inputs and rebuilds only when one of
+/// them differs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpConfigCache {
+    transport: McpTransport,
+    mcp_address: String,
+    mcp_port: u16,
+    mcp_token: String,
+    mcp_auth_enabled: bool,
+    /// Pretty-printed main JSON for the cached inputs.
+    json: String,
+    /// Number of rebuilds performed via [`McpConfigCache::get`] (0 right
+    /// after construction — the initial build is not counted). Test
+    /// diagnostic proving cache hits do not rebuild.
+    rebuilds: u64,
+}
+
+impl McpConfigCache {
+    /// Build the cache fresh for `edit` (one JSON build).
+    pub fn new(edit: &EditConfig) -> Self {
+        Self::build(edit, 0)
+    }
+
+    fn build(edit: &EditConfig, rebuilds: u64) -> Self {
+        Self {
+            transport: edit.mcp_transport,
+            mcp_address: edit.mcp_address.clone(),
+            mcp_port: edit.mcp_port,
+            mcp_token: edit.mcp_token.clone(),
+            mcp_auth_enabled: edit.mcp_auth_enabled,
+            json: build_mcp_config_json(edit),
+            rebuilds,
+        }
+    }
+
+    /// Return the JSON for `edit`, rebuilding only when a JSON-affecting
+    /// input changed. The npx/bunx snippets are constants and never
+    /// participate in the rebuild decision.
+    pub fn get(&mut self, edit: &EditConfig) -> &str {
+        if self.transport != edit.mcp_transport
+            || self.mcp_address != edit.mcp_address
+            || self.mcp_port != edit.mcp_port
+            || self.mcp_token != edit.mcp_token
+            || self.mcp_auth_enabled != edit.mcp_auth_enabled
+        {
+            *self = Self::build(edit, self.rebuilds + 1);
+        }
+        &self.json
+    }
+
+    /// Number of rebuilds performed by [`McpConfigCache::get`].
+    pub fn rebuilds(&self) -> u64 {
+        self.rebuilds
+    }
+}
 
 /// Render the MCP Config panel.
 ///
@@ -67,16 +149,16 @@ use crate::ui::app::EditConfig;
 /// ```
 ///
 /// The `<absolute_path_to_executable>` is obtained from
-/// [`std::env::current_exe`].  If that fails (e.g. the platform cannot
-/// resolve the exe path), the string `"minecraft-mcp-rs"` is used as a
-/// fallback.
-pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig) {
-    let json_text = build_mcp_config_json(edit);
+/// [`std::env::current_exe`] once into a [`LazyLock`] (L-19).  If that
+/// fails (e.g. the platform cannot resolve the exe path), the string
+/// `"minecraft-mcp-rs"` is used as a fallback.
+pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig, cache: &mut McpConfigCache) {
+    let json_text = cache.get(edit);
 
     // ── Copy button + hint ─────────────────────────────────────
     ui.horizontal(|ui| {
         if ui.button(i18n::tr(TextKey::Copy)).clicked() {
-            ui.ctx().copy_text(json_text.clone());
+            ui.ctx().copy_text(json_text.to_owned());
         }
         ui.label(i18n::tr(TextKey::CopyHint));
     });
@@ -100,7 +182,7 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig) {
     // `interactive(false)` makes the field read-only (no cursor / editing).
     // `desired_width(INFINITY)` stretches it to fill the available width so
     // the full executable path / URL is visible without horizontal scrolling.
-    let mut text = json_text;
+    let mut text = json_text.to_owned();
     ui.add(
         TextEdit::multiline(&mut text)
             .font(FontId::monospace(12.0))
@@ -111,17 +193,17 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig) {
     // ── npx / bunx variants (Stdio only) ──────────────────────
     // The npx / bunx launchers only make sense for the stdio transport —
     // they spawn the binary as a subprocess, which is exactly what the Stdio
-    // JSON block describes. HTTP transport is unaffected.
+    // JSON block describes. HTTP transport is unaffected. The snippets are
+    // compile-time constants (LazyLock, L-19).
     if edit.mcp_transport == McpTransport::Stdio {
-        let npx_text = build_npx_config_json();
         ui.add_space(6.0);
         ui.label(i18n::tr(TextKey::NpxConfig));
         ui.horizontal(|ui| {
             if ui.button(i18n::tr(TextKey::Copy)).clicked() {
-                ui.ctx().copy_text(npx_text.clone());
+                ui.ctx().copy_text(NPX_JSON.clone());
             }
         });
-        let mut npx_text = npx_text;
+        let mut npx_text = NPX_JSON.as_str().to_owned();
         ui.add(
             TextEdit::multiline(&mut npx_text)
                 .font(FontId::monospace(12.0))
@@ -131,15 +213,14 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig) {
 
         // bunx variant — parallel block for users on Bun. `bunx` auto-installs
         // the package without prompting, so this JSON has no `-y` flag.
-        let bunx_text = build_bunx_config_json();
         ui.add_space(6.0);
-        ui.label(i18n::tr(TextKey::NpxConfig));
+        ui.label(i18n::tr(TextKey::BunxConfig));
         ui.horizontal(|ui| {
             if ui.button(i18n::tr(TextKey::Copy)).clicked() {
-                ui.ctx().copy_text(bunx_text.clone());
+                ui.ctx().copy_text(BUNX_JSON.clone());
             }
         });
-        let mut bunx_text = bunx_text;
+        let mut bunx_text = BUNX_JSON.as_str().to_owned();
         ui.add(
             TextEdit::multiline(&mut bunx_text)
                 .font(FontId::monospace(12.0))
@@ -149,15 +230,17 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig) {
     }
 }
 
-/// Format a host string for use in a URL, wrapping IPv6 addresses in
-/// square brackets per RFC 3986 (e.g. `::1` → `[::1]`).
+/// Format a BIND host string as a CLIENT-connectable URL host (report P3).
 ///
-/// - If `host` parses as an [`std::net::IpAddr::V6`], returns `[host]`.
-/// - If `host` parses as an [`std::net::IpAddr::V4`], returns it unchanged.
-/// - If `host` is a hostname like `localhost` (fails `IpAddr::parse`),
-///   returns it unchanged.
+/// - IPv6 addresses get square brackets per RFC 3986 (::1 becomes [::1]);
+/// - a bind-all address is NOT connectable by a client — 0.0.0.0 (and ::)
+///   would make the MCP client target itself and usually fail, so it is
+///   rewritten to the loopback address the local client must use
+///   (127.0.0.1 / [::1]).
 fn format_host_for_url(host: &str) -> String {
     match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(addr)) if addr.is_unspecified() => "[::1]".to_string(),
+        Ok(std::net::IpAddr::V4(addr)) if addr.is_unspecified() => "127.0.0.1".to_string(),
         Ok(std::net::IpAddr::V6(_)) => format!("[{host}]"),
         _ => host.to_owned(),
     }
@@ -170,8 +253,8 @@ fn format_host_for_url(host: &str) -> String {
 ///
 /// - [`McpTransport::Http`] — `url` (+ `headers.Authorization` only when
 ///   [`EditConfig::mcp_auth_enabled`]).
-/// - [`McpTransport::Stdio`] — `command` + `args` block (uses
-///   [`std::env::current_exe`] for the executable path).
+/// - [`McpTransport::Stdio`] — `command` + `args` block (uses the
+///   [`EXE_PATH`] cached from [`std::env::current_exe`]).
 fn build_mcp_config_json(edit: &EditConfig) -> String {
     let json = match edit.mcp_transport {
         McpTransport::Http => {
@@ -194,10 +277,7 @@ fn build_mcp_config_json(edit: &EditConfig) -> String {
             })
         }
         McpTransport::Stdio => {
-            let exe_path = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.to_str().map(|s| s.to_string()))
-                .unwrap_or_else(|| "minecraft-mcp-rs".to_owned());
+            let exe_path = EXE_PATH.as_str();
             // `--stdio` is mandatory: with no args the binary prints help and
             // exits (T1), which would silently kill the MCP subprocess.
             serde_json::json!({
@@ -277,7 +357,7 @@ mod tests {
     fn test_format_host_ipv4_no_brackets() {
         assert_eq!(format_host_for_url("127.0.0.1"), "127.0.0.1");
         assert_eq!(format_host_for_url("192.168.1.1"), "192.168.1.1");
-        assert_eq!(format_host_for_url("0.0.0.0"), "0.0.0.0");
+        assert_eq!(format_host_for_url("0.0.0.0"), "127.0.0.1");
     }
 
     #[test]
@@ -336,6 +416,32 @@ mod tests {
         assert!(
             json.contains(r#""url": "http://[::1]:3000/mcp""#),
             "wrong IPv6 url (should have brackets): {json}"
+        );
+    }
+
+    /// Report P3: a bind-all address must be rewritten to the loopback
+    /// host for the client URL — http://0.0.0.0:... and http://[::]:...
+    /// are not connectable by a local MCP client.
+    #[test]
+    fn test_mcp_config_http_json_bind_all_rewritten() {
+        let mut edit = EditConfig::from(&AppConfig::default());
+        edit.mcp_transport = McpTransport::Http;
+        edit.mcp_address = "0.0.0.0".to_string();
+        edit.mcp_port = 3000;
+        edit.mcp_token = "".to_string();
+        edit.mcp_auth_enabled = false;
+
+        let json = build_mcp_config_json(&edit);
+        assert!(
+            json.contains(r#""url": "http://127.0.0.1:3000/mcp""#),
+            "0.0.0.0 must be rewritten to 127.0.0.1: {json}"
+        );
+
+        edit.mcp_address = "::".to_string();
+        let json2 = build_mcp_config_json(&edit);
+        assert!(
+            json2.contains(r#""url": "http://[::1]:3000/mcp""#),
+            "unspecified IPv6 must be rewritten to [::1]: {json2}"
         );
     }
 
@@ -508,5 +614,39 @@ mod tests {
             !pin.contains("@latest"),
             "pin must never be the floating @latest tag: {pin}"
         );
+    }
+
+    // -- L-19: JSON caching --------------------------------------------------
+
+    /// L-19: unchanged inputs must reuse the cached JSON (no rebuild);
+    /// a changed input forces exactly one rebuild. Previously the panel
+    /// rebuilt the JSON (and called `std::env::current_exe()`) every frame.
+    #[test]
+    fn test_mcp_config_json_cached_when_unchanged() {
+        let mut edit = EditConfig::from(&AppConfig::default());
+        edit.mcp_transport = McpTransport::Http;
+        edit.mcp_address = "127.0.0.1".into();
+        edit.mcp_port = 3000;
+        edit.mcp_token = "tok".into();
+        edit.mcp_auth_enabled = true;
+
+        let mut cache = McpConfigCache::new(&edit);
+        assert_eq!(cache.rebuilds(), 0, "fresh cache has not rebuilt yet");
+        let first = cache.get(&edit).to_owned();
+        assert_eq!(cache.rebuilds(), 0, "first get on a fresh cache is a hit");
+
+        let second = cache.get(&edit).to_owned();
+        assert_eq!(first, second, "unchanged inputs must reuse the JSON");
+        assert_eq!(cache.rebuilds(), 0, "identical reads must not rebuild");
+
+        // A changed input forces a rebuild with the fresh value.
+        edit.mcp_port = 4000;
+        let third = cache.get(&edit).to_owned();
+        assert_ne!(first, third, "changed port must produce new JSON");
+        assert!(
+            third.contains("4000"),
+            "rebuilt JSON reflects the port: {third}"
+        );
+        assert_eq!(cache.rebuilds(), 1, "exactly one rebuild for one change");
     }
 }

@@ -7,9 +7,10 @@
 #   - push to the `release` branch → PRE-RELEASE: GitHub Release marked
 #     prerelease (never "Latest") + npm dist-tag `next`. The tag name is
 #     derived from Cargo.toml (`v` + version, which must carry a pre-release
-#     suffix like `1.3.0-rc.1`). Re-pushing an unchanged version is
-#     idempotent (an existing release and already-published npm versions are
-#     skipped).
+#     suffix like `1.3.0-rc.1` — a guard step refuses suffix-less versions
+#     on branch pushes so the stable name is never blocked). Re-pushing an
+#     unchanged version is idempotent (an existing release and
+#     already-published npm versions are skipped).
 #   - push a `v*` tag (normally on `master`) → STABLE: GitHub "Latest
 #     Release" + npm dist-tag `latest`. A tag whose name contains a hyphen
 #     (e.g. `v1.3.0-rc.1`) or that was pushed from the `release` branch is
@@ -100,8 +101,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install Rust (pinned by rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rust-src
           targets: ${{ matrix.target }}
@@ -180,6 +181,21 @@ jobs:
             echo "tag=v${ver}" >> "$GITHUB_OUTPUT"
           fi
 
+      # A branch push is the pre-release channel: the version MUST carry a
+      # pre-release suffix. Publishing a suffix-less version (e.g. `v1.3.2`)
+      # as a prerelease would create a GitHub Release and npm version under
+      # that stable name, permanently blocking the later stable release.
+      - name: Guard release branch carries a pre-release suffix
+        if: github.ref_type == 'branch'
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if [[ "${TAG}" != *-* ]]; then
+            echo "::error::release branch must carry a pre-release suffix (e.g. 1.3.2-rc.1) in Cargo.toml version; refusing to pre-release a stable version name"
+            exit 1
+          fi
+
       - name: Skip when the release already exists
         id: exists
         shell: bash
@@ -206,7 +222,7 @@ jobs:
 
       - name: Generate bilingual release notes
         run: |
-          tag="${GITHUB_REF_NAME}"
+          tag="${{ steps.version.outputs.tag }}"
           repo="${GITHUB_REPOSITORY}"
           base_url="https://github.com/${repo}/releases/download/${tag}"
 

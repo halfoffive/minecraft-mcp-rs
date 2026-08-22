@@ -5,6 +5,300 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`BotError::EntityNotFound` / `UNKNOWN_ENTITY_ID`:** entity-not-found now
+  travels as `RESOURCE_NOT_FOUND` with `reason: entity_not_found` + `entity_id`
+  (F-34), and entities missing from the live ECS index use the `u32::MAX`
+  sentinel instead of collapsing to id 0 (F-27).
+- **Real JSON-RPC dispatch-layer tests:** the generated 41-tool registry is
+  snapshotted (names + read/destructive annotations), `tools/call` is driven
+  through an in-memory rmcp duplex transport (happy path, unknown tool, and
+  malformed arguments), and the axum auth wrapper's 401 shape is exercised
+  with `tower::ServiceExt::oneshot` (F-3). `tower` is now a dev-dependency.
+
+- **`BotActions::goto_with_deadline`:** the fly timeout now reaches the
+  pathfinder itself (audit M-1). `goto_with_margin_with_timeout` passes its
+  deadline through to the new `goto_with_deadline` (default: plain `goto`),
+  so a flight with `fly_timeout_secs > command_timeout_secs` no longer dies
+  at the 30 s command envelope with `PathfindingFailed("pathfinding timed
+  out after 30s")`.
+- **`BotCommandSender::send_command_with_timeout`:** explicit per-call
+  timeout override on the command channel, used to bound the live `/seed`
+  commands probe to 3 s (audit L-18).
+- **`SharedState::world_view_cache_meta()` + `WorldViewCacheMeta`:** the UI
+  preview panel now reads only the lightweight annotation + `snapshot_seq`
+  pair instead of cloning the whole cache entry (up to ~700 KB of base64 PNG
+  per frame) just to decide whether to rebuild its texture (audit M-11).
+- **UI `McpConfigCache` + `ChatCache`:** per-frame allocation cuts (audit
+  L-19/L-20). The MCP Config panel caches its pretty-printed JSON and the
+  resolved executable path, rebuilding only when the config changes; the
+  Status panel caches the chat-log rendering until the chat cursor moves.
+- **Single-entry response cache for `get_nearby_blocks`:** keyed on
+  `(snapshot_seq, radius, filter_type, top_only, max_blocks)` so an LLM
+  polling loop skips the O(n) full-snapshot scan on every call (audit L-17).
+- **`BotError::ContainerNotOpen`:** "no container is currently open" now
+  maps to its own JSON-RPC code -32010 (`reason: container_not_open`,
+  retryable false) so MCP clients can distinguish a runtime-state error
+  from invalid parameters (audit L-9).
+- **`max_entities` parameter for `get_nearby_entities`:** caps the response
+  (default 500, max 10000) with an honest `truncated` flag (audit L-13).
+- **Compound mining equips tools from the main inventory:** when the best
+  tool lives only in the main inventory (slots 9-35), the mine flow now
+  dispatches `MoveItemToHotbar` + `SwitchHotbarSlot` before digging
+  (`ToolSelection` gained `item_id`) instead of silently digging with the
+  held item (audit H-1).
+- **Monotonic activity stamps:** `last_command_at` / MCP-request activity
+  now store nanos since a process-start `Instant` anchor instead of
+  wall-clock epoch milliseconds, so an NTP jump can no longer stall the
+  snapshot-relaxation probe or wedge the headless idle watchdog (audit
+  L-23).
+
+### Changed
+
+- **`send_chat` rejects `/`-prefixed messages** (F-2): azalea forwards a
+  leading `/` as a server command packet, which would bypass
+  `execute_command`'s rejection-feedback verification. The MCP layer now
+  returns `InvalidParams` and points callers at `execute_command`.
+- **Compound `Act` envelopes and budgets (F-1):** `Act(Mine)` /
+  `Act(CollectItems)` use the longer `max(command, fly)` envelope like
+  `Act(Fly)`; `execute_mine_block_with_budget` returns an honest partial
+  result before dispatching `BreakBlock` when the mine sleep + verification
+  cannot fit, and `collect_items` never rounds a per-target share above the
+  remaining budget (the 2 s floor now stops the loop instead).
+- **Mining-time model corrected (F-7/F-20):** wrong-tool / under-tier
+  breaking now uses vanilla's independent 100-tick branch
+  (`hardness × 5 / speed`, e.g. stone by hand = 7.5 s, not 11.25 s), and
+  `calculate_mine_time` prices a correct-but-too-weak tool (wood pickaxe on
+  iron ore) as non-harvest breaking.
+- **`modify_snapshot` rebuilds `block_index`** after the mutation closure, so
+  callers that mutate `blocks` no longer inherit a stale index (F-6).
+- **Config validation hardened:** HTTP + non-loopback bind + auth disabled is
+  rejected (F-9); `mc_address` must be a real IP/hostname (F-23);
+  `from_env` reconciles `reconnect_max_delay_ms` up to
+  `reconnect_initial_delay_ms` so one bad cross-field pair cannot discard the
+  whole env config (F-8); the post-validation fallback re-applies `--stdio`
+  (F-8).
+- **Snapshot scanner uses the dimension's real `min_y`** (F-11), deferred
+  overflow chunks keep their individual dirty-block entries until the full
+  scan runs (F-26), and failed snapshot builds retry after 250 ms instead of
+  a full interval (F-31).
+- **`place_block` success message:** a verified placement whose snapshot
+  inventory has not caught up reports the hotbar slot instead of the
+  misleading "(empty slot)" label (F-33).
+- **`walk_direction` computes its origin from the live position** with the
+  snapshot as fallback (F-25).
+- **Command chat/command lines are capped at 256 characters** so an LLM
+  cannot trigger the vanilla "Chat message too long" disconnect (F-22).
+- **Timeout documentation:** the command channel now explicitly documents
+  that a timeout is not cancellation and retries can duplicate side effects
+  (F-10).
+- **`place_block` now places the block AT exactly `(x, y, z)`** (breaking
+  wire change, audit H-2): the executor right-clicks the cell below the
+  target (azalea's fixed Up-face convention), pre-checks `y` in `-63..=320`
+  (`y=-64` is rejected), that the click target is loaded, and that the
+  effect cell is empty, auto-approaches when farther than 4.5 blocks, and
+  verifies the placement by polling the snapshot. Failures return an honest
+  `success:false` instead of the historical "success" at `(x, y+1, z)`.
+- **Chat tools return the serialized `BotResult` JSON object** (breaking
+  wire change, audit L-12): `send_chat`, `execute_command` and
+  `set_game_mode` now return `{success, message, data}` like every other
+  action tool, instead of bare message strings.
+- **`get_nearby_entities` returns an object** (breaking wire change, audit
+  L-13): `{"entities": [...], "count": N, "truncated": bool}` instead of a
+  bare JSON array, matching `get_nearby_blocks`' object shape.
+- **Rustdoc link hygiene:** all 27 `cargo doc` warnings fixed — unresolved
+  intra-doc links resolved or demoted to plain code spans, public docs no
+  longer link private items, one redundant explicit link target removed;
+  a new `[lints.rustdoc]` baseline denies `broken_intra_doc_links`,
+  `private_intra_doc_links` and `redundant_explicit_links` so
+  `cargo doc --no-deps` stays warning-free.
+
+### Fixed
+
+- **Cancel-window config restarts consume `session_was_online`** (F-12): a
+  leaked latch previously made the next first-connect failure enter the
+  infinite-backoff branch while clearing `last_error` (silent permanent
+  reconnect).
+- **`test_goto_notify_clone_shares_state` now actually polls the waiter**
+  (F-15); proptest properties that were tautological or had an INFINITY
+  escape hatch were strengthened (F-16); the duplicated inline throttle
+  tests in `events.rs` were removed in favour of the real
+  `SnapshotUpdater` coverage (F-17); process-wide i18n mutations are
+  serialised by `I18N_TEST_LOCK` (F-18).
+- **UI settings coverage:** a parameterized case for every `EditConfig`
+  field drives dirty → apply → `read_config`, so a field whose widget forgets
+  the dirty flag is caught (F-5).
+- **Docs/comment drift:** rmcp version and the 41-tool count in
+  `server.rs`, the truncated `cli.rs` doc sentence, the duplicated
+  `plan_dirty_chunk_scan` docs, and the bogus `SeqCst` atomic-toggle comment
+  were fixed; `src/mcp/mod.rs` (dead file shadowed by the inline module) was
+  removed; `ConnectionManager::disconnect` was renamed to
+  `simulate_offline_for_tests` and restricted to tests (F-24/F-28/F-29/F-35/
+  F-37).
+- **Compound mine flow no longer fails when the best tool is only in the
+  main inventory (H-1):** the mining wait was computed with the best tool's
+  speed while the bot actually dug with its hand-held item, so
+  `wait_for_block_gone` always timed out and every `act(Mine)` /
+  `break_block` (default path) returned `MiningInterrupted`. The flow now
+  moves the tool to the hotbar first (see Added); the mock `mine_block`
+  also enforces the held-item speed so the bug is caught by tests.
+- **`place_block` no longer reports fake success or wrong coordinates
+  (H-2):** see the breaking change above; a placed block now occupies the
+  requested cell and the result reflects verification.
+- **`nether_gold_ore` harvest level corrected to iron+ (H-3):** vanilla
+  1.21 requires an iron pickaxe or better for drops; it is now level 2 in
+  `HARVEST_LEVEL` instead of level 1, so a stone pickaxe is no longer
+  selected for it (which previously mined with no drops while reporting
+  success). The documented conservative over-requirements (`coal_ore`,
+  `netherrack`, `end_stone`, `purpur`, `deepslate`, `nether_quartz_ore` at
+  level 1 vs vanilla 0) are kept deliberately.
+- **`fly_timeout_secs` is actually honoured (M-1):** the pathfinder no
+  longer caps long flights at the 30 s command timeout.
+- **Reconnect backoff counters reset after a successful session (M-2):**
+  `attempt` / `first_connect_attempts` no longer grow monotonically across
+  sessions; one success restores the full 3-attempt first-connect window
+  and fresh backoff.
+- **Config-restart during the TCP-connect window no longer drops the
+  restart (M-3):** the connect-cancel branch now checks the restart flag,
+  so an agent changing `mc_address` while the TCP connect is in flight
+  still triggers the reconnect instead of leaving the GUI bot offline.
+- **`smart_move` uses the live position for its reached check (M-4):** a
+  long successful move is no longer misreported as an "obstacle" because
+  the throttled snapshot lagged the arrival.
+- **`walk_direction` / `collect_items` use the movement reply margin
+  (M-5):** both route through the margin wrapper so the executor replies
+  before the command envelope times out; `collect_items` splits
+  `command_timeout - MOVEMENT_REPLY_MARGIN` across targets (2 s floor per
+  target) and reports honest partial results on budget exhaustion.
+- **`use_item_on_block` occupancy pre-check applies only to placement items
+  (M-6):** flint-and-steel and other non-placement items no longer get
+  rejected because the effect cell is occupied, nor do they trigger the
+  auto-approach walk.
+- **`place_block` MCP message rewrite gated on success (M-7):** a failed
+  placement no longer gets its failure reason overwritten by a "Placed X
+  at ..." message.
+- **UI settings no longer roll back agent-applied config on Connect (M-8):**
+  the edit buffer is refreshed from the current config, so
+  `update_settings` changes survive a user pressing Connect.
+- **MCP language changes no longer fought by the settings panel (M-9):**
+  the language dropdown now syncs from the config; `i18n::set` has a single
+  writer.
+- **Headless supervisor / connect-loop restart-flag race resolved (M-10):**
+  the connect loop is the sole consumer of `take_config_restart` while a
+  bot thread lives; the supervisor consumes it only when no thread exists.
+  This removes the double-session / server-kick loop.
+- **UI preview rebuild keyed on `snapshot_seq` (M-11):** two snapshot
+  builds in the same second that change only block types now refresh the
+  texture.
+- **World-view heading arrow correct for non-zero yaw (M-12):** the
+  renderer converts the stored degrees to radians before `sin` / `cos`
+  (previously the yaw=0 test coincidence made the bug invisible).
+- **`find_standable_neighbor` never returns fluid floors or positions above
+  y=320 (M-13/M-14):** water/lava no longer count as standable floors and
+  y+1 candidates are clipped to the world height, so the bot no longer
+  pathfinds onto a lake or out of the world.
+- **Wrong-tool mining-time penalty only for blocks that truly require a
+  tool (L-1):** `calculate_mine_time` no longer applies the 5x wrong-tool
+  penalty to blocks vanilla can mine by hand (`dirt`, `sand`, wood, wool),
+  which used to estimate 3.75 s for a 0.75 s break.
+- **Snapshots no longer contain air entries (L-4):** the dirty-block
+  single-read path filters air like the dirty-chunk scan, so a broken block
+  disappears from the snapshot (and `block_index`) instead of lingering as
+  air.
+- **`execute_command` trims whitespace before prepending `/` (L-5):**
+  `" gamemode creative"` no longer becomes the unknown command
+  `"/ gamemode creative"`.
+- **`give_item` propagates executor failure instead of claiming success
+  (L-6):** a `/give` the server accepts but does not honour no longer
+  reports "Gave N x ..."; the `BotResult`'s `success`/feedback is surfaced.
+- **`give_item` strips the `minecraft:` namespace in the swap fallback
+  (L-7):** `minecraft:water_bucket` now matches the inventory's
+  `water_bucket` instead of failing `InvalidParams`.
+- **`walk_direction` rejects up/down at the MCP layer (L-8):** the
+  validation now matches the documented contract instead of dispatching a
+  command the executor rejects.
+- **"no container open" returns `ContainerNotOpen` instead of
+  `InvalidParams` (L-9):** see the new error code above.
+- **Env-var config validates string fields per-field (L-11):** one bad
+  `MINECRAFT_MCP_MCP_ADDRESS` no longer discards the entire environment
+  configuration.
+- **`attack_entity` bounds-checks `entity_id` before the snapshot scan
+  (L-14):** out-of-range ids fail fast with `InvalidParams` instead of a
+  full snapshot scan.
+- **`act` no longer deep-clones the snapshot (L-15):** the per-call
+  `Arc::make_mut` full-snapshot clone is replaced by a local `SelfPlayer`
+  override.
+- **`get_server_info` / `give_item` commands probe bounded to 3 s (L-18):**
+  the live `/seed` probe uses `send_command_with_timeout`, so a busy
+  executor can no longer stall these tools for the full command timeout.
+- **Stale config-restart flag discarded at connect entry (L-22):** an
+  explicit Connect after an offline `update_settings` no longer turns the
+  next manual Disconnect into a surprise reconnect.
+- **Activity probes immune to wall-clock jumps (L-23):** monotonic stamps
+  (see Added) keep the snapshot-interval and idle-watchdog decisions
+  correct across NTP adjustments.
+- **`update_settings` commits the validated candidate:** the P3 refactor
+  moved the `i18n::set` side effect after `validate()` but accidentally
+  dropped the `SharedState::update_config` write, so the tool replied with
+  the `applied` fields while the live config stayed unchanged. The
+  validated candidate is now written back to the live config before any
+  reconnect/restart side effect.
+- **MCP Config panel rewrites wildcard bind addresses in the client URL:**
+  binding to `0.0.0.0` / `::` now generates `http://127.0.0.1:...` /
+  `http://[::1]:...` client URLs instead of the unconnectable
+  `http://0.0.0.0:...` / `http://[::]:...` forms.
+
+### Removed
+
+- **Deprecated `find_best_tool_in_inventory` shim:** zero remaining callers
+  (audit L-25).
+- **Production-dead `WorldSnapshot::blocks_in_radius` /
+  `entities_in_radius` helpers:** test-only Euclidean filters (audit L-26).
+
+### CI
+
+- **Pre-release download links use the derived version tag (R-1):** release
+  notes on the pre-release channel previously used `GITHUB_REF_NAME`
+  ("release"), so every download link in the body 404'd; the body now uses
+  `steps.version.outputs.tag`.
+- **Release-branch pushes with a suffix-less version are refused (R-2):** a
+  guard step fails the workflow when `Cargo.toml` on `release` lacks an
+  `-rc.N` suffix, preventing a premature `vX.Y.Z` prerelease that would
+  block the stable release forever.
+- **Docs site builds via `npm ci` against the committed lockfile (R-3):**
+  `bun install` (which ignores `package-lock.json`) is replaced by
+  `npm ci`; `actions/configure-pages` bumped to v5; leftover VitePress
+  template comments removed.
+- **Lint gate covers rustdoc + doctests and stops hiding failures:** the
+  develop lint job now runs `cargo doc --locked --no-deps` (kept at zero
+  warnings by the `[lints.rustdoc]` deny baseline), runs tests with
+  `--no-fail-fast` so one broken target no longer masks the results of the
+  remaining ones, and covers doctests explicitly via `cargo test --doc`
+  (they are not part of `--all-targets`).
+- **Weekly supply-chain audit (`audit.yml`):** new workflow runs
+  `cargo audit` over every committed lockfile (root plus vendored
+  `patches/rmcp` / `patches/rsa`) on Cargo.lock changes, a weekly schedule,
+  or manual dispatch. Blocking gate: the first run's findings were triaged —
+  `webbrowser` bumped to 1.2.4 (RUSTSEC-2026-0257) and `event-listener` to
+  5.4.2 (RUSTSEC-2026-0221); the unfixable remainder (hickory-proto pinned
+  by azalea, quick-xml pinned by wayland-scanner, unmaintained paste /
+  ttf-parser) is documented per-entry in the new `.cargo/audit.toml` (the
+  only location cargo-audit 0.22 discovers). Each
+  audit leg runs in its lockfile's directory so per-directory triage
+  configs stay isolated.
+- **Nightly toolchain pinned to a DATE (`nightly-2026-05-28`):** a bare
+  `nightly` let CI pick up the 2026-08-21 upstream compiler, which breaks
+  `azalea-core` 0.15.1 compilation (E0284, const-generic inference in
+  `FixedBitSet`) — nothing this repo can patch. The pin makes CI builds
+  reproducible; both workflows now install via
+  `actions-rust-lang/setup-rust-toolchain@v1`, which honors
+  `rust-toolchain.toml` (the previous `dtolnay/rust-toolchain@nightly`
+  always forced the latest nightly via `RUSTUP_TOOLCHAIN`, ignoring the
+  pin). Bumping the date is part of dependency-upgrade work.
+
 ## [1.3.1] - 2026-08-16
 
 ### Added

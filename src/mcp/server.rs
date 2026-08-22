@@ -1,11 +1,11 @@
 //! MCP server setup, transport, and request dispatch.
 //!
-//! Uses rmcp 1.7.0 with `#[tool_router]`/`#[tool_handler]` macros to define
-//! 25+ MCP tools. All logging goes to stderr via `tracing`.
+//! Uses rmcp 1.8.0 with `#[tool_router]`/`#[tool_handler]` macros to define
+//! 41 MCP tools. All logging goes to stderr via `tracing`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     Router,
@@ -85,7 +85,7 @@ impl McpBotServer {
 }
 
 // ---------------------------------------------------------------------------
-// Tool Router — 29 MCP tool stubs
+// Tool Router — 41 MCP tool registrations
 // ---------------------------------------------------------------------------
 
 #[tool_router]
@@ -161,7 +161,11 @@ impl McpBotServer {
         &self,
         Parameters(input): Parameters<NearbyEntitiesInput>,
     ) -> Result<String, BotError> {
-        crate::mcp::tools_query::get_nearby_entities(&self.state, input.radius)
+        crate::mcp::tools_query::get_nearby_entities_capped(
+            &self.state,
+            input.radius,
+            input.max_entities,
+        )
     }
 
     #[tool(
@@ -311,7 +315,7 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Place a block at the given position",
+        description = "Place a block at the given position; the placed block occupies exactly (x, y, z). Placement is verified against the world after the click — success is reported only when the block was observed at the target. y must be in -63..=320; y=-64 is rejected because the clicked block would be at y=-65, outside the world.",
         annotations(destructive_hint = true)
     )]
     async fn place_block(
@@ -605,8 +609,13 @@ impl ServerHandler for McpBotServer {
 
 /// Start the MCP server on stdio transport.
 ///
-/// This function blocks until the transport is closed. All logging goes to
-/// stderr; stdout is reserved for MCP JSON-RPC messages.
+/// This function blocks until the transport is closed, the shutdown token
+/// fires, an OS Ctrl+C is received, or — headless only — the idle watchdog
+/// fires after `HEADLESS_IDLE_TIMEOUT` without any MCP request activity.
+/// It does NOT simply wait for stdin EOF: on Windows a client host may hold
+/// both pipe ends open so EOF never arrives, hence the raced exit paths.
+/// All logging goes to stderr; stdout is reserved for MCP JSON-RPC
+/// messages.
 ///
 /// The `receiver` slot is handed to the server so the `connect_bot` tool can
 /// spawn a bot connection using the same receiver the UI path uses.
@@ -615,7 +624,7 @@ impl ServerHandler for McpBotServer {
 /// MCP client has gone away (stdin EOF never arrives on Windows, and the
 /// client may hold both pipe ends open) would otherwise linger forever.
 /// With the watchdog the process exits once no MCP request has been received
-/// for [`HEADLESS_IDLE_TIMEOUT`] — see [`is_headless_idle`].
+/// for `HEADLESS_IDLE_TIMEOUT` — see `is_headless_idle`.
 pub async fn serve_stdio(
     state: Arc<SharedState>,
     sender: BotCommandSender,
@@ -628,8 +637,9 @@ pub async fn serve_stdio(
     let state_for_status = Arc::clone(&state);
     state_for_status.set_mcp_server_status(McpServerStatus::Stdio);
     // Anchor for the idle watchdog: a fresh process gets a full grace period
-    // even if the client never dispatches a command.
-    let started_at_ms = now_epoch_ms();
+    // even if the client never dispatches a request. Monotonic (L-23) — a
+    // wall-clock NTP jump cannot shorten or lengthen the measured idle span.
+    let started_at = Instant::now();
     let server = McpBotServer::new(state, sender, receiver);
     let (stdin, stdout) = stdio();
 
@@ -654,7 +664,7 @@ pub async fn serve_stdio(
                 _ = tokio::signal::ctrl_c() => {
                     info!("Ctrl+C received — shutting down MCP stdio server");
                 }
-                _ = headless_idle_watchdog(Arc::clone(&state_for_status), started_at_ms), if headless => {
+                _ = headless_idle_watchdog(Arc::clone(&state_for_status), started_at), if headless => {
                     info!("headless idle watchdog fired — no MCP request for {:?}, shutting down", HEADLESS_IDLE_TIMEOUT);
                 }
             }
@@ -664,6 +674,11 @@ pub async fn serve_stdio(
             error!(error = %e, "MCP server failed");
             state_for_status.set_mcp_server_status(McpServerStatus::Failed(msg.clone()));
             state_for_status.set_last_error(msg);
+            // Report the FAILURE, not a later "Stopped": without the return
+            // the unconditional Stopped write below overwrote the Failed
+            // status the moment it ran, and the UI only ever showed a
+            // generic "stopped" (the HTTP path never had this problem).
+            return;
         }
     }
 
@@ -679,7 +694,7 @@ pub async fn serve_stdio(
 /// arrives and stdout writes may never fail. Ten minutes with zero MCP
 /// request activity is a strong signal the session is abandoned.
 ///
-/// The activity probe is MCP-request activity ([`SharedState::mcp_activity_at_ms`]),
+/// The activity probe is MCP-request activity ([`SharedState::mcp_activity_at`]),
 /// NOT bot-command activity: ZCode spawns per-session probe connections
 /// that send initialize/list_tools but never dispatch a bot command.
 /// Keying the watchdog on command activity killed those healthy sessions
@@ -689,28 +704,29 @@ const HEADLESS_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 /// Poll period for the headless idle watchdog.
 const HEADLESS_IDLE_POLL: Duration = Duration::from_secs(5);
 
-/// Current wall-clock time in epoch milliseconds.
-fn now_epoch_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 /// Pure headless-idle decision, unit-testable without a running server.
 ///
 /// Idle means BOTH the session has been alive for at least `timeout` (a
 /// fresh process gets the full grace period before its first request) AND
 /// no MCP request has been received within `timeout`.
+///
+/// All three instants are monotonic (L-23): elapsed time is measured with
+/// `saturating_duration_since`, never with wall-clock epoch arithmetic, so
+/// an NTP jump can neither fire the watchdog early (forward jump) nor keep
+/// the session alive forever (backward jump saturating `now - last` to 0).
 fn is_headless_idle(
-    now_ms: u64,
-    last_activity_ms: u64,
-    started_at_ms: u64,
+    now: Instant,
+    last_activity: Option<Instant>,
+    started_at: Instant,
     timeout: Duration,
 ) -> bool {
-    let timeout_ms = timeout.as_millis() as u64;
-    now_ms.saturating_sub(started_at_ms) >= timeout_ms
-        && now_ms.saturating_sub(last_activity_ms) >= timeout_ms
+    // `None` (no request ever) means the grace-period check above governs —
+    // the old epoch-ms code treated the never-stamped 0 as "idle" too
+    // (epoch now minus 0 is always >= timeout).
+    let activity_idle = last_activity
+        .map(|t| now.saturating_duration_since(t) >= timeout)
+        .unwrap_or(true);
+    now.saturating_duration_since(started_at) >= timeout && activity_idle
 }
 
 /// Resolve once the headless stdio session has been idle (no MCP request
@@ -718,13 +734,13 @@ fn is_headless_idle(
 /// coarse cadence; request activity is recorded by
 /// [`SharedState::mark_mcp_activity`] at the entry of every
 /// `ServerHandler` request method.
-async fn headless_idle_watchdog(state: Arc<SharedState>, started_at_ms: u64) {
+async fn headless_idle_watchdog(state: Arc<SharedState>, started_at: Instant) {
     loop {
         tokio::time::sleep(HEADLESS_IDLE_POLL).await;
         if is_headless_idle(
-            now_epoch_ms(),
-            state.mcp_activity_at_ms(),
-            started_at_ms,
+            Instant::now(),
+            state.mcp_activity_at(),
+            started_at,
             HEADLESS_IDLE_TIMEOUT,
         ) {
             return;
@@ -818,7 +834,8 @@ fn is_request_authorized(auth_enabled: bool, expected_token: &str, headers: &Hea
     is_bearer_authorized(headers, expected_token)
 }
 
-/// Axum middleware that enforces the configured Bearer token.///
+/// Axum middleware that enforces the configured Bearer token.
+///
 /// Returns 401 Unauthorized for missing, empty, or mismatched tokens when
 /// authentication is enabled (`mcp_auth_enabled`). If authentication is
 /// disabled, all requests pass through. Valid requests are forwarded to the
@@ -948,6 +965,220 @@ mod tests {
     use crate::channel::create_command_channel;
     use crate::config::AppConfig;
     use axum::http::HeaderValue;
+    use std::collections::HashSet;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tower::ServiceExt;
+
+    /// Construct the same `(state, server)` pair every server test uses.
+    fn make_server() -> (Arc<SharedState>, McpBotServer) {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(Arc::clone(&state), sender, receiver);
+        (state, server)
+    }
+
+    /// Drive the REAL rmcp JSON-RPC transport over an in-memory duplex pair.
+    /// Returns the JSON-RPC response for one `tools/call` request. This is
+    /// the dispatch-layer coverage F-3 asked for: the request goes through
+    /// `tool_router().call`, parameter deserialization, the `#[tool]` macro
+    /// registration, and `BotError -> ErrorData` serialization — none of
+    /// which is exercised by calling a handler method directly.
+    async fn json_rpc_call(request: serde_json::Value) -> serde_json::Value {
+        let (state, server) = make_server();
+        let _ = state;
+
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        let (server_r, server_w) = tokio::io::split(server_io);
+        let transport =
+            rmcp::transport::async_rw::AsyncRwTransport::<rmcp::RoleServer, _, _>::new_server(
+                server_r, server_w,
+            );
+        let running = rmcp::service::serve_directly(server, transport, None);
+        let cancel = running.cancellation_token();
+        let handle = tokio::spawn(running.waiting());
+
+        let (client_r, mut client_w) = tokio::io::split(client_io);
+        let mut line = serde_json::to_vec(&request).expect("request serializes");
+        line.push(10); // newline byte
+        client_w.write_all(&line).await.expect("write request");
+        client_w.flush().await.expect("flush request");
+
+        let mut reader = tokio::io::BufReader::new(client_r);
+        let mut reply = Vec::new();
+        reader.read_until(10, &mut reply).await.expect("read reply");
+        let response: serde_json::Value = serde_json::from_slice(&reply).expect("valid JSON reply");
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+        response
+    }
+
+    /// F-3(a): the generated registry must contain the full tool surface with
+    /// the annotations the MCP client relies on. If a `#[tool]` registration
+    /// silently drops, this test goes red.
+    #[test]
+    fn test_tool_registry_lists_all_tools_with_annotations() {
+        let tools = McpBotServer::tool_router().list_all();
+        assert_eq!(
+            tools.len(),
+            41,
+            "the registry snapshot must cover every #[tool]"
+        );
+
+        let names: HashSet<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
+        // Spot-check categories whose macro drift has burned us before.
+        for name in [
+            "get_self_info",
+            "get_nearby_blocks",
+            "send_chat",
+            "execute_command",
+            "break_block",
+            "act",
+            "update_settings",
+            "connect_bot",
+            "disconnect_bot",
+        ] {
+            assert!(names.contains(name), "missing tool registration: {name}");
+        }
+
+        let annotations = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.annotations.clone())
+                .unwrap_or_else(|| panic!("missing tool: {name}"))
+        };
+        assert_eq!(
+            annotations("get_self_info").read_only_hint,
+            Some(true),
+            "read_only annotation must be preserved"
+        );
+        assert_eq!(
+            annotations("send_chat").destructive_hint,
+            Some(true),
+            "destructive annotation must be preserved"
+        );
+        assert_eq!(
+            annotations("execute_command").destructive_hint,
+            Some(true),
+            "destructive annotation must be preserved"
+        );
+    }
+
+    /// F-3(b): drive `tools/call` through the real JSON-RPC transport —
+    /// happy path and an unknown-tool -32602.
+    #[tokio::test]
+    async fn test_call_tool_dispatch_layer_happy_path_and_invalid_tool() {
+        let response = json_rpc_call(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "send_chat",
+                "arguments": { "message": "hello" }
+            }
+        }))
+        .await;
+        assert_eq!(response["id"], 1);
+        assert_eq!(
+            response["error"]["code"], -32000,
+            "offline error must round-trip: {response}"
+        );
+        assert_eq!(response["error"]["data"]["reason"], "bot_disconnected");
+
+        let invalid = json_rpc_call(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "not_a_tool",
+                "arguments": {}
+            }
+        }))
+        .await;
+        assert_eq!(invalid["id"], 2);
+        assert_eq!(
+            invalid["error"]["code"], -32602,
+            "unknown tool must be INVALID_PARAMS: {invalid}"
+        );
+    }
+
+    /// F-3(c): exercise the axum wrapper around `bearer_auth_middleware`
+    /// (header extraction + 401 response shape) with `tower::ServiceExt::oneshot`.
+    /// The pure decision function is unit-tested elsewhere; this covers the
+    /// part a real HTTP client hits.
+    #[tokio::test]
+    async fn test_bearer_auth_middleware_http_wrapper_401_shape() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        state.update_config(|cfg| {
+            cfg.mcp_auth_enabled = true;
+            cfg.mcp_token = "secret".into();
+        });
+
+        let app: axum::Router = axum::Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .layer(from_fn_with_state(
+                Arc::clone(&state),
+                bearer_auth_middleware,
+            ))
+            .with_state(state);
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .body(axum::body::Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router call");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let bytes = axum::body::to_bytes(unauthorized.into_body(), 1024)
+            .await
+            .expect("body readable");
+        assert_eq!(&bytes[..], b"Unauthorized");
+
+        let authorized = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .header("authorization", "Bearer secret")
+                    .body(axum::body::Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router call");
+        assert_eq!(authorized.status(), StatusCode::OK);
+    }
+
+    /// F-3(b): malformed arguments must surface the rmcp deserialization
+    /// error through the transport, not panic or hang.
+    #[tokio::test]
+    async fn test_call_tool_dispatch_layer_malformed_arguments() {
+        let response = json_rpc_call(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "move_to",
+                "arguments": { "x": 1 }
+            }
+        }))
+        .await;
+        assert_eq!(response["id"], 3);
+        // rmcp surfaces argument-deserialization failures as an
+        // `isError: true` tool result (spec-recommended tool-level failure),
+        // unlike BotError which maps to a JSON-RPC error per F-32.
+        assert_eq!(response["result"]["isError"], true, "got: {response}");
+        assert!(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("missing field")),
+            "got: {response}"
+        );
+    }
 
     /// `shutdown_signal` resolves when the shutdown token is cancelled —
     /// this is the path the UI (window close) and headless stdio client exit
@@ -967,45 +1198,73 @@ mod tests {
 
     /// The headless idle watchdog must NOT fire while the session is younger
     /// than the timeout (a fresh process gets a full grace period even
-    /// before its first command).
+    /// before its first request).
     #[test]
     fn test_is_headless_idle_grace_period_before_first_command() {
         let timeout = Duration::from_secs(600);
-        let started = 1_000_000;
-        // No command ever dispatched (last_command_ms = 0) but only 10
-        // minutes... 60 seconds after start: not idle yet.
-        assert!(!is_headless_idle(started + 60_000, 0, started, timeout));
-        // 10 minutes elapsed with zero commands: abandoned — idle.
-        assert!(is_headless_idle(started + 600_000, 0, started, timeout));
-    }
-
-    /// Recent command activity resets the idle clock.
-    #[test]
-    fn test_is_headless_idle_recent_command_resets() {
-        let timeout = Duration::from_secs(600);
-        let started = 1_000_000;
-        // 30 minutes after start, but a command arrived 5 minutes ago.
+        let started = Instant::now();
+        // No request ever received (None) but only 60 seconds after start:
+        // not idle yet.
         assert!(!is_headless_idle(
-            started + 1_800_000,
-            started + 1_500_000,
+            started + Duration::from_secs(60),
+            None,
             started,
             timeout
         ));
-        // Same session, last command 11 minutes ago: idle.
+        // 10 minutes elapsed with zero requests: abandoned — idle.
         assert!(is_headless_idle(
-            started + 1_800_000,
-            started + 1_140_000,
+            started + Duration::from_secs(600),
+            None,
             started,
             timeout
         ));
     }
 
-    /// A clock anomaly (now before the anchor) must never report idle.
+    /// Recent request activity resets the idle clock.
+    #[test]
+    fn test_is_headless_idle_recent_activity_resets() {
+        let timeout = Duration::from_secs(600);
+        let started = Instant::now();
+        let now = started + Duration::from_secs(1_800);
+        // 30 minutes after start, but a request arrived 5 minutes ago.
+        assert!(!is_headless_idle(
+            now,
+            Some(started + Duration::from_secs(1_500)),
+            started,
+            timeout
+        ));
+        // Same session, last request 11 minutes ago: idle.
+        assert!(is_headless_idle(
+            now,
+            Some(started + Duration::from_secs(1_140)),
+            started,
+            timeout
+        ));
+    }
+
+    /// A clock "jump" can never make the decision fire early. With
+    /// monotonic stamps a backward jump is impossible by construction; the
+    /// only remaining anomaly is a caller passing an anchor in the future,
+    /// which `saturating_duration_since` resolves to zero elapsed — never
+    /// idle.
     #[test]
     fn test_is_headless_idle_clock_anomaly_safe() {
         let timeout = Duration::from_secs(600);
-        let started = 1_000_000;
-        assert!(!is_headless_idle(999_000, 0, started, timeout));
+        let now = Instant::now();
+        // Anchor ahead of `now` (the old epoch-ms backward-jump case):
+        // elapsed since the anchor saturates to zero → not idle.
+        assert!(!is_headless_idle(
+            now,
+            None,
+            now + Duration::from_secs(1),
+            timeout
+        ));
+        assert!(!is_headless_idle(
+            now,
+            Some(now + Duration::from_secs(1)),
+            now + Duration::from_secs(1),
+            timeout
+        ));
     }
 
     /// Verify get_info() returns the expected server name.
@@ -1181,7 +1440,10 @@ mod tests {
         ));
         assert!(matches!(
             server
-                .get_nearby_entities(Parameters(NearbyEntitiesInput { radius: 10 }))
+                .get_nearby_entities(Parameters(NearbyEntitiesInput {
+                    radius: 10,
+                    max_entities: 500,
+                }))
                 .await,
             Err(BotError::Offline(_))
         ));

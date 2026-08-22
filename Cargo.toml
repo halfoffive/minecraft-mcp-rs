@@ -32,6 +32,8 @@ clap = { version = "4.6.6", features = ["derive", "color"] }
 # fields use parking_lot locks). Already in the dependency graph via azalea.
 [dev-dependencies]
 parking_lot = "0.12"
+# F-3: drive the axum Router with `oneshot` in the server-layer tests.
+tower = { version = "0.5", features = ["util"] }
 
 [profile.dev]
 opt-level = 1
@@ -41,6 +43,12 @@ opt-level = 3
 
 [lints.rust]
 linker_messages = "allow"
+
+# Doc-link hygiene: keep `cargo doc --no-deps` warning-free (enforced in CI).
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+redundant_explicit_links = "deny"
 
 # Local patches to resolve dependency conflicts.
 # These directories are tracked in git (see README.md for license notes).

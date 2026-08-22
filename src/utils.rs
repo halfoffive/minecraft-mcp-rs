@@ -12,6 +12,17 @@
 ///
 /// Inserts `_` before each uppercase letter (except at the start) and
 /// lowercases the result. Sufficient for azalea registry variant names.
+///
+/// **ASCII-only contract:** the input is an azalea registry name
+/// (block/item/entity variant, e.g. `IronPickaxe`), which is pure ASCII by
+/// construction. The uppercase detection uses Unicode-aware
+/// [`is_uppercase`](char::is_uppercase) but the folding uses
+/// [`to_ascii_lowercase`](char::to_ascii_lowercase), so a non-ASCII uppercase
+/// character (e.g. `É`) would emit an underscore followed by the character
+/// unchanged (not lowercased); non-ASCII lowercase passes through untouched.
+/// This is latent — no azalea registry name contains non-ASCII — but the
+/// behaviour is pinned by `test_to_snake_case_non_ascii_documented_behavior`
+/// so an accidental caller feeding non-ASCII input gets defined output.
 pub fn to_snake_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 4);
     for (i, ch) in s.chars().enumerate() {
@@ -118,6 +129,27 @@ mod tests {
         assert_eq!(to_snake_case("OakPlanks"), "oak_planks");
         assert_eq!(to_snake_case("DiamondOre"), "diamond_ore");
         assert_eq!(to_snake_case("NetheriteBlock"), "netherite_block");
+    }
+
+    /// Characterization test pinning the documented ASCII-only contract
+    /// (L-10): `is_uppercase()` is Unicode-aware but `to_ascii_lowercase()`
+    /// only folds ASCII. A non-ASCII uppercase at the start therefore passes
+    /// through unchanged (no leading underscore, no case folding); a
+    /// non-ASCII lowercase passes through untouched. Azalea registry names
+    /// are pure ASCII, so this never fires in production — the test exists
+    /// to freeze the behaviour if non-ASCII input ever reaches the helper.
+    ///
+    /// This is a characterization test: it passed immediately on the code it
+    /// documents (no behaviour was changed by the fix — only the contract was
+    /// written down).
+    #[test]
+    fn test_to_snake_case_non_ascii_documented_behavior() {
+        // 'É' is uppercase but not ASCII: no underscore inserted at position
+        // 0, and to_ascii_lowercase leaves it unchanged.
+        assert_eq!(to_snake_case("Éclair"), "Éclair");
+        // 'é' is lowercase: passes through verbatim; the ASCII 'L' still gets
+        // the underscore + lowercase treatment.
+        assert_eq!(to_snake_case("CaféLatte"), "café_latte");
     }
 
     // ── contains_ascii_case_insensitive (B5) ────────────────────────
