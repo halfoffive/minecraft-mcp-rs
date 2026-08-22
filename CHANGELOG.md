@@ -222,6 +222,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only location cargo-audit 0.22 discovers). Each
   audit leg runs in its lockfile's directory so per-directory triage
   configs stay isolated.
+- **Nightly toolchain pinned to a DATE (`nightly-2026-05-28`):** a bare
+  `nightly` let CI pick up the 2026-08-21 upstream compiler, which breaks
+  `azalea-core` 0.15.1 compilation (E0284, const-generic inference in
+  `FixedBitSet`) — nothing this repo can patch. The pin makes CI builds
+  reproducible; both workflows now install via
+  `actions-rust-lang/setup-rust-toolchain@v1`, which honors
+  `rust-toolchain.toml` (the previous `dtolnay/rust-toolchain@nightly`
+  always forced the latest nightly via `RUSTUP_TOOLCHAIN`, ignoring the
+  pin). Bumping the date is part of dependency-upgrade work.
 
 ## [1.3.1] - 2026-08-16
 

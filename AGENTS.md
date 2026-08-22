@@ -19,7 +19,7 @@ An MCP (Model Context Protocol) server backed by an actual Minecraft bot via the
 | Lint | `cargo clippy --all-targets` |
 | Doc | `cargo doc --no-deps` |
 
-Requires Rust nightly (edition 2024; `rust-toolchain.toml` pins nightly — azalea 0.15.1's build script enforces this). Dev profile uses `opt-level = 1` (with `opt-level = 3` for dependencies) for faster iteration.
+Requires Rust nightly (edition 2024; `rust-toolchain.toml` pins a nightly **date** — azalea 0.15.1's build script enforces nightly, and a bare `nightly` let a fresh upstream compiler break azalea-core in CI on 2026-08-22, E0284 in `FixedBitSet`). Bumping the pinned date is part of dependency-upgrade work: change `channel`, then verify azalea builds and the gate suite passes. Dev profile uses `opt-level = 1` (with `opt-level = 3` for dependencies) for faster iteration.
 
 ## Development workflow
 
