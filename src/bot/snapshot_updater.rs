@@ -22,7 +22,8 @@ use crate::bot::commands::canonical_player_inventory;
 use crate::snapshot::{DirtyTracker, SnapshotBuilder};
 use crate::state::SharedState;
 use crate::types::{
-    BlockEntry, BlockPos, EntityEntry, GameMode, InventorySlot, SelfPlayer, WorldSnapshot,
+    BlockEntry, BlockPos, EntityEntry, GameMode, InventorySlot, SelfPlayer, UNKNOWN_ENTITY_ID,
+    WorldSnapshot,
 };
 use crate::utils::to_snake_case;
 
@@ -99,6 +100,20 @@ impl SnapshotUpdater {
         }
     }
 
+    /// Rewind the throttle timer after a failed build (F-31).
+    ///
+    /// `check_and_update_timer` must arm the gate before the build task is
+    /// spawned, otherwise every throttled tick (~18 of 20 per second) would
+    /// spawn a wasted task. But a failed build used to leave that full
+    /// interval in place, so the next attempt had to wait an entire snapshot
+    /// period. This schedules the retry after only
+    /// [`SNAPSHOT_BUILD_RETRY_DELAY`].
+    pub(crate) fn schedule_retry_after_failure(&self) {
+        let rewind =
+            Duration::from_millis(self.interval_ms).saturating_sub(SNAPSHOT_BUILD_RETRY_DELAY);
+        *self.last_update.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now() - rewind;
+    }
+
     // ── Main tick handler ───────────────────────────────────
 
     /// Build a fresh snapshot and store it in [`SharedState`], moving the
@@ -120,6 +135,9 @@ impl SnapshotUpdater {
             }
             Err(e) => {
                 warn!("snapshot build failed: {e}");
+                // F-31: don't make the next attempt wait a full snapshot
+                // interval — retry after the short failure delay.
+                self.schedule_retry_after_failure();
                 false
             }
         }
@@ -140,20 +158,19 @@ impl SnapshotUpdater {
 /// the tracker and are scanned (nearest-first) on the next build.
 const MAX_DIRTY_CHUNKS_PER_BUILD: usize = 32;
 
+/// Retry delay after a failed snapshot build (F-31).
+const SNAPSHOT_BUILD_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+/// A dirty-chunk coordinate pair (report M-25 scan planning).
+type ChunkPair = (i32, i32);
+
 /// Plan one build's dirty-chunk scan (report M-25): keep only chunks within
 /// `chunk_scan_radius` of the player chunk, order them nearest-first (ties
 /// broken deterministically by coordinates), and cap at
 /// [`MAX_DIRTY_CHUNKS_PER_BUILD`]. Returns `(to_scan, deferred)` — the
 /// deferred chunk set stays dirty on the tracker and is scanned (again
-/// A dirty-chunk coordinate pair (report M-25 scan planning).
-type ChunkPair = (i32, i32);
-
-/// Plan one build's dirty-chunk scan (report M-25): keep only chunks within
-/// chunk_scan_radius of the player chunk, order them nearest-first (ties
-/// broken deterministically by coordinates), and cap at
-/// MAX_DIRTY_CHUNKS_PER_BUILD. Returns (to_scan, deferred) — the deferred
-/// chunk set stays dirty on the tracker and is scanned (again nearest-first)
-/// on the next build. Pure so the scheduling is unit-testable without a bot.
+/// nearest-first) on the next build. Pure so the scheduling is
+/// unit-testable without a bot.
 fn plan_dirty_chunk_scan(
     dirty_chunks: &std::collections::HashSet<ChunkPair>,
     player_chunk: ChunkPair,
@@ -175,6 +192,12 @@ fn plan_dirty_chunk_scan(
     });
     let deferred = in_radius.split_off(MAX_DIRTY_CHUNKS_PER_BUILD.min(in_radius.len()));
     (in_radius, deferred)
+}
+
+/// Absolute Y of a chunk section's bottom edge, derived from the
+/// dimension's actual `min_y` instead of the overworld default.
+fn section_base_y(world_min_y: i32, section_idx: usize) -> i32 {
+    world_min_y + (section_idx as i32) * 16
 }
 
 fn block_within_chunk_radius(pos: BlockPos, player_chunk: (i32, i32), radius: i32) -> bool {
@@ -280,6 +303,12 @@ async fn build_snapshot_inner(
     if !dirty_blocks.is_empty() || !dirty_chunks.is_empty() {
         let world = bot.world();
         let world_guard = world.read();
+        // F-11: the section base must come from the dimension's actual
+        // ChunkStorage, not the overworld default -64. Custom dimensions can
+        // shift the whole vertical range and the previous hardcoded value made
+        // every scanned BlockPos (and therefore the snapshot) vertically
+        // offset for those dimensions.
+        let world_min_y = world_guard.chunks.min_y;
 
         // M-10: Read individual dirty blocks (from block-update events)
         // rather than scanning their entire chunk. Skip blocks whose chunk
@@ -386,9 +415,9 @@ async fn build_snapshot_inner(
                 };
 
             for section_idx in sections_to_scan {
-                // Section 0 covers y=-64..-48, section 1 covers y=-48..-32,
-                // ..., section 23 covers y=304..320.
-                let section_min_y = -64 + (section_idx as i32) * 16;
+                // With the overworld default (min_y=-64, 24 sections) this
+                // covers y=-64..-48, ..., y=304..320.
+                let section_min_y = section_base_y(world_min_y, section_idx);
                 for dx in 0..16i32 {
                     for dy in 0..16i32 {
                         for dz in 0..16i32 {
@@ -439,8 +468,20 @@ async fn build_snapshot_inner(
     // chunk deferred past the per-build cap keeps its old blocks (stale but
     // consistent) and stays dirty on the main tracker (re-marked inside the
     // scan block above) so the next build scans it.
+    //
+    // F-26: individual dirty blocks inside a deferred (overflow) chunk were
+    // neither read above (the full scan was deferred) nor covered by the
+    // chunk-level mark. Marking them here used to delete their old snapshot
+    // entries with no replacement, making changed blocks "disappear" for one
+    // build. Keep those old entries until the deferred scan actually runs.
+    let overflow_set: std::collections::HashSet<ChunkPair> =
+        overflow_chunks.iter().copied().collect();
     let mut builder_tracker = DirtyTracker::new();
     for pos in &dirty_blocks {
+        let chunk = (pos.x >> 4, pos.z >> 4);
+        if overflow_set.contains(&chunk) {
+            continue;
+        }
         builder_tracker.mark_block_dirty(*pos);
     }
     for &(chunk_x, chunk_z) in &in_radius_chunks {
@@ -629,9 +670,13 @@ fn collect_entities(bot: &Client) -> Vec<EntityEntry> {
         {
             continue;
         }
-        let minecraft_id = id_by_entity.get(&entity).copied().unwrap_or(0);
+        // F-27: a missing entity ID must not collapse to 0 — id 0 may be a
+        // real entity in the index, and `attack_entity(0)` would be ambiguous.
+        let minecraft_id = id_by_entity.get(&entity).copied();
         entries.push(EntityEntry {
-            id: u32::try_from(minecraft_id).unwrap_or(0),
+            id: minecraft_id
+                .and_then(|mc_id| u32::try_from(mc_id).ok())
+                .unwrap_or(UNKNOWN_ENTITY_ID),
             uuid: (**uuid).to_string(),
             entity_type: entity_type_string(kind.map(|k| k.0)),
             position: BlockPos::new(
@@ -820,6 +865,17 @@ mod tests {
             !snapshot.block_index.contains_key(&p),
             "block_index must not contain the removed block at {p:?}"
         );
+    }
+
+    /// F-11: section bases derive from the dimension's real `min_y`, so a
+    /// custom dimension is not scanned with the overworld's -64 offset.
+    #[test]
+    fn test_section_base_y_uses_world_min_y() {
+        assert_eq!(section_base_y(-64, 0), -64);
+        assert_eq!(section_base_y(-64, 23), 304);
+        assert_eq!(section_base_y(0, 0), 0);
+        assert_eq!(section_base_y(0, 23), 368);
+        assert_eq!(section_base_y(-16, 3), 32);
     }
 
     #[test]
@@ -1023,6 +1079,32 @@ mod tests {
         assert!(updater.check_and_update_timer());
     }
 
+    /// F-31: after a failed build the timer is rewound so the next attempt
+    /// only waits the short retry delay — not a whole snapshot interval.
+    #[test]
+    fn test_failed_build_schedules_short_retry() {
+        let updater = make_updater_with_recent_timer();
+        updater.schedule_retry_after_failure();
+
+        // The rewind is `interval - 250ms`, so the gate is still closed
+        // immediately after the failure…
+        assert!(!updater.check_and_update_timer());
+
+        // …but the recorded last-update is strictly closer than a fresh
+        // successful gate would have left it.
+        let elapsed = {
+            let last = updater
+                .last_update
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            last.elapsed()
+        };
+        assert!(
+            elapsed < Duration::from_millis(updater.interval_ms),
+            "failed-build rewind must be shorter than a full interval, got {elapsed:?}"
+        );
+    }
+
     #[test]
     fn test_throttle_resets_timer_on_allow() {
         let updater = make_updater();
@@ -1224,7 +1306,10 @@ mod tests {
         let player = entities.iter().find(|e| e.entity_type == "player").unwrap();
         assert_eq!(player.display_name, Some("Steve".to_string()));
         assert_eq!(player.health, Some(20.0));
-        assert_eq!(player.id, 0, "not in entity_by_id → id falls back to 0");
+        assert_eq!(
+            player.id, UNKNOWN_ENTITY_ID,
+            "not in entity_by_id → the id must be the explicit unknown sentinel, not 0"
+        );
     }
 
     /// A dead mob (health metadata 0.0) must be excluded from the entity list

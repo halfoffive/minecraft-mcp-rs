@@ -410,6 +410,12 @@ pub fn key_name(key: TextKey) -> &'static str {
 // Tests
 // ════════════════════════════════════════════════════════════════════
 
+/// Serialises every unit test that mutates the process-wide `CURRENT`
+/// language (F-18). Same pattern as `config::tests::ENV_LOCK` and
+/// `tools_query::tests::CACHE_TEST_LOCK`.
+#[cfg(test)]
+pub(crate) static I18N_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +424,7 @@ mod tests {
     /// value), and `current()` reflects that initial state.
     #[test]
     fn test_tr_returns_english_by_default() {
+        let _lock = I18N_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Force a known starting state in case another test mutated CURRENT.
         set(Language::En);
         assert_eq!(current(), Language::En);
@@ -430,6 +437,7 @@ mod tests {
     /// `current()` reflects the change.
     #[test]
     fn test_set_zh_cn_changes_tr_output() {
+        let _lock = I18N_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set(Language::ZhCn);
         assert_eq!(current(), Language::ZhCn);
         assert_eq!(tr(TextKey::AppTitle), "Minecraft MCP 服务器");
@@ -440,6 +448,7 @@ mod tests {
     /// Switching back to `En` restores the English strings.
     #[test]
     fn test_set_en_reverts_to_english() {
+        let _lock = I18N_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set(Language::ZhCn);
         assert_eq!(tr(TextKey::AppTitle), "Minecraft MCP 服务器");
         set(Language::En);
@@ -450,6 +459,7 @@ mod tests {
     /// `current()` reflects whatever was last passed to `set()`.
     #[test]
     fn test_current_reflects_set() {
+        let _lock = I18N_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set(Language::ZhCn);
         assert_eq!(current(), Language::ZhCn);
         set(Language::En);

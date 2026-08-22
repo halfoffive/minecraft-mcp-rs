@@ -39,6 +39,28 @@ pub fn clamp_to_i32(v: u32) -> i32 {
     }
 }
 
+/// Vanilla's maximum chat/command line length in characters.
+const MAX_CHAT_LENGTH: usize = 256;
+
+/// Validate the shared chat/command text budget.
+///
+/// The trimmed text must be non-empty and at most [`MAX_CHAT_LENGTH`]
+/// characters. A longer line is rejected up front instead of letting the
+/// vanilla server disconnect the bot with "Chat message too long" (F-22).
+fn validate_chat_text(text: &str, label: &str) -> Result<(), BotError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(BotError::InvalidParams(format!("{label} cannot be empty")));
+    }
+    if trimmed.chars().count() > MAX_CHAT_LENGTH {
+        return Err(BotError::InvalidParams(format!(
+            "{label} must be at most {MAX_CHAT_LENGTH} characters, got {}",
+            trimmed.chars().count()
+        )));
+    }
+    Ok(())
+}
+
 /// Validate a [`BotCommand`] before execution.
 ///
 /// Returns `Ok(())` if all parameters are within acceptable ranges, or
@@ -196,11 +218,17 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
             Ok(())
         }
 
-        // Messages must be non-empty (whitespace-only also rejected).
-        BotCommand::SendChat(msg) | BotCommand::ExecuteCommand(msg) => {
-            if msg.trim().is_empty() {
-                return Err(BotError::InvalidParams("Message cannot be empty".into()));
-            }
+        // Messages must be non-empty (whitespace-only also rejected) and
+        // fit the protocol's 256-character chat/command budget (F-22). An
+        // over-long message is rejected as InvalidParams instead of letting
+        // the vanilla server kick the bot ("Chat message too long").
+        BotCommand::SendChat(msg) => {
+            validate_chat_text(msg, "Chat message")?;
+            Ok(())
+        }
+
+        BotCommand::ExecuteCommand(msg) => {
+            validate_chat_text(msg, "Command")?;
             Ok(())
         }
 
@@ -626,6 +654,32 @@ mod tests {
     #[test]
     fn test_execute_command_valid() {
         let cmd = BotCommand::ExecuteCommand("/gamemode creative".into());
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_send_chat_over_256_chars_rejected() {
+        let cmd = BotCommand::SendChat("a".repeat(257));
+        let err = validate_command(&cmd).unwrap_err();
+        assert!(
+            matches!(err, BotError::InvalidParams(ref msg) if msg.contains("256")),
+            "got: {err:?}"
+        );
+
+        let cmd = BotCommand::SendChat("a".repeat(256));
+        assert!(validate_command(&cmd).is_ok());
+    }
+
+    #[test]
+    fn test_execute_command_over_256_chars_rejected() {
+        let cmd = BotCommand::ExecuteCommand(format!("/{}", "a".repeat(257)));
+        let err = validate_command(&cmd).unwrap_err();
+        assert!(
+            matches!(err, BotError::InvalidParams(ref msg) if msg.contains("256")),
+            "got: {err:?}"
+        );
+
+        let cmd = BotCommand::ExecuteCommand(format!("/{}", "a".repeat(255)));
         assert!(validate_command(&cmd).is_ok());
     }
 

@@ -420,6 +420,12 @@ impl SharedState {
         self.world_snapshot.rcu(|curr| {
             let mut snap = (**curr).clone();
             f(&mut snap);
+            // F-6: the closure may have mutated any field, including `blocks`.
+            // Rebuild the derived index unconditionally so a mutation that
+            // adds/removes/reorders blocks never leaves `block_index` pointing
+            // at stale positions (which could return the wrong entry or make
+            // indexed callers observe an out-of-bounds index).
+            snap.rebuild_block_index();
             // The snapshot content changed, so bump the revision even though
             // the mutation may only touch a field that is not rendered. The
             // extra render-invalidation is negligible (modify_snapshot is
@@ -1268,6 +1274,46 @@ mod tests {
         assert_eq!(snap.timestamp, 1);
     }
 
+    /// F-6: `modify_snapshot` documents that the closure may mutate any
+    /// field, so a mutation of `blocks` must leave `block_index` consistent
+    /// instead of pointing at the pre-mutation positions.
+    #[test]
+    fn test_modify_snapshot_rebuilds_block_index_after_block_mutation() {
+        let state = SharedState::new(AppConfig::default());
+        let first = crate::types::BlockEntry {
+            position: crate::types::BlockPos::new(1, 64, 1),
+            block_type: "stone".into(),
+            block_state: None,
+        };
+        let second = crate::types::BlockEntry {
+            position: crate::types::BlockPos::new(2, 64, 2),
+            block_type: "dirt".into(),
+            block_state: None,
+        };
+        state.update_snapshot(crate::types::WorldSnapshot {
+            blocks: vec![first.clone(), second.clone()],
+            ..Default::default()
+        });
+
+        state.modify_snapshot(|snap| {
+            snap.blocks.swap(0, 1);
+        });
+
+        let snap = state.read_snapshot();
+        let idx = snap
+            .block_index
+            .get(&second.position)
+            .copied()
+            .expect("indexed");
+        assert_eq!(snap.blocks[idx].block_type, "dirt");
+        let idx = snap
+            .block_index
+            .get(&first.position)
+            .copied()
+            .expect("indexed");
+        assert_eq!(snap.blocks[idx].block_type, "stone");
+    }
+
     #[test]
     fn test_modify_snapshot_concurrent_no_loss() {
         // Two threads mutate different fields concurrently; both updates
@@ -1373,9 +1419,12 @@ mod tests {
             h.join().unwrap();
         }
 
-        // After all toggles, the value is deterministic because SeqCst
-        // ordering makes the last store visible.  We just verify no panic.
-        let _ = state.is_online();
+        // Every thread's final operation is `set_online(false)` and all
+        // handles are joined before this read, so the last store in the
+        // global order is guaranteed to be `false`; SeqCst makes that store
+        // visible here. The assertion pins the actual contract instead of
+        // merely checking "no panic" (F-37).
+        assert!(!state.is_online());
     }
 
     // -- Config RwLock -------------------------------------------------------
@@ -1717,20 +1766,24 @@ mod tests {
         notified.await.expect("waiter task should finish");
     }
 
-    #[test]
-    fn test_goto_notify_clone_shares_state() {
+    /// F-15: the previous test never polled the `Notified` future, so it
+    /// asserted nothing about notification propagation. Await it under a
+    /// short timeout: `notify_waiters` through one Arc clone must wake a
+    /// waiter created from the other clone.
+    #[tokio::test]
+    async fn test_goto_notify_clone_shares_state() {
         let state = SharedState::new(AppConfig::default());
         let notify1 = state.goto_notify();
         let notify2 = state.goto_notify();
 
-        // Notifying through one Arc must wake waiters on the other Arc.
         let waiter = notify2.notified();
         notify1.notify_waiters();
-        // The future returned by notified() should be ready after notify_waiters.
-        // We can't easily await in a sync test, but we verify both Arcs are
-        // non-null and distinct clones.
+        tokio::time::timeout(std::time::Duration::from_millis(100), waiter)
+            .await
+            .expect(
+                "notify_waiters through one Arc clone must wake a waiter created from the other",
+            );
         assert!(Arc::strong_count(&state.goto_notify) >= 2);
-        drop(waiter);
     }
 
     // -- snapshot force-refresh -------------------------------------------------

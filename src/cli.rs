@@ -69,7 +69,7 @@ pub enum RunMode {
 /// Resolve the run mode from the parsed arguments.
 ///
 /// Precedence: help wins over everything; otherwise an explicit `--headless`
-/// (or `--stdio` *without* `--gui`) forces headless; anything else runs the
+/// (or `--stdio` *without* `--gui`) forces headless; anything else runs the GUI.
 pub fn resolve_mode(args: &CliArgs) -> RunMode {
     if args.is_empty() {
         RunMode::Help

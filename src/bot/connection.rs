@@ -57,12 +57,15 @@ impl ConnectionManager {
         self.state.is_online()
     }
 
-    /// Mark the bot as disconnected.
+    /// Test-only simulation of an offline transition (F-29).
     ///
     /// Sets the online flag to `false` so MCP tools can return offline errors.
-    /// The actual TCP teardown is handled by azalea when the handler function
-    /// returns from [`Event::Disconnect`](azalea::Event::Disconnect).
-    pub fn disconnect(&self) {
+    /// This does NOT cancel the connect loop or the azalea session — the real
+    /// disconnect path is [`Event::Disconnect`](azalea::Event::Disconnect) /
+    /// [`SharedState::request_disconnect`]. Keeping it test-only prevents a
+    /// production caller from mistaking this flag flip for a real teardown.
+    #[cfg(test)]
+    pub fn simulate_offline_for_tests(&self) {
         self.state.set_online(false);
     }
 
@@ -229,8 +232,16 @@ impl ConnectionManager {
                     match cancel_branch_action(&self.state) {
                         CancelAction::Restart => {
                             info!("config restart requested — reconnecting with updated settings");
-                            attempt = 0;
-                            first_connect_attempts = 0;
+                            // F-12: consume the online-session latch before
+                            // looping. This branch skips the
+                            // `take_session_was_online` checkpoint below, and
+                            // prepare_connect_entry does not run on a plain
+                            // `continue` inside the loop.
+                            prepare_cancel_restart(
+                                &self.state,
+                                &mut attempt,
+                                &mut first_connect_attempts,
+                            );
                             continue;
                         }
                         CancelAction::Stop => break,
@@ -545,6 +556,24 @@ pub(crate) fn prepare_connect_entry(state: &SharedState) {
     state.take_session_was_online();
 }
 
+/// Consume the online-session latch before a cancel-window config restart continues the connect loop (F-12).
+///
+/// The normal `start()` return path consumes the latch at the checkpoint
+/// below the `select!`; the cancel branch skips that checkpoint, and
+/// `prepare_connect_entry` does not run on a plain `continue`. A leaked
+/// `session_was_online` latch makes the NEXT session's first-connect failure
+/// take the "was online before" infinite-backoff branch instead of the
+/// bounded first-connect retries.
+fn prepare_cancel_restart(
+    state: &SharedState,
+    attempt: &mut u32,
+    first_connect_attempts: &mut u32,
+) {
+    state.take_session_was_online();
+    *attempt = 0;
+    *first_connect_attempts = 0;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -608,7 +637,7 @@ mod tests {
         state.set_online(true);
         assert!(manager.is_connected());
 
-        manager.disconnect();
+        manager.simulate_offline_for_tests();
         assert!(!manager.is_connected());
     }
 
@@ -619,7 +648,7 @@ mod tests {
         let manager = ConnectionManager::new(config, Arc::clone(&state));
 
         assert!(!manager.is_connected());
-        manager.disconnect();
+        manager.simulate_offline_for_tests();
         assert!(!manager.is_connected());
     }
 
@@ -751,7 +780,7 @@ mod tests {
         assert!(manager.is_connected());
 
         // Manager can also influence state
-        manager.disconnect();
+        manager.simulate_offline_for_tests();
         assert!(!state.is_online());
     }
 
@@ -1118,6 +1147,30 @@ mod tests {
         assert_eq!(cancel_branch_action(&state), CancelAction::Stop);
         // Nothing was consumed — the loop breaks.
         assert!(state.is_disconnect_requested());
+    }
+
+    // -- F-12 regression: cancel-window restart consumes the online latch ----
+
+    /// A config restart in the TCP-cancel window `continue`s without
+    /// reaching the normal `take_session_was_online` checkpoint. The helper
+    /// used by that branch must consume the latch and reset both counters,
+    /// otherwise the next session's first-connect failure inherits a stale
+    /// "was online" and enters the infinite-backoff branch.
+    #[test]
+    fn test_prepare_cancel_restart_consumes_session_latch_and_counters() {
+        let state = SharedState::new(AppConfig::default());
+        state.mark_session_online();
+        let mut attempt = 4;
+        let mut first_connect_attempts = 2;
+
+        prepare_cancel_restart(&state, &mut attempt, &mut first_connect_attempts);
+
+        assert!(
+            !state.take_session_was_online(),
+            "the online latch must have been consumed"
+        );
+        assert_eq!(attempt, 0);
+        assert_eq!(first_connect_attempts, 0);
     }
 
     // -- L-22 regression: connect entry discards a stale restart flag --------

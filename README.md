@@ -378,7 +378,7 @@ settings tools (`get_settings` / `update_settings`).
 | `mc_port` | `25565` | Minecraft server port / Minecraft 服务器端口 |
 | `ai_username` | `AI_Bot` | Bot in-game username / 机器人游戏内用户名 |
 | `mcp_transport` | `Http` | MCP transport: `Stdio` or `Http` / MCP 传输方式：`Stdio` 或 `Http` |
-| `mcp_address` | `127.0.0.1` | MCP HTTP bind address (loopback only) / MCP HTTP 绑定地址（仅本地回环） |
+| `mcp_address` | `127.0.0.1` | MCP HTTP bind address. Non-loopback binds require `mcp_auth_enabled=true` (validation rejects an unauthenticated non-loopback HTTP bind) / MCP HTTP 绑定地址。绑定非回环地址时必须启用 `mcp_auth_enabled=true`（校验会拒绝无鉴权的非回环 HTTP 绑定） |
 | `mcp_port` | `3000` | MCP HTTP port / MCP HTTP 端口 |
 | `mcp_token` | random UUID v4 | Bearer token for HTTP transport, used only when auth is enabled (generated on each `AppConfig::default()`) / HTTP 传输的 Bearer Token，仅在启用鉴权时使用（每次 `AppConfig::default()` 时随机生成） |
 | `mcp_auth_enabled` | `false` | Require a Bearer token over HTTP / 要求 HTTP 请求携带 Bearer Token |
@@ -421,6 +421,12 @@ variable is present:
 | `MINECRAFT_MCP_AUTH_ENABLED` | `mcp_auth_enabled` | `false` |
 | `MINECRAFT_MCP_TRANSPORT` | `mcp_transport` | `http` |
 | `MINECRAFT_MCP_LANGUAGE` | `language` | system locale / 系统语言 |
+
+> **Security note:** plain HTTP + a non-loopback `mcp_address` with
+> `mcp_auth_enabled=false` is rejected at startup (`AppConfig::validate`).
+> To expose the MCP server beyond localhost, enable Bearer auth.
+>
+> **安全提示:** `mcp_address` 为非回环地址、HTTP 传输且未启用鉴权的组合会在启动时被拒绝。如需将 MCP 服务暴露到本机之外，请启用 Bearer Token 鉴权。
 
 Malformed variable values log a warning and keep the default — startup never
 fails because of an environment typo. Semantically invalid values that parse

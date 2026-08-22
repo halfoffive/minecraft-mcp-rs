@@ -715,6 +715,9 @@ mod tests {
 
     #[test]
     fn test_update_settings_language_change_applies_and_sets_i18n() {
+        let _lock = crate::i18n::I18N_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let state = state_with_known_token();
         // Force a known starting language — the default follows the system
         // locale (which may already be zh_cn on this machine).

@@ -56,9 +56,20 @@ pub async fn handle_send_chat(
     sender: &BotCommandSender,
     message: String,
 ) -> Result<String, BotError> {
-    if message.trim().is_empty() {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
         return Err(BotError::InvalidParams(
             "Message cannot be empty".to_string(),
+        ));
+    }
+
+    // send_chat is a chat channel, not an implicit command-execution channel
+    // (audit F-2): azalea's `chat()` forwards a leading `/` as a server
+    // command packet, which would bypass execute_command's honest
+    // rejection-feedback verification and could report a fake success.
+    if trimmed.starts_with('/') {
+        return Err(BotError::InvalidParams(
+            "Chat messages starting with '/' are forwarded as server commands by the Minecraft protocol. Use execute_command for commands, which verifies server feedback.".to_string(),
         ));
     }
 
@@ -288,6 +299,30 @@ mod tests {
         let state = make_state(false);
         let result = handle_send_chat(&state, &sender, "hello".into()).await;
         assert!(matches!(result, Err(BotError::Offline(_))));
+    }
+
+    /// F-2: a leading `/` would be forwarded by azalea's `chat()` as a
+    /// server command packet, silently bypassing `execute_command` and its
+    /// rejection-feedback verification. The MCP layer must reject it before
+    /// anything reaches the channel.
+    #[tokio::test]
+    async fn test_handle_send_chat_rejects_command_prefix() {
+        let (sender, _rx) = make_echo_channel();
+        let state = make_state(true);
+        let result = handle_send_chat(&state, &sender, "/give Steve diamond".into()).await;
+        match result {
+            Err(BotError::InvalidParams(msg)) => {
+                assert!(
+                    msg.contains("execute_command"),
+                    "msg must redirect to execute_command, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidParams for '/'-prefixed chat, got {other:?}"),
+        }
+
+        // Leading whitespace must not smuggle the command through.
+        let padded = handle_send_chat(&state, &sender, "   /give Steve diamond".into()).await;
+        assert!(matches!(padded, Err(BotError::InvalidParams(_))));
     }
 
     // -- execute_command ------------------------------------------------------

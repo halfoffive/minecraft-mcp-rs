@@ -1,7 +1,7 @@
 //! MCP server setup, transport, and request dispatch.
 //!
-//! Uses rmcp 1.7.0 with `#[tool_router]`/`#[tool_handler]` macros to define
-//! 25+ MCP tools. All logging goes to stderr via `tracing`.
+//! Uses rmcp 1.8.0 with `#[tool_router]`/`#[tool_handler]` macros to define
+//! 41 MCP tools. All logging goes to stderr via `tracing`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -85,7 +85,7 @@ impl McpBotServer {
 }
 
 // ---------------------------------------------------------------------------
-// Tool Router — 29 MCP tool stubs
+// Tool Router — 41 MCP tool registrations
 // ---------------------------------------------------------------------------
 
 #[tool_router]
@@ -965,6 +965,220 @@ mod tests {
     use crate::channel::create_command_channel;
     use crate::config::AppConfig;
     use axum::http::HeaderValue;
+    use std::collections::HashSet;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tower::ServiceExt;
+
+    /// Construct the same `(state, server)` pair every server test uses.
+    fn make_server() -> (Arc<SharedState>, McpBotServer) {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let (sender, receiver) = create_command_channel(4, Arc::clone(&state));
+        let receiver: ReceiverSlot = Arc::new(std::sync::Mutex::new(Some(receiver)));
+        let server = McpBotServer::new(Arc::clone(&state), sender, receiver);
+        (state, server)
+    }
+
+    /// Drive the REAL rmcp JSON-RPC transport over an in-memory duplex pair.
+    /// Returns the JSON-RPC response for one `tools/call` request. This is
+    /// the dispatch-layer coverage F-3 asked for: the request goes through
+    /// `tool_router().call`, parameter deserialization, the `#[tool]` macro
+    /// registration, and `BotError -> ErrorData` serialization — none of
+    /// which is exercised by calling a handler method directly.
+    async fn json_rpc_call(request: serde_json::Value) -> serde_json::Value {
+        let (state, server) = make_server();
+        let _ = state;
+
+        let (server_io, client_io) = tokio::io::duplex(16 * 1024);
+        let (server_r, server_w) = tokio::io::split(server_io);
+        let transport =
+            rmcp::transport::async_rw::AsyncRwTransport::<rmcp::RoleServer, _, _>::new_server(
+                server_r, server_w,
+            );
+        let running = rmcp::service::serve_directly(server, transport, None);
+        let cancel = running.cancellation_token();
+        let handle = tokio::spawn(running.waiting());
+
+        let (client_r, mut client_w) = tokio::io::split(client_io);
+        let mut line = serde_json::to_vec(&request).expect("request serializes");
+        line.push(10); // newline byte
+        client_w.write_all(&line).await.expect("write request");
+        client_w.flush().await.expect("flush request");
+
+        let mut reader = tokio::io::BufReader::new(client_r);
+        let mut reply = Vec::new();
+        reader.read_until(10, &mut reply).await.expect("read reply");
+        let response: serde_json::Value = serde_json::from_slice(&reply).expect("valid JSON reply");
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+        response
+    }
+
+    /// F-3(a): the generated registry must contain the full tool surface with
+    /// the annotations the MCP client relies on. If a `#[tool]` registration
+    /// silently drops, this test goes red.
+    #[test]
+    fn test_tool_registry_lists_all_tools_with_annotations() {
+        let tools = McpBotServer::tool_router().list_all();
+        assert_eq!(
+            tools.len(),
+            41,
+            "the registry snapshot must cover every #[tool]"
+        );
+
+        let names: HashSet<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
+        // Spot-check categories whose macro drift has burned us before.
+        for name in [
+            "get_self_info",
+            "get_nearby_blocks",
+            "send_chat",
+            "execute_command",
+            "break_block",
+            "act",
+            "update_settings",
+            "connect_bot",
+            "disconnect_bot",
+        ] {
+            assert!(names.contains(name), "missing tool registration: {name}");
+        }
+
+        let annotations = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.annotations.clone())
+                .unwrap_or_else(|| panic!("missing tool: {name}"))
+        };
+        assert_eq!(
+            annotations("get_self_info").read_only_hint,
+            Some(true),
+            "read_only annotation must be preserved"
+        );
+        assert_eq!(
+            annotations("send_chat").destructive_hint,
+            Some(true),
+            "destructive annotation must be preserved"
+        );
+        assert_eq!(
+            annotations("execute_command").destructive_hint,
+            Some(true),
+            "destructive annotation must be preserved"
+        );
+    }
+
+    /// F-3(b): drive `tools/call` through the real JSON-RPC transport —
+    /// happy path and an unknown-tool -32602.
+    #[tokio::test]
+    async fn test_call_tool_dispatch_layer_happy_path_and_invalid_tool() {
+        let response = json_rpc_call(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "send_chat",
+                "arguments": { "message": "hello" }
+            }
+        }))
+        .await;
+        assert_eq!(response["id"], 1);
+        assert_eq!(
+            response["error"]["code"], -32000,
+            "offline error must round-trip: {response}"
+        );
+        assert_eq!(response["error"]["data"]["reason"], "bot_disconnected");
+
+        let invalid = json_rpc_call(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "not_a_tool",
+                "arguments": {}
+            }
+        }))
+        .await;
+        assert_eq!(invalid["id"], 2);
+        assert_eq!(
+            invalid["error"]["code"], -32602,
+            "unknown tool must be INVALID_PARAMS: {invalid}"
+        );
+    }
+
+    /// F-3(c): exercise the axum wrapper around `bearer_auth_middleware`
+    /// (header extraction + 401 response shape) with `tower::ServiceExt::oneshot`.
+    /// The pure decision function is unit-tested elsewhere; this covers the
+    /// part a real HTTP client hits.
+    #[tokio::test]
+    async fn test_bearer_auth_middleware_http_wrapper_401_shape() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        state.update_config(|cfg| {
+            cfg.mcp_auth_enabled = true;
+            cfg.mcp_token = "secret".into();
+        });
+
+        let app: axum::Router = axum::Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .layer(from_fn_with_state(
+                Arc::clone(&state),
+                bearer_auth_middleware,
+            ))
+            .with_state(state);
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .body(axum::body::Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router call");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let bytes = axum::body::to_bytes(unauthorized.into_body(), 1024)
+            .await
+            .expect("body readable");
+        assert_eq!(&bytes[..], b"Unauthorized");
+
+        let authorized = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .header("authorization", "Bearer secret")
+                    .body(axum::body::Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router call");
+        assert_eq!(authorized.status(), StatusCode::OK);
+    }
+
+    /// F-3(b): malformed arguments must surface the rmcp deserialization
+    /// error through the transport, not panic or hang.
+    #[tokio::test]
+    async fn test_call_tool_dispatch_layer_malformed_arguments() {
+        let response = json_rpc_call(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "move_to",
+                "arguments": { "x": 1 }
+            }
+        }))
+        .await;
+        assert_eq!(response["id"], 3);
+        // rmcp surfaces argument-deserialization failures as an
+        // `isError: true` tool result (spec-recommended tool-level failure),
+        // unlike BotError which maps to a JSON-RPC error per F-32.
+        assert_eq!(response["result"]["isError"], true, "got: {response}");
+        assert!(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("missing field")),
+            "got: {response}"
+        );
+    }
 
     /// `shutdown_signal` resolves when the shutdown token is cancelled —
     /// this is the path the UI (window close) and headless stdio client exit

@@ -8,7 +8,7 @@ use minecraft_mcp_rs::block_data::{
 };
 use minecraft_mcp_rs::command_validate::validate_coordinates;
 use minecraft_mcp_rs::compound_ops::find_standable_neighbor;
-use minecraft_mcp_rs::mining_calc::calculate_mine_time;
+use minecraft_mcp_rs::mining_calc::{calculate_mine_time, get_block_hardness};
 use minecraft_mcp_rs::tool_select::find_tool_in_inventory;
 use minecraft_mcp_rs::types::{BlockEntry, BlockPos, MaterialTier, ToolType, WorldSnapshot};
 use proptest::prelude::*;
@@ -289,6 +289,9 @@ proptest! {
     ) {
         let expected_tool = best_tool_for_block(&block_type);
         prop_assume!(expected_tool != ToolType::Hand);
+        // F-16: exclude unbreakable blocks so the property has no INFINITY
+        // escape hatch — every generated case must satisfy the ordering.
+        prop_assume!(get_block_hardness(&block_type) >= 0.0);
 
         let tiers = [
             MaterialTier::Wood,
@@ -316,7 +319,7 @@ proptest! {
 
                 if speed_a > speed_b {
                     prop_assert!(
-                        time_a <= time_b || time_a.is_infinite() || time_b.is_infinite(),
+                        time_a <= time_b,
                         "Tier {:?} (speed {speed_a}, time {time_a}) should mine faster \
                          than tier {:?} (speed {speed_b}, time {time_b})",
                         tier_a, tier_b
@@ -332,11 +335,17 @@ proptest! {
 // ═══════════════════════════════════════════════════════════════
 
 proptest! {
-    /// Property: `validate_coordinates` never panics for any i32 inputs.
+    /// Property: `validate_coordinates` never panics for any i32 inputs,
+    /// and its Ok/Err verdict is exactly the published bounds contract.
     #[test]
     fn prop_validate_coordinates_no_panic(x: i32, y: i32, z: i32) {
-        // This test simply verifies the function does not panic.
-        let _ = validate_coordinates(x, y, z);
+        let in_bounds = (-30_000_000..=30_000_000).contains(&x)
+            && (-64..=320).contains(&y)
+            && (-30_000_000..=30_000_000).contains(&z);
+        let result = validate_coordinates(x, y, z);
+        let verdict_msg =
+            format!("verdict for ({x}, {y}, {z}) must equal the documented bounds");
+        prop_assert_eq!(result.is_ok(), in_bounds, "{}", verdict_msg);
     }
 
     /// Property: Coordinates within Minecraft bounds always pass validation.
@@ -392,35 +401,21 @@ proptest! {
         let result = material_from_item_name(&name);
 
         if let Some((tool, material)) = result {
-            // Verify the returned values are valid enum variants
-            let valid_tools = [
-                ToolType::Pickaxe,
-                ToolType::Axe,
-                ToolType::Shovel,
-                ToolType::Hoe,
-                ToolType::Sword,
-                ToolType::Shears,
-                ToolType::Hand,
-            ];
-            let valid_materials = [
-                MaterialTier::Wood,
-                MaterialTier::Stone,
-                MaterialTier::Iron,
-                MaterialTier::Gold,
-                MaterialTier::Diamond,
-                MaterialTier::Netherite,
-            ];
-
-            prop_assert!(
-                valid_tools.contains(&tool),
-                "Parsed tool {:?} is not a valid tool type",
-                tool
+            // F-16: enum-variant containment was a tautology (the return type
+            // IS `(ToolType, MaterialTier)`). Assert the real contract: a
+            // parsed item name must be built from the parser's accepted
+            // material/tool name parts.
+            let tool_part = format!("{tool:?}").to_lowercase();
+            let material_part = format!("{material:?}").to_lowercase();
+            let expected = if tool == ToolType::Shears {
+                "shears".to_string()
+            } else {
+                format!("{material_part}_{tool_part}")
+            };
+            let roundtrip_msg = format!(
+                "parsed ({tool:?}, {material:?}) must round-trip to the input name"
             );
-            prop_assert!(
-                valid_materials.contains(&material),
-                "Parsed material {:?} is not a valid material tier",
-                material
-            );
+            prop_assert_eq!(name, expected, "{}", roundtrip_msg);
         }
     }
 }
@@ -586,7 +581,7 @@ proptest! {
     /// 8-direction scan. This is the same shape as the unit test
     /// `test_find_standable_neighbor_8_directions` but driven by
     /// proptest so a regression in the offset table is caught
-    /// automatically across 1000 runs.
+    /// automatically across proptest's default number of cases.
     #[test]
     fn prop_standable_neighbor_finds_diagonal_when_cardinals_blocked(
         x in -100i32..100,
