@@ -4875,7 +4875,7 @@ mod tests {
     async fn test_use_item_on_block_reports_item_used() {
         // The result message must name the item actually held so callers can
         // detect a wrong-slot interaction (the water-bucket smoke failure).
-        let (executor, sender, state, _log) = make_executor();
+        let (executor, sender, state, log) = make_executor();
         let mut snapshot = make_populated_snapshot_defaults();
         snapshot.self_player.held_item_slot = 2;
         snapshot.self_player.inventory = vec![InventorySlot {
@@ -4884,6 +4884,17 @@ mod tests {
             count: 1,
         }];
         state.update_snapshot(snapshot);
+        // The handler reads the LIVE inventory (M-11). Keep the mock
+        // inventory in sync with the snapshot's self_player inventory so
+        // production and test semantics match.
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            *inv = vec![None; 9];
+            inv[2] = Some(ItemStack {
+                item_id: "water_bucket".into(),
+                count: 1,
+            });
+        }
         let handle = spawn_executor(executor);
 
         let pos = BlockPos::new(5, 65, 5);
@@ -4925,7 +4936,7 @@ mod tests {
         // the handler must return the targeted "bucket_placement_unsupported"
         // failure (with the /setblock alternative) instead of the generic
         // "interaction was likely rejected" message.
-        let (executor, sender, state, _log) = make_executor();
+        let (executor, sender, state, log) = make_executor();
         let mut snapshot = make_populated_snapshot_defaults();
         snapshot.self_player.held_item_slot = 0;
         // Stand next to the interaction target so the auto-approach is
@@ -4937,6 +4948,14 @@ mod tests {
             item_id: "water_bucket".into(),
             count: 1,
         }];
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            *inv = vec![None; 9];
+            inv[0] = Some(ItemStack {
+                item_id: "water_bucket".into(),
+                count: 1,
+            });
+        }
         // `update_snapshot` stores the snapshot as-is (no block_index
         // rebuild), so seed the index for the interaction target + effect
         // cell lookups.
@@ -4995,6 +5014,14 @@ mod tests {
             item_id: "flint_and_steel".into(),
             count: 1,
         }];
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            *inv = vec![None; 9];
+            inv[0] = Some(ItemStack {
+                item_id: "flint_and_steel".into(),
+                count: 1,
+            });
+        }
         // The click target (5,64,0) AND the "effect" cell above it (5,65,0)
         // are both solid — the old unconditional pre-check rejected this.
         snapshot.blocks = vec![
@@ -5054,6 +5081,14 @@ mod tests {
             item_id: "stone".into(),
             count: 1,
         }];
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            *inv = vec![None; 9];
+            inv[0] = Some(ItemStack {
+                item_id: "stone".into(),
+                count: 1,
+            });
+        }
         snapshot.blocks = vec![
             BlockEntry {
                 position: BlockPos::new(5, 64, 0),

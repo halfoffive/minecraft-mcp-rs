@@ -237,8 +237,6 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig, cache: &mut McpConfigCac
 ///   would make the MCP client target itself and usually fail, so it is
 ///   rewritten to the loopback address the local client must use
 ///   (127.0.0.1 / [::1]).
-///
-
 fn format_host_for_url(host: &str) -> String {
     match host.parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V6(addr)) if addr.is_unspecified() => "[::1]".to_string(),
@@ -359,7 +357,7 @@ mod tests {
     fn test_format_host_ipv4_no_brackets() {
         assert_eq!(format_host_for_url("127.0.0.1"), "127.0.0.1");
         assert_eq!(format_host_for_url("192.168.1.1"), "192.168.1.1");
-        assert_eq!(format_host_for_url("0.0.0.0"), "0.0.0.0");
+        assert_eq!(format_host_for_url("0.0.0.0"), "127.0.0.1");
     }
 
     #[test]

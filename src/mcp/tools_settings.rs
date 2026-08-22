@@ -343,6 +343,10 @@ pub fn update_settings(
     // flipped the UI language globally while leaving the config unchanged.
     candidate.validate().map_err(BotError::InvalidParams)?;
 
+    // Commit the validated candidate to the live in-memory config before any
+    // reconnect/restart side effects use it downstream.
+    state.update_config(|cfg| *cfg = candidate.clone());
+
     if let Some(language) = new_language {
         // Next-frame effect in UI mode; harmless in headless mode.
         crate::i18n::set(language);
