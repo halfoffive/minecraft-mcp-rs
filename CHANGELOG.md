@@ -167,6 +167,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Activity probes immune to wall-clock jumps (L-23):** monotonic stamps
   (see Added) keep the snapshot-interval and idle-watchdog decisions
   correct across NTP adjustments.
+- **`update_settings` commits the validated candidate:** the P3 refactor
+  moved the `i18n::set` side effect after `validate()` but accidentally
+  dropped the `SharedState::update_config` write, so the tool replied with
+  the `applied` fields while the live config stayed unchanged. The
+  validated candidate is now written back to the live config before any
+  reconnect/restart side effect.
+- **MCP Config panel rewrites wildcard bind addresses in the client URL:**
+  binding to `0.0.0.0` / `::` now generates `http://127.0.0.1:...` /
+  `http://[::1]:...` client URLs instead of the unconnectable
+  `http://0.0.0.0:...` / `http://[::]:...` forms.
 
 ### Removed
 
