@@ -214,8 +214,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Weekly supply-chain audit (`audit.yml`):** new workflow runs
   `cargo audit` over every committed lockfile (root plus vendored
   `patches/rmcp` / `patches/rsa`) on Cargo.lock changes, a weekly schedule,
-  or manual dispatch; advisory-only (`continue-on-error`) until the current
-  findings are triaged, then tighten to a blocking gate.
+  or manual dispatch. Blocking gate: the first run's findings were triaged —
+  `webbrowser` bumped to 1.2.4 (RUSTSEC-2026-0257) and `event-listener` to
+  5.4.2 (RUSTSEC-2026-0221); the unfixable remainder (hickory-proto pinned
+  by azalea, quick-xml pinned by wayland-scanner, unmaintained paste /
+  ttf-parser) is documented per-entry in the new root `audit.toml`. Each
+  audit leg runs in its lockfile's directory so per-directory triage
+  configs stay isolated.
 
 ## [1.3.1] - 2026-08-16
 

@@ -2,16 +2,18 @@
 # every committed lockfile - the root one plus the vendored patches
 # (patches/rmcp, patches/rsa), which carry their own Cargo.lock files.
 #
-# Advisory-only for now: the job is marked continue-on-error so new
-# advisories surface as failed-job annotations without blocking merges.
-# Once the current findings are triaged, remove continue-on-error to make
-# this a blocking gate.
+# Blocking gate. Known-unfixable findings are triaged in the repo-root
+# audit.toml (each entry documents the blocking dependency and its revisit
+# condition); each directory may carry its own audit.toml - the Audit step
+# runs with that directory as its working directory so per-lockfile
+# configs apply without leaking across the matrix.
 name: Security audit
 
 on:
   push:
     paths:
       - 'Cargo.lock'
+      - 'audit.toml'
       - 'patches/*/Cargo.lock'
       - '.github/workflows/audit.yml'
   schedule:
@@ -24,16 +26,15 @@ permissions:
 
 jobs:
   cargo-audit:
-    name: cargo audit (${{ matrix.lockfile }})
+    name: cargo audit (${{ matrix.dir }})
     runs-on: ubuntu-latest
-    continue-on-error: true # advisory-only for now; see header comment
     strategy:
       fail-fast: false
       matrix:
-        lockfile:
-          - Cargo.lock
-          - patches/rmcp/Cargo.lock
-          - patches/rsa/Cargo.lock
+        include:
+          - dir: .
+          - dir: patches/rmcp
+          - dir: patches/rsa
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -43,5 +44,6 @@ jobs:
         with:
           tool: cargo-audit
 
-      - name: Audit ${{ matrix.lockfile }}
-        run: cargo audit --file '${{ matrix.lockfile }}'
+      - name: Audit ${{ matrix.dir }}/Cargo.lock
+        working-directory: ${{ matrix.dir }}
+        run: cargo audit --file Cargo.lock
