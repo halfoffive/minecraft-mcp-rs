@@ -42,6 +42,12 @@ opt-level = 3
 [lints.rust]
 linker_messages = "allow"
 
+# Doc-link hygiene: keep `cargo doc --no-deps` warning-free (enforced in CI).
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+redundant_explicit_links = "deny"
+
 # Local patches to resolve dependency conflicts.
 # These directories are tracked in git (see README.md for license notes).
 [patch.crates-io]
