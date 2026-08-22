@@ -218,7 +218,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `webbrowser` bumped to 1.2.4 (RUSTSEC-2026-0257) and `event-listener` to
   5.4.2 (RUSTSEC-2026-0221); the unfixable remainder (hickory-proto pinned
   by azalea, quick-xml pinned by wayland-scanner, unmaintained paste /
-  ttf-parser) is documented per-entry in the new root `audit.toml`. Each
+  ttf-parser) is documented per-entry in the new `.cargo/audit.toml` (the
+  only location cargo-audit 0.22 discovers). Each
   audit leg runs in its lockfile's directory so per-directory triage
   configs stay isolated.
 
