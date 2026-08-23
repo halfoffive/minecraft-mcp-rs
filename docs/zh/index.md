@@ -2,16 +2,13 @@
 layout: home
 
 hero:
-  name: minecraft-mcp-rs
+  name: Minecraft-MCP-RS
   text: "由 LLM 驱动的 Minecraft 机器人。"
   tagline: "41 个 MCP 工具，把 Claude Desktop、Cursor 或任何 MCP 宿主接入实时的 Minecraft 1.21.11 世界。零 Rust 工具链 —— 一条 npx 命令即可运行。"
   actions:
     - theme: brand
       text: npx 快速运行
       link: /zh/guide/getting-started
-    - theme: alt
-      text: npm 安装
-      link: /zh/npm
     - theme: alt
       text: GitHub
       link: https://github.com/halfoffive/minecraft-mcp-rs
@@ -26,3 +23,9 @@ features:
   - title: "诚实的错误"
     details: "每个失败都携带机器可读的 reason 与 retryable 提示；放置操作会对照世界验证 —— 绝不假报成功。"
 ---
+
+<McpQuickSetup />
+
+## 免责声明
+
+Minecraft-MCP-RS 是**非官方**第三方工具，与 Mojang Studios 或 Microsoft **无任何隶属、认可或赞助关系**。"Minecraft" 是 Mojang Synergies AB 的商标；本项目仅用于对你拥有并运营的 Minecraft 服务器进行程序化访问。使用本机器人须遵守所连接服务器的规则（包括反作弊与自动化策略）——在非你控制的服务器（如禁止机器人的公共服务器）上未经授权使用自动化，可能违反该服务器条款并导致账号受罚。本软件基于 MIT 许可证提供，不附带任何形式的担保。
