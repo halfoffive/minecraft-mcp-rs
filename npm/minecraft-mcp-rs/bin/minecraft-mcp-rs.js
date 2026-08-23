@@ -14,6 +14,7 @@
 // and exit 1 instead of crashing with an unhelpful stack trace.
 
 const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
 
 // Map of `${process.platform}-${process.arch}` to [packageName, binaryName].
 // The binary names match what the CI npm-publish job stages into each
@@ -54,5 +55,33 @@ try {
   process.exit(1);
 }
 
-const result = spawnSync(binPath, process.argv.slice(2), { stdio: "inherit" });
+// Spawn options shared by both attempts below. `windowsHide` keeps a console
+// window from flashing when the shim is launched from an MCP client host on
+// Windows; stdio stays inherited either way (in --stdio mode stdout IS the
+// MCP JSON-RPC transport and must reach the parent untouched).
+const spawnOptions = { stdio: "inherit", windowsHide: true };
+
+let result = spawnSync(binPath, process.argv.slice(2), spawnOptions);
+
+// npx/bunx cache extraction can lose the executable bit on POSIX systems
+// (tarball mode bits are not always preserved through the cache). A spawn
+// that fails with EACCES/ENOEXEC is retried once after restoring +x, so
+// `npx -y minecraft-mcp-rs` self-heals instead of dead-ending.
+if (
+  result.error &&
+  process.platform !== "win32" &&
+  (result.error.code === "EACCES" || result.error.code === "ENOEXEC")
+) {
+  try {
+    fs.chmodSync(binPath, 0o755);
+    result = spawnSync(binPath, process.argv.slice(2), spawnOptions);
+  } catch {
+    // chmod failed (read-only store, etc.) — fall through to the error exit.
+  }
+}
+
+if (result.error) {
+  console.error(`Failed to launch ${binPath}: ${result.error.message}`);
+  process.exit(1);
+}
 process.exit(result.status === null ? 1 : result.status);
