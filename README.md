@@ -32,7 +32,7 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 >
 > | Minecraft server version / MC 服务器版本 | minecraft-mcp-rs version / 工具版本 |
 > |---|---|
-> | 1.21.11 | 1.3.1 |
+> | 1.21.11 | 1.3.2 |
 >
 > Pick the minecraft-mcp-rs version that matches your Minecraft server, and re-check this table before every upgrade. / 请选择与你的 Minecraft 服务器版本匹配的 minecraft-mcp-rs 版本，并在每次升级前重新核对此表。
 
@@ -40,9 +40,9 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 
 ## Features
 
-- **30+ MCP tools** organized into 8 domains, plus a unified `act` tool
+- **41 MCP tools** organized into 8 domains, plus a unified `act` tool
 
-  提供 **30 余个 MCP 工具**，分为 8 个领域，外加统一的 `act` 工具。
+  提供 **41 个 MCP 工具**，分为 8 个领域，外加统一的 `act` 工具。
 
 - **Bilingual UI (English / 简体中文)** — switch languages at runtime in the
   Settings panel; CJK system fonts are auto-detected so Chinese renders
@@ -204,22 +204,22 @@ WenQuanYi) so Chinese text renders correctly without manual font setup.
 ## Install via npm / 通过 npm 安装
 
 No Rust toolchain needed — prebuilt binaries are published to npm for Windows
-x64/arm64, macOS arm64, and Linux x64/arm64. Install globally:
+x64/arm64, macOS arm64, and Linux x64/arm64. Run it directly (each platform's
+binary is downloaded on demand and cached):
 
-无需 Rust 工具链——预编译二进制已发布到 npm，支持 Windows x64/arm64、macOS arm64 和 Linux x64/arm64。全局安装：
+无需 Rust 工具链——预编译二进制已发布到 npm，支持 Windows x64/arm64、macOS arm64 和 Linux x64/arm64。直接运行（各平台的二进制按需下载并缓存）：
+
+```bash
+npx -y minecraft-mcp-rs@1.3.2 --headless --stdio
+bunx minecraft-mcp-rs@1.3.2 --headless --stdio
+```
+
+or install globally:
+
+或全局安装：
 
 ```bash
 npm install -g minecraft-mcp-rs
-```
-
-or run it directly without installing (each platform's binary is downloaded on
-demand):
-
-或无需安装直接运行（各平台的二进制按需下载）：
-
-```bash
-npx -y minecraft-mcp-rs@1.3.1 --headless --stdio
-bunx minecraft-mcp-rs@1.3.1 --headless --stdio
 ```
 
 Ready-to-paste Claude Desktop / Cursor config (stdio implies the bot runs
@@ -232,7 +232,7 @@ headless and exits when the MCP client disconnects):
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs@1.3.1", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@1.3.2", "--headless", "--stdio"]
     }
   }
 }
@@ -378,7 +378,7 @@ settings tools (`get_settings` / `update_settings`).
 | `mc_port` | `25565` | Minecraft server port / Minecraft 服务器端口 |
 | `ai_username` | `AI_Bot` | Bot in-game username / 机器人游戏内用户名 |
 | `mcp_transport` | `Http` | MCP transport: `Stdio` or `Http` / MCP 传输方式：`Stdio` 或 `Http` |
-| `mcp_address` | `127.0.0.1` | MCP HTTP bind address (loopback only) / MCP HTTP 绑定地址（仅本地回环） |
+| `mcp_address` | `127.0.0.1` | MCP HTTP bind address. Non-loopback binds require `mcp_auth_enabled=true` (validation rejects an unauthenticated non-loopback HTTP bind) / MCP HTTP 绑定地址。绑定非回环地址时必须启用 `mcp_auth_enabled=true`（校验会拒绝无鉴权的非回环 HTTP 绑定） |
 | `mcp_port` | `3000` | MCP HTTP port / MCP HTTP 端口 |
 | `mcp_token` | random UUID v4 | Bearer token for HTTP transport, used only when auth is enabled (generated on each `AppConfig::default()`) / HTTP 传输的 Bearer Token，仅在启用鉴权时使用（每次 `AppConfig::default()` 时随机生成） |
 | `mcp_auth_enabled` | `false` | Require a Bearer token over HTTP / 要求 HTTP 请求携带 Bearer Token |
@@ -422,6 +422,12 @@ variable is present:
 | `MINECRAFT_MCP_TRANSPORT` | `mcp_transport` | `http` |
 | `MINECRAFT_MCP_LANGUAGE` | `language` | system locale / 系统语言 |
 
+> **Security note:** plain HTTP + a non-loopback `mcp_address` with
+> `mcp_auth_enabled=false` is rejected at startup (`AppConfig::validate`).
+> To expose the MCP server beyond localhost, enable Bearer auth.
+>
+> **安全提示:** `mcp_address` 为非回环地址、HTTP 传输且未启用鉴权的组合会在启动时被拒绝。如需将 MCP 服务暴露到本机之外，请启用 Bearer Token 鉴权。
+
 Malformed variable values log a warning and keep the default — startup never
 fails because of an environment typo. Semantically invalid values that parse
 but would wedge the runtime (`0` for ports/durations, out-of-range radii) are
@@ -460,6 +466,7 @@ AI agents can distinguish "bot is gone, retry later" from "input is invalid":
 | -32007 | `ContainerTimeout` | `container_timeout` | true |
 | -32008 | `PathfindingFailed` | `pathfinding_failed` | false |
 | -32009 | `CommandRejected` | `command_rejected` | true |
+| -32010 | `ContainerNotOpen` | `container_not_open` | false |
 | -32600 | `PermissionDenied` | `permission_denied` | false |
 | -32602 | `ToolNotFound` / `TooFar` / `InvalidParams` | `tool_not_found` / `too_far` / `invalid_params` | false |
 | -32603 | `Internal` | `internal_error` | false |

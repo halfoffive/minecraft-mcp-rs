@@ -19,27 +19,29 @@ use crate::ui::app::EditConfig;
 ///
 /// Returns `true` when the Connect button is clicked (caller should persist
 /// edits and spawn the connection task).
+///
+/// Each widget marks its [`EditConfig::dirty`] flag via egui's
+/// `Response::changed` (M-8); `EditConfig::apply`
+/// then merges only the edited fields into the live config, so agent-driven
+/// `update_settings` changes are never rolled back by the stale buffer.
 pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -> bool {
     let mut connect_clicked = false;
-
-    // Sync the active i18n language with the dropdown *before* rendering any
-    // label. This prevents a one-frame flash where labels above the Language
-    // section (e.g. Timing) still appear in the previous language immediately
-    // after the user picks a new one.
-    if i18n::current() != edit.language {
-        i18n::set(edit.language);
-        ui.ctx().request_repaint();
-    }
 
     // ── Minecraft Server ──────────────────────────────────────
     ui.label(i18n::tr(TextKey::MinecraftServer));
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::Address));
-        ui.add(TextEdit::singleline(&mut edit.mc_address).desired_width(180.0));
+        let resp = ui.add(TextEdit::singleline(&mut edit.mc_address).desired_width(180.0));
+        if resp.changed() {
+            edit.dirty.mc_address = true;
+        }
     });
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::Port));
-        ui.add(DragValue::new(&mut edit.mc_port).range(1..=65535));
+        let resp = ui.add(DragValue::new(&mut edit.mc_port).range(1..=65535));
+        if resp.changed() {
+            edit.dirty.mc_port = true;
+        }
     });
 
     ui.separator();
@@ -48,7 +50,10 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
     ui.label(i18n::tr(TextKey::BotIdentity));
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::Username));
-        ui.add(TextEdit::singleline(&mut edit.ai_username).desired_width(180.0));
+        let resp = ui.add(TextEdit::singleline(&mut edit.ai_username).desired_width(180.0));
+        if resp.changed() {
+            edit.dirty.ai_username = true;
+        }
     });
 
     ui.separator();
@@ -57,7 +62,10 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
     ui.label(i18n::tr(TextKey::McpServer));
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::BindAddress));
-        ui.add(TextEdit::singleline(&mut edit.mcp_address).desired_width(180.0));
+        let resp = ui.add(TextEdit::singleline(&mut edit.mcp_address).desired_width(180.0));
+        if resp.changed() {
+            edit.dirty.mcp_address = true;
+        }
     });
     // Warn when the HTTP bind address is not loopback: the Bearer
     // token travels in cleartext (no TLS), so binding to anything
@@ -76,37 +84,54 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
     }
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::BindPort));
-        ui.add(DragValue::new(&mut edit.mcp_port).range(1..=65535));
+        let resp = ui.add(DragValue::new(&mut edit.mcp_port).range(1..=65535));
+        if resp.changed() {
+            edit.dirty.mcp_port = true;
+        }
     });
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::Transport));
+        let mut transport_changed = false;
         egui::ComboBox::from_id_salt("mcp_transport_combo")
             .selected_text(transport_label(edit.mcp_transport))
             .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut edit.mcp_transport,
-                    McpTransport::Http,
-                    i18n::tr(TextKey::TransportHttp),
-                );
-                ui.selectable_value(
-                    &mut edit.mcp_transport,
-                    McpTransport::Stdio,
-                    i18n::tr(TextKey::TransportStdio),
-                );
+                transport_changed |= ui
+                    .selectable_value(
+                        &mut edit.mcp_transport,
+                        McpTransport::Http,
+                        i18n::tr(TextKey::TransportHttp),
+                    )
+                    .changed();
+                transport_changed |= ui
+                    .selectable_value(
+                        &mut edit.mcp_transport,
+                        McpTransport::Stdio,
+                        i18n::tr(TextKey::TransportStdio),
+                    )
+                    .changed();
             });
+        if transport_changed {
+            edit.dirty.mcp_transport = true;
+        }
     });
     if edit.mcp_transport == McpTransport::Http {
         ui.horizontal(|ui| {
             ui.label(i18n::tr(TextKey::Token));
-            ui.add(
+            let resp = ui.add(
                 TextEdit::singleline(&mut edit.mcp_token)
                     .password(true)
                     .hint_text(i18n::tr(TextKey::TokenHint))
                     .desired_width(180.0),
             );
+            if resp.changed() {
+                edit.dirty.mcp_token = true;
+            }
         });
         ui.horizontal(|ui| {
-            ui.checkbox(&mut edit.mcp_auth_enabled, i18n::tr(TextKey::RequireToken));
+            let resp = ui.checkbox(&mut edit.mcp_auth_enabled, i18n::tr(TextKey::RequireToken));
+            if resp.changed() {
+                edit.dirty.mcp_auth_enabled = true;
+            }
         });
     }
 
@@ -116,15 +141,24 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
     ui.label(i18n::tr(TextKey::Scanning));
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::ChunkScanRadius));
-        ui.add(DragValue::new(&mut edit.chunk_scan_radius).range(1..=16));
+        let resp = ui.add(DragValue::new(&mut edit.chunk_scan_radius).range(1..=16));
+        if resp.changed() {
+            edit.dirty.chunk_scan_radius = true;
+        }
     });
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::BlockPerceptionRadius));
-        ui.add(DragValue::new(&mut edit.block_perception_radius).range(8..=64));
+        let resp = ui.add(DragValue::new(&mut edit.block_perception_radius).range(8..=64));
+        if resp.changed() {
+            edit.dirty.block_perception_radius = true;
+        }
     });
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::SnapshotInterval));
-        ui.add(DragValue::new(&mut edit.snapshot_interval_ms).range(100..=10000));
+        let resp = ui.add(DragValue::new(&mut edit.snapshot_interval_ms).range(100..=10000));
+        if resp.changed() {
+            edit.dirty.snapshot_interval_ms = true;
+        }
     });
 
     ui.separator();
@@ -133,45 +167,57 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
     ui.label(i18n::tr(TextKey::Timing));
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::ReconnectInitialDelay));
-        ui.add(DragValue::new(&mut edit.reconnect_initial_delay_ms).range(1000..=300000));
+        let resp =
+            ui.add(DragValue::new(&mut edit.reconnect_initial_delay_ms).range(1000..=300000));
+        if resp.changed() {
+            edit.dirty.reconnect_initial_delay_ms = true;
+        }
     });
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::ReconnectMaxDelay));
-        ui.add(DragValue::new(&mut edit.reconnect_max_delay_ms).range(5000..=600000));
+        let resp = ui.add(DragValue::new(&mut edit.reconnect_max_delay_ms).range(5000..=600000));
+        if resp.changed() {
+            edit.dirty.reconnect_max_delay_ms = true;
+        }
     });
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::CommandTimeout));
-        ui.add(DragValue::new(&mut edit.command_timeout_secs).range(1..=300));
+        let resp = ui.add(DragValue::new(&mut edit.command_timeout_secs).range(1..=300));
+        if resp.changed() {
+            edit.dirty.command_timeout_secs = true;
+        }
     });
     ui.horizontal(|ui| {
         ui.label(i18n::tr(TextKey::FlyTimeout));
-        ui.add(DragValue::new(&mut edit.fly_timeout_secs).range(1..=600));
+        let resp = ui.add(DragValue::new(&mut edit.fly_timeout_secs).range(1..=600));
+        if resp.changed() {
+            edit.dirty.fly_timeout_secs = true;
+        }
     });
 
     ui.separator();
 
     // ── Language ──────────────────────────────────────────────
     // Rendered before Connect / Disconnect so it sits with the other
-    // config sections.  Changing the dropdown updates the active i18n
-    // language immediately (next frame) — no reconnect needed — by
-    // calling `i18n::set` directly here, and also persists the choice
-    // to AppConfig immediately via `update_config`.
+    // config sections. The dropdown binds DIRECTLY to the live config value
+    // — there is NO edit-buffer copy of the language (M-9). Changing it
+    // persists via `update_config` immediately; `app.rs`'s per-frame
+    // `sync_language_from_config` is the single writer for `i18n::set`, so
+    // the choice takes effect on the next frame and an agent-driven
+    // `update_settings(language=…)` can never be fought by a stale buffer.
     ui.label(i18n::tr(TextKey::Language));
-    let prev_language = edit.language;
+    let current_lang = state.read_config().language;
+    let mut lang = current_lang;
     ui.horizontal(|ui| {
         egui::ComboBox::from_id_salt("language_combo")
-            .selected_text(language_label(edit.language))
+            .selected_text(language_label(lang))
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut edit.language, Language::En, i18n::tr(TextKey::LangEn));
-                ui.selectable_value(
-                    &mut edit.language,
-                    Language::ZhCn,
-                    i18n::tr(TextKey::LangZhCn),
-                );
+                ui.selectable_value(&mut lang, Language::En, i18n::tr(TextKey::LangEn));
+                ui.selectable_value(&mut lang, Language::ZhCn, i18n::tr(TextKey::LangZhCn));
             });
     });
-    if edit.language != prev_language {
-        state.update_config(|cfg| cfg.language = edit.language);
+    if lang != current_lang {
+        state.update_config(|cfg| cfg.language = lang);
     }
     ui.separator();
 

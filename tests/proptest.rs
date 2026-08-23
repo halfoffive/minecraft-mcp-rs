@@ -8,7 +8,7 @@ use minecraft_mcp_rs::block_data::{
 };
 use minecraft_mcp_rs::command_validate::validate_coordinates;
 use minecraft_mcp_rs::compound_ops::find_standable_neighbor;
-use minecraft_mcp_rs::mining_calc::calculate_mine_time;
+use minecraft_mcp_rs::mining_calc::{calculate_mine_time, get_block_hardness};
 use minecraft_mcp_rs::tool_select::find_tool_in_inventory;
 use minecraft_mcp_rs::types::{BlockEntry, BlockPos, MaterialTier, ToolType, WorldSnapshot};
 use proptest::prelude::*;
@@ -289,6 +289,9 @@ proptest! {
     ) {
         let expected_tool = best_tool_for_block(&block_type);
         prop_assume!(expected_tool != ToolType::Hand);
+        // F-16: exclude unbreakable blocks so the property has no INFINITY
+        // escape hatch — every generated case must satisfy the ordering.
+        prop_assume!(get_block_hardness(&block_type) >= 0.0);
 
         let tiers = [
             MaterialTier::Wood,
@@ -316,7 +319,7 @@ proptest! {
 
                 if speed_a > speed_b {
                     prop_assert!(
-                        time_a <= time_b || time_a.is_infinite() || time_b.is_infinite(),
+                        time_a <= time_b,
                         "Tier {:?} (speed {speed_a}, time {time_a}) should mine faster \
                          than tier {:?} (speed {speed_b}, time {time_b})",
                         tier_a, tier_b
@@ -332,11 +335,17 @@ proptest! {
 // ═══════════════════════════════════════════════════════════════
 
 proptest! {
-    /// Property: `validate_coordinates` never panics for any i32 inputs.
+    /// Property: `validate_coordinates` never panics for any i32 inputs,
+    /// and its Ok/Err verdict is exactly the published bounds contract.
     #[test]
     fn prop_validate_coordinates_no_panic(x: i32, y: i32, z: i32) {
-        // This test simply verifies the function does not panic.
-        let _ = validate_coordinates(x, y, z);
+        let in_bounds = (-30_000_000..=30_000_000).contains(&x)
+            && (-64..=320).contains(&y)
+            && (-30_000_000..=30_000_000).contains(&z);
+        let result = validate_coordinates(x, y, z);
+        let verdict_msg =
+            format!("verdict for ({x}, {y}, {z}) must equal the documented bounds");
+        prop_assert_eq!(result.is_ok(), in_bounds, "{}", verdict_msg);
     }
 
     /// Property: Coordinates within Minecraft bounds always pass validation.
@@ -392,35 +401,21 @@ proptest! {
         let result = material_from_item_name(&name);
 
         if let Some((tool, material)) = result {
-            // Verify the returned values are valid enum variants
-            let valid_tools = [
-                ToolType::Pickaxe,
-                ToolType::Axe,
-                ToolType::Shovel,
-                ToolType::Hoe,
-                ToolType::Sword,
-                ToolType::Shears,
-                ToolType::Hand,
-            ];
-            let valid_materials = [
-                MaterialTier::Wood,
-                MaterialTier::Stone,
-                MaterialTier::Iron,
-                MaterialTier::Gold,
-                MaterialTier::Diamond,
-                MaterialTier::Netherite,
-            ];
-
-            prop_assert!(
-                valid_tools.contains(&tool),
-                "Parsed tool {:?} is not a valid tool type",
-                tool
+            // F-16: enum-variant containment was a tautology (the return type
+            // IS `(ToolType, MaterialTier)`). Assert the real contract: a
+            // parsed item name must be built from the parser's accepted
+            // material/tool name parts.
+            let tool_part = format!("{tool:?}").to_lowercase();
+            let material_part = format!("{material:?}").to_lowercase();
+            let expected = if tool == ToolType::Shears {
+                "shears".to_string()
+            } else {
+                format!("{material_part}_{tool_part}")
+            };
+            let roundtrip_msg = format!(
+                "parsed ({tool:?}, {material:?}) must round-trip to the input name"
             );
-            prop_assert!(
-                valid_materials.contains(&material),
-                "Parsed material {:?} is not a valid material tier",
-                material
-            );
+            prop_assert_eq!(name, expected, "{}", roundtrip_msg);
         }
     }
 }
@@ -586,7 +581,7 @@ proptest! {
     /// 8-direction scan. This is the same shape as the unit test
     /// `test_find_standable_neighbor_8_directions` but driven by
     /// proptest so a regression in the offset table is caught
-    /// automatically across 1000 runs.
+    /// automatically across proptest's default number of cases.
     #[test]
     fn prop_standable_neighbor_finds_diagonal_when_cardinals_blocked(
         x in -100i32..100,
@@ -635,5 +630,147 @@ proptest! {
             diag,
             result
         );
+    }
+
+    /// Property (audit M-13): a candidate whose floor is a FLUID (water,
+    /// lava, bubble_column) must NEVER be returned as standable. Build a
+    /// snapshot where the neighbours are air with fluid floors and assert
+    /// the function returns `None` — the bot must never pathfind onto a
+    /// fluid.
+    #[test]
+    fn prop_standable_neighbor_never_on_fluid(
+        x in -100i32..100,
+        z in -100i32..100,
+        y in 0i32..200,
+        fluid in prop_oneof!["water", "lava", "bubble_column"],
+    ) {
+        let target = BlockPos::new(x, y, z);
+        let mut blocks = vec![BlockEntry {
+            position: target,
+            block_type: "stone".into(),
+            block_state: None,
+        }];
+        // Every neighbour cell is air, but its floor is a fluid — none are
+        // standable. (Also seed the y-1 level floors the same way so no
+        // y+1 candidate "steps up" onto a solid floor.)
+        for &(dx, dz) in &[(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+            let cell = BlockPos::new(x + dx, y, z + dz);
+            blocks.push(BlockEntry {
+                position: cell,
+                block_type: "air".into(),
+                block_state: None,
+            });
+            blocks.push(BlockEntry {
+                position: BlockPos::new(cell.x, cell.y - 1, cell.z),
+                block_type: fluid.to_string(),
+                block_state: None,
+            });
+            // y+1 candidate: air above, fluid floor at y.
+            let upper = BlockPos::new(x + dx, y + 1, z + dz);
+            blocks.push(BlockEntry {
+                position: upper,
+                block_type: "air".into(),
+                block_state: None,
+            });
+            blocks.push(BlockEntry {
+                position: BlockPos::new(upper.x, upper.y - 1, upper.z),
+                block_type: fluid.to_string(),
+                block_state: None,
+            });
+        }
+
+        let snapshot = make_snapshot_with_blocks(blocks);
+        let result = find_standable_neighbor(&snapshot, target);
+        prop_assert!(
+            result.is_none(),
+            "found standable neighbor {:?} on a fluid ({fluid}) floor — fluids are never standable",
+            result
+        );
+    }
+
+    /// Property (audit M-14): a returned standable neighbor's Y must always
+    /// be within the world's build range (-64..=320). Targets are generated
+    /// across the whole range (including both boundaries) with a
+    /// deterministic mix of solid/air/fluid floors, so an out-of-bounds
+    /// candidate (e.g. y=321 for a target at y=320, or y=-65 for a target at
+    /// y=-64) would be caught.
+    #[test]
+    fn prop_standable_neighbor_y_within_world(
+        x in -50i32..50,
+        z in -50i32..50,
+        ty in -70i32..330i32,
+        seed in any::<u64>(),
+    ) {
+        let target = BlockPos::new(x, ty, z);
+        let mut blocks = vec![BlockEntry {
+            position: target,
+            block_type: "stone".into(),
+            block_state: None,
+        }];
+        // Deterministic varied layout: for each of the 8 horizontal offsets
+        // and the 3 Y levels, a position-hash decides air-with-solid-floor,
+        // air-with-fluid-floor, or solid.
+        for &(dx, dz) in &[
+            (-1i32, -1i32),
+            (-1, 0),
+            (-1, 1),
+            (0, -1),
+            (0, 1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+        ] {
+            for &dy in &[-1i32, 0i32, 1i32] {
+                let cell = BlockPos::new(x + dx, ty + dy, z + dz);
+                let floor = BlockPos::new(cell.x, cell.y - 1, cell.z);
+                let h = seed
+                    .wrapping_add((cell.x as u64).wrapping_mul(2654435761))
+                    .wrapping_add((cell.y as u64).wrapping_mul(40503))
+                    .wrapping_add((cell.z as u64).wrapping_mul(16777619));
+                match h % 3 {
+                    0 => {
+                        blocks.push(BlockEntry {
+                            position: cell,
+                            block_type: "air".into(),
+                            block_state: None,
+                        });
+                        blocks.push(BlockEntry {
+                            position: floor,
+                            block_type: "stone".into(),
+                            block_state: None,
+                        });
+                    }
+                    1 => {
+                        blocks.push(BlockEntry {
+                            position: cell,
+                            block_type: "air".into(),
+                            block_state: None,
+                        });
+                        blocks.push(BlockEntry {
+                            position: floor,
+                            block_type: "water".into(),
+                            block_state: None,
+                        });
+                    }
+                    _ => {
+                        blocks.push(BlockEntry {
+                            position: cell,
+                            block_type: "stone".into(),
+                            block_state: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        let snapshot = make_snapshot_with_blocks(blocks);
+        if let Some(pos) = find_standable_neighbor(&snapshot, target) {
+            prop_assert!(
+                (-64..=320).contains(&pos.y),
+                "standable neighbor y={} outside world build range (-64..=320) \
+                 for target at y={ty}",
+                pos.y
+            );
+        }
     }
 }

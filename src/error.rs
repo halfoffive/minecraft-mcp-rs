@@ -38,6 +38,14 @@ pub enum BotError {
     /// A block was not found at the given position.
     BlockNotFound(BlockPos),
 
+    /// The requested entity was not found in the current world snapshot.
+    ///
+    /// A not-found condition, not a malformed parameter: the ID is a valid
+    /// Minecraft entity ID, but the snapshot no longer contains it (stale or
+    /// fabricated ID). Maps to `RESOURCE_NOT_FOUND` so MCP clients can branch
+    /// on the error code instead of parsing `InvalidParams` messages (F-34).
+    EntityNotFound(u32),
+
     /// The chunk containing the position is not loaded.
     ChunkNotLoaded(BlockPos),
 
@@ -84,6 +92,14 @@ pub enum BotError {
     /// Waiting for a container to open timed out.
     ContainerTimeout,
 
+    /// No container is currently open (a runtime-state error: the caller
+    /// must `open_container` first).
+    ///
+    /// Distinguished from [`InvalidParams`](Self::InvalidParams) — the
+    /// parameters were fine; the *state* is wrong. Maps to its own JSON-RPC
+    /// code (-32010) so MCP clients can branch on it (audit L-9).
+    ContainerNotOpen,
+
     /// The operation was denied due to insufficient permissions.
     PermissionDenied(String),
 
@@ -125,6 +141,7 @@ impl Display for BotError {
                 write!(f, "Command `{command}` timed out after {timeout_secs}s")
             }
             BotError::BlockNotFound(pos) => write!(f, "Block not found at {pos}"),
+            BotError::EntityNotFound(id) => write!(f, "Entity not found with id {id}"),
             BotError::ChunkNotLoaded(pos) => write!(f, "Chunk not loaded at {pos}"),
             BotError::ToolNotFound {
                 tool_type,
@@ -160,6 +177,7 @@ impl Display for BotError {
             }
             BotError::ContainerAlreadyOpen => write!(f, "A container is already open"),
             BotError::ContainerTimeout => write!(f, "Container open timed out"),
+            BotError::ContainerNotOpen => write!(f, "No container is currently open"),
             BotError::PermissionDenied(msg) => write!(f, "Permission denied: {msg}"),
             BotError::InvalidParams(msg) => write!(f, "Invalid parameter: {msg}"),
             BotError::CommandRejected { command, feedback } => {
@@ -195,6 +213,7 @@ impl Display for BotError {
 // | -32000 | `CODE_OFFLINE`                   | `Offline`              | `bot_disconnected`   | true      | —                                    |
 // | -32001 | `CODE_COMMAND_TIMEOUT`           | `CommandTimeout`       | `command_timeout`    | true      | `command`, `timeout_secs`            |
 // | -32002 | `ErrorCode::RESOURCE_NOT_FOUND`  | `BlockNotFound`        | `block_not_found`    | false     | `x`, `y`, `z`                        |
+// | -32002 | `ErrorCode::RESOURCE_NOT_FOUND`  | `EntityNotFound`       | `entity_not_found`   | false     | `entity_id`                          |
 // | -32003 | `CODE_CHUNK_NOT_LOADED`          | `ChunkNotLoaded`       | `chunk_not_loaded`   | true      | `x`, `y`, `z`                        |
 // | -32004 | `CODE_INVENTORY_FULL`            | `InventoryFull`        | `inventory_full`     | false     | —                                    |
 // | -32005 | `CODE_MINING_INTERRUPTED`        | `MiningInterrupted`    | `mining_interrupted` | false     | `detail`                             |
@@ -202,6 +221,7 @@ impl Display for BotError {
 // | -32007 | `CODE_CONTAINER_TIMEOUT`         | `ContainerTimeout`     | `container_timeout`  | true      | —                                    |
 // | -32008 | `CODE_PATHFINDING_FAILED`        | `PathfindingFailed`    | `pathfinding_failed` | false     | `x`, `y`, `z` (target), `detail`     |
 // | -32009 | `CODE_COMMAND_REJECTED`          | `CommandRejected`      | `command_rejected`   | true      | `command`, `feedback`                |
+// | -32010 | `CODE_CONTAINER_NOT_OPEN`        | `ContainerNotOpen`     | `container_not_open` | false     | —                                    |
 // | -32600 | `ErrorCode::INVALID_REQUEST`     | `PermissionDenied`     | `permission_denied`  | false     | —                                    |
 // | -32602 | `ErrorCode::INVALID_PARAMS`      | `ToolNotFound`         | `tool_not_found`     | false     | `tool_type`, `material`, `alternatives` |
 // | -32602 | `ErrorCode::INVALID_PARAMS`      | `TooFar`               | `too_far`            | false     | `target`, `current`, `max_distance`  |
@@ -220,6 +240,7 @@ const CODE_CONTAINER_ALREADY_OPEN: i32 = -32006;
 const CODE_CONTAINER_TIMEOUT: i32 = -32007;
 const CODE_PATHFINDING_FAILED: i32 = -32008;
 const CODE_COMMAND_REJECTED: i32 = -32009;
+const CODE_CONTAINER_NOT_OPEN: i32 = -32010;
 
 impl From<BotError> for ErrorData {
     fn from(err: BotError) -> Self {
@@ -265,6 +286,15 @@ impl From<BotError> for ErrorData {
                     "x": pos.x,
                     "y": pos.y,
                     "z": pos.z,
+                }),
+            ),
+
+            BotError::EntityNotFound(entity_id) => (
+                ErrorCode::RESOURCE_NOT_FOUND,
+                serde_json::json!({
+                    "reason": "entity_not_found",
+                    "retryable": false,
+                    "entity_id": entity_id,
                 }),
             ),
 
@@ -359,6 +389,17 @@ impl From<BotError> for ErrorData {
                 }),
             ),
 
+            BotError::ContainerNotOpen => (
+                // L-9: distinct runtime-state code so clients can branch on
+                // `error.code` alone — "open a container first" is not an
+                // invalid parameter.
+                ErrorCode(CODE_CONTAINER_NOT_OPEN),
+                serde_json::json!({
+                    "reason": "container_not_open",
+                    "retryable": false,
+                }),
+            ),
+
             BotError::PermissionDenied(_) => (
                 ErrorCode::INVALID_REQUEST,
                 serde_json::json!({
@@ -398,6 +439,11 @@ impl From<BotError> for ErrorData {
     }
 }
 
+// F-32: this is a deliberate project contract, documented in the table above:
+// tool-level failures travel as JSON-RPC `ErrorData` with structured `reason`
+// codes instead of an MCP `is_error: true` `CallToolResult`. The error code
+// is branchable and every payload carries `reason` + `retryable`; MCP client
+// authors should read `error.data.reason`, not only `error.code`.
 impl rmcp::handler::server::tool::IntoCallToolResult for BotError {
     fn into_call_tool_result(self) -> Result<rmcp::model::CallToolResult, ErrorData> {
         Err(self.into())
@@ -445,6 +491,12 @@ mod tests {
         };
         let err = BotError::BlockNotFound(pos);
         assert_eq!(err.to_string(), format!("Block not found at {pos}"));
+    }
+
+    #[test]
+    fn test_display_entity_not_found() {
+        let err = BotError::EntityNotFound(42);
+        assert_eq!(err.to_string(), "Entity not found with id 42");
     }
 
     #[test]
@@ -543,6 +595,12 @@ mod tests {
     fn test_display_container_timeout() {
         let err = BotError::ContainerTimeout;
         assert_eq!(err.to_string(), "Container open timed out");
+    }
+
+    #[test]
+    fn test_display_container_not_open() {
+        let err = BotError::ContainerNotOpen;
+        assert_eq!(err.to_string(), "No container is currently open");
     }
 
     #[test]
@@ -678,6 +736,15 @@ mod tests {
     }
 
     #[test]
+    fn test_into_mcp_error_entity_not_found() {
+        let err = BotError::EntityNotFound(42);
+        let mcp: ErrorData = err.into();
+        assert_eq!(mcp.code, ErrorCode::RESOURCE_NOT_FOUND);
+        let data = assert_contract(&mcp, "entity_not_found", false);
+        assert_eq!(data["entity_id"], 42);
+    }
+
+    #[test]
     fn test_into_mcp_error_chunk_not_loaded() {
         let pos = BlockPos {
             x: 16,
@@ -788,6 +855,18 @@ mod tests {
     }
 
     #[test]
+    fn test_into_mcp_error_container_not_open() {
+        let err = BotError::ContainerNotOpen;
+        let mcp: ErrorData = err.into();
+        // L-9: "no container is currently open" is a RUNTIME state error, not
+        // a parameter error — it gets a distinct code (-32010) so MCP clients
+        // can distinguish "open a container first" from "your input is
+        // invalid" (which shares -32602 with other parameter errors).
+        assert_eq!(mcp.code.0, -32010);
+        assert_contract(&mcp, "container_not_open", false);
+    }
+
+    #[test]
     fn test_into_mcp_error_permission_denied() {
         let err = BotError::PermissionDenied("no access".into());
         let mcp: ErrorData = err.into();
@@ -860,6 +939,7 @@ mod tests {
             CODE_CONTAINER_TIMEOUT,
             CODE_PATHFINDING_FAILED,
             CODE_COMMAND_REJECTED,
+            CODE_CONTAINER_NOT_OPEN,
         ];
         for (i, code) in codes.iter().enumerate() {
             assert!(

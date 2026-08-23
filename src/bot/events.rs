@@ -168,7 +168,14 @@ pub async fn handle_event(bot: Client, event: Event, state: BotState) -> eyre::R
         Event::Spawn => {
             handle_spawn(bot, &state).await;
         }
-        Event::Disconnect(_) => {
+        Event::Disconnect(reason) => {
+            // The server-provided disconnect reason is otherwise never
+            // logged, which makes diagnosing an online server kick difficult
+            // (a reason like "You are not whitelisted" in a sea of
+            // connection retries). Log it before the teardown.
+            if let Some(reason) = &reason {
+                warn!(?reason, "bot disconnected — reason provided by server");
+            }
             handle_disconnect(bot, &state).await;
         }
         Event::Tick => {
@@ -329,17 +336,12 @@ async fn abort_and_clear_tick_tasks(tick_tasks: &Mutex<tokio::task::JoinSet<()>>
 }
 
 async fn handle_disconnect(bot: Client, state: &BotState) {
-    state.shared_state.set_online(false);
-    state.shared_state.set_connected_since(None);
-
-    // Drop the cached world-view render so the UI preview panel (and a
-    // later `get_world_view` call) does not keep showing a frame from the
-    // previous connection after the bot goes offline.
-    state.shared_state.clear_world_view_cache();
-
-    // Clear the ECS handle — the bot is already disconnecting, so
-    // request_disconnect no longer needs to write AppExit::Success.
-    state.shared_state.clear_bot_ecs();
+    // Shared idempotent session teardown (report M-7): online flag,
+    // connected_since, world-view cache, ECS handle, executor_busy, and the
+    // commands probe. The connect loop's cancel branch runs the SAME
+    // teardown when Event::Disconnect never fires (a Disconnect click while
+    // start() is still running — the azalea future is dropped).
+    state.shared_state.clear_session_state();
 
     // Abort the command executor so it can't use the now-stale azalea Client
     // (which would panic when touching the ECS after disconnect). The
@@ -366,24 +368,18 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     }
 
     // Abort in-flight tick snapshot tasks and reclaim their handles. This
-    // prevents the per-tick `spawn_local` handle list from growing forever
+    // prevents the per-tick spawn_local handle list from growing forever
     // across reconnects.
     abort_and_clear_tick_tasks(&state.tick_tasks).await;
 
-    // The executor is gone — clear its busy flag so query tools don't report
-    // a phantom busy state after a disconnect.
-    state.shared_state.set_executor_busy(false);
-
-    // Drop the cached `/seed` command-availability probe: the next connection
-    // may land on a different server (or a permission that changed while
-    // offline), and a stale probe would keep `commands_enabled` frozen at the
-    // old value through `resolve_commands_enabled` until someone re-probes.
-    state.shared_state.set_commands_probe(None);
+    // (executor_busy and the commands probe were already cleared by
+    // clear_session_state at the top of this function — the teardown is
+    // idempotent on both disconnect paths.)
 
     // Clear the injected dependencies so the next connection (or a test in
-    // the same process) starts from a clean slot. With `OnceLock` the first
-    // `set` would silently win forever, leaking state across reconnects and
-    // between tests; `Mutex<Option<_>>` lets us reset here.
+    // the same process) starts from a clean slot. With OnceLock the first
+    // set would silently win forever, leaking state across reconnects and
+    // between tests; Mutex<Option<_>> lets us reset here.
     *INJECTED_SHARED_STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = None;
@@ -410,28 +406,40 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
 /// The snapshot rebuild interval to use right now.
 ///
 /// The configured interval applies while the bot processed a command within
-/// the last [`ACTIVITY_WINDOW_MS`] — an active agent wants fresh world
-/// state. Otherwise the bot is idle (no MCP tools being called), so the
-/// interval relaxes to at least [`IDLE_INTERVAL_MS`], cutting the snapshot
+/// the last [`within_activity_window`] window — an active agent wants fresh
+/// world state. Otherwise the bot is idle (no MCP tools being called), so
+/// the interval relaxes to at least `IDLE_INTERVAL_MS`, cutting the snapshot
 /// cost of a parked bot by an order of magnitude. Force-refresh requests
 /// bypass the throttle gate entirely and are unaffected.
+///
+/// The activity probe is monotonic (L-23): the decision uses elapsed
+/// monotonic time since the last command, never wall-clock epoch values,
+/// so an NTP jump can neither keep the fast interval forever nor relax it
+/// early.
 fn effective_snapshot_interval_ms(state: &SharedState, configured: u64) -> u64 {
-    /// Commands within this window keep the fast configured interval.
-    const ACTIVITY_WINDOW_MS: u64 = 3_000;
     /// Relaxed interval once the bot has been idle for a while.
     const IDLE_INTERVAL_MS: u64 = 5_000;
 
-    let last = state.last_command_at_ms();
-    if last != 0 {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        if now.saturating_sub(last) <= ACTIVITY_WINDOW_MS {
-            return configured;
-        }
+    if within_activity_window(state.last_command_at(), Instant::now()) {
+        return configured;
     }
     configured.max(IDLE_INTERVAL_MS)
+}
+
+/// Pure activity-window check: is `now` within the R-13 activity window of
+/// the last activity stamp?
+///
+/// `None` (no activity ever) is never "within". Extracted as a pure helper
+/// so the relaxation decision is unit-testable with injected instants
+/// instead of sleeping past the window.
+fn within_activity_window(last_activity: Option<Instant>, now: Instant) -> bool {
+    /// Commands within this window keep the fast configured interval.
+    const ACTIVITY_WINDOW: Duration = Duration::from_millis(3_000);
+
+    match last_activity {
+        Some(t) => now.saturating_duration_since(t) <= ACTIVITY_WINDOW,
+        None => false,
+    }
 }
 
 async fn handle_tick(bot: Client, state: BotState) {
@@ -648,35 +656,46 @@ mod tests {
 
     // -- Throttle logic ------------------------------------------------------
 
+    // F-17: the two former "throttle" tests re-implemented the comparison
+    // inline and therefore tested their own copy, not `handle_tick` or the
+    // real throttle. The real gate is `SnapshotUpdater::check_and_update_timer`
+    // and is covered by six tests in `snapshot_updater.rs`; `handle_tick`
+    // additionally has the force-refresh bypass covered here.
+
+    // -- Idle snapshot relaxation (L-23 monotonic probes) -------------------
+
     #[test]
-    fn test_tick_throttle_skips_fast_updates() {
-        let state = BotState::default();
-        state.shared_state.set_online(true);
-
-        // Manually set last snapshot time to now.
-        *state.last_snapshot_time.lock().unwrap() = Instant::now();
-
-        // Should not update because interval hasn't passed.
-        let should_update = {
-            let last = state.last_snapshot_time.lock().unwrap();
-            last.elapsed() >= Duration::from_millis(state.snapshot_interval_ms)
-        };
-        assert!(!should_update);
+    fn test_within_activity_window_uses_elapsed_time() {
+        // The relaxation decision must be based on elapsed monotonic time
+        // since the activity mark — never on wall-clock epoch values (a
+        // backward NTP jump previously made `now - last` saturate to 0,
+        // keeping the fast interval forever).
+        let now = Instant::now();
+        assert!(
+            within_activity_window(Some(now - Duration::from_millis(500)), now),
+            "recent activity → fast interval"
+        );
+        assert!(
+            !within_activity_window(Some(now - Duration::from_secs(4)), now),
+            "stale activity → relax interval"
+        );
+        assert!(
+            !within_activity_window(None, now),
+            "no activity ever → relax interval"
+        );
     }
 
     #[test]
-    fn test_tick_throttle_allows_slow_updates() {
-        let state = BotState::default();
-        state.shared_state.set_online(true);
-
-        // Set last snapshot time far in the past.
-        *state.last_snapshot_time.lock().unwrap() = Instant::now() - Duration::from_secs(10);
-
-        let should_update = {
-            let last = state.last_snapshot_time.lock().unwrap();
-            last.elapsed() >= Duration::from_millis(state.snapshot_interval_ms)
-        };
-        assert!(should_update);
+    fn test_effective_snapshot_interval_follows_activity() {
+        // End-to-end through SharedState: a just-marked command keeps the
+        // configured fast interval; a never-marked state relaxes to
+        // max(configured, 5000).
+        let state = SharedState::new(crate::config::AppConfig::default());
+        assert_eq!(effective_snapshot_interval_ms(&state, 500), 5_000);
+        assert_eq!(effective_snapshot_interval_ms(&state, 3_000), 5_000);
+        state.mark_command_activity();
+        assert_eq!(effective_snapshot_interval_ms(&state, 500), 500);
+        assert_eq!(effective_snapshot_interval_ms(&state, 3_000), 3_000);
     }
 
     // -- Tick task lifecycle -------------------------------------------------

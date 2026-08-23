@@ -59,18 +59,10 @@ pub async fn handle_move_to(
         return Err(BotError::InvalidParams(e));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::MoveTo(BlockPos::new(input.x, input.y, input.z));
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── walk_direction ──────────────────────────────────────────────────────────
@@ -108,6 +100,20 @@ pub async fn handle_walk_direction(
         }
     };
 
+    // L-8: the tool doc promises vertical directions are rejected, and they
+    // must be rejected HERE at the MCP layer — `parse_direction` accepts
+    // "up"/"down" (it is the single parser for every `Direction` variant and
+    // stays as-is for tests), so without this gate the executor's rejection
+    // is one layer too deep for a client-visible contract. Reject with the
+    // accepted-set message before any command is dispatched; the executor's
+    // own check remains as defense-in-depth.
+    if matches!(direction, Direction::Up | Direction::Down) {
+        return Err(BotError::InvalidParams(format!(
+            "Vertical direction '{}' is not supported for distance-based movement. Must be one of: north, south, east, west, northeast, northwest, southeast, southwest",
+            input.direction
+        )));
+    }
+
     if input.distance < 1 || input.distance > 1000 {
         return Err(BotError::InvalidParams(format!(
             "Distance must be between 1 and 1000, got {}",
@@ -115,11 +121,7 @@ pub async fn handle_walk_direction(
         )));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::WalkDirection(direction, input.distance);
     match sender.send_command(cmd).await {
@@ -150,18 +152,10 @@ pub async fn handle_jump(
     sender: &BotCommandSender,
     _input: JumpInput,
 ) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::Jump;
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── teleport ────────────────────────────────────────────────────────────────
@@ -191,11 +185,7 @@ pub async fn handle_teleport(
         return Err(BotError::InvalidParams(e));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // Teleport routes through the server-authoritative `/tp` command, which
     // requires operator permissions (creative mode alone is not enough on a
@@ -210,11 +200,7 @@ pub async fn handle_teleport(
     }
 
     let cmd = BotCommand::Teleport(BlockPos::new(input.x, input.y, input.z));
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── smart_move ──────────────────────────────────────────────────────────────
@@ -245,18 +231,10 @@ pub async fn handle_smart_move(
         return Err(BotError::InvalidParams(e));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::SmartMove(BlockPos::new(input.x, input.y, input.z));
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── fly_to ──────────────────────────────────────────────────────────────────
@@ -286,11 +264,7 @@ pub async fn handle_fly_to(
         return Err(BotError::InvalidParams(e));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // Fly requires Creative mode
     {
@@ -303,11 +277,7 @@ pub async fn handle_fly_to(
     }
 
     let cmd = BotCommand::FlyTo(BlockPos::new(input.x, input.y, input.z));
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -461,6 +431,47 @@ mod tests {
         };
         let result = handle_walk_direction(&state, &sender, input).await;
         assert!(matches!(result, Err(BotError::InvalidParams(_))));
+    }
+
+    #[tokio::test]
+    async fn test_walk_direction_rejects_up_down_at_mcp_layer() {
+        // L-8: the tool doc promises up/down are rejected, but they used to
+        // slip through parse_direction and reach the executor. They must be
+        // rejected at the MCP layer with the accepted-set message BEFORE any
+        // command is dispatched — proved by the receiver-arrival flag.
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        make_online(&state);
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+        let arrived = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let arrived_probe = Arc::clone(&arrived);
+        let responder = tokio::spawn(async move {
+            while let Some(wrapped) = receiver.recv().await {
+                arrived_probe.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = wrapped.respond_to.send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }));
+            }
+        });
+
+        for direction in ["up", "down"] {
+            let input = WalkDirectionInput {
+                direction: direction.into(),
+                distance: 1,
+            };
+            let result = handle_walk_direction(&state, &sender, input).await;
+            assert!(
+                matches!(result, Err(BotError::InvalidParams(ref msg))
+                    if msg.contains("north, south, east, west")),
+                "direction '{direction}' must be rejected at the MCP layer with the accepted-set message, got: {result:?}"
+            );
+        }
+        assert!(
+            !arrived.load(std::sync::atomic::Ordering::SeqCst),
+            "up/down must be rejected before any command is dispatched"
+        );
+        responder.abort();
     }
 
     #[tokio::test]

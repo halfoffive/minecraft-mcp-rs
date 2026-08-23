@@ -1,10 +1,11 @@
 //! Screenshot preview panel: shows the most recent `get_world_view` render.
 //!
-//! The panel reads [`SharedState::get_world_view_cache`] each frame and
-//! decodes the cached base64 PNG into an [`egui::ColorImage`] for display.
-//! A "Refresh" button clears the cache and re-renders the current snapshot
-//! at a fixed `radius=8, scale=2` (68×68 blocks → 136×136 pixels) — large
-//! enough to be useful, small enough to decode every frame without lag.
+//! The panel reads [`SharedState::world_view_cache_meta`] each frame — a
+//! cheap accessor that never clones the cached base64 PNG (M-11) — and
+//! decodes the full cached PNG into an [`egui::ColorImage`] only when a
+//! rebuild is genuinely needed. A "Refresh" button clears the cache and
+//! re-renders the current snapshot at a fixed `radius=8, scale=2`
+//! (17×17 blocks → 34×34 pixels) — small enough to decode without lag.
 //!
 //! When the cache is empty (no `get_world_view` call has happened yet, or
 //! the bot is offline and the cache was cleared), the panel shows a
@@ -15,24 +16,43 @@ use egui::{ColorImage, Image, TextureHandle, Ui};
 use std::sync::Arc;
 
 use crate::i18n::{self, TextKey};
-use crate::state::SharedState;
+use crate::state::{SharedState, WorldViewCacheMeta};
+
+/// Rebuild key for the preview texture: the `(snapshot_seq, annotation)`
+/// pair the texture was last built from (M-11).
+///
+/// Two snapshot builds inside the same wall-clock second share a
+/// seconds-granular timestamp, so their annotation JSON can be identical
+/// while the underlying PNG differs (block types changed). Keying on
+/// [`WorldViewCacheMeta::snapshot_seq`] in addition to the annotation
+/// catches that case — the same fix W-2 already applied to the MCP-layer
+/// cache.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PreviewRebuildKey {
+    /// `WorldSnapshot::snapshot_seq` of the snapshot the texture was
+    /// rendered from.
+    pub snapshot_seq: u64,
+    /// The annotation JSON the texture was rendered with (also shown below
+    /// the image so the user can see centre coords / radius / scale / yaw).
+    pub annotation_json: String,
+}
 
 /// Decide whether the preview texture must be rebuilt this frame.
 ///
-/// `cache` is the current world-view cache entry; `last_annotation` is the
-/// annotation JSON the texture was last built from.
+/// `meta` is the cheap metadata of the current world-view cache entry;
+/// `last_key` is the key the texture was last built from.
 ///
-/// - `(Some(c), Some(prev))` → rebuild only when the annotation changed.
+/// - `(Some(m), Some(prev))` → rebuild only when `snapshot_seq` or the
+///   annotation changed.
 /// - `(Some(_), None)` → first render — build.
 /// - `(None, _)` → no cache (nothing rendered yet, or the bot went offline
 ///   and `handle_disconnect` cleared the cache) — clear the stale texture
 ///   so the panel does not keep showing a frozen frame after a disconnect.
-fn should_rebuild(
-    cache: &Option<crate::state::WorldViewCache>,
-    last_annotation: &Option<String>,
-) -> bool {
-    match (cache, last_annotation) {
-        (Some(c), Some(prev)) => c.annotation_json != *prev,
+fn should_rebuild(meta: &Option<WorldViewCacheMeta>, last_key: &Option<PreviewRebuildKey>) -> bool {
+    match (meta, last_key) {
+        (Some(m), Some(prev)) => {
+            m.snapshot_seq != prev.snapshot_seq || m.annotation_json != prev.annotation_json
+        }
         (Some(_), None) => true,
         (None, _) => true,
     }
@@ -50,27 +70,33 @@ fn should_rebuild(
 /// owns across frames — egui textures must be retained between frames to
 /// avoid re-uploading the same PNG every redraw. The caller passes a
 /// mutable `Option<TextureHandle>` and this function updates it only when
-/// the cached PNG's annotation JSON changes (so the texture is not
-/// rebuilt every frame).
+/// the cached render's `(snapshot_seq, annotation)` key changes (so the
+/// texture is not rebuilt every frame).
 pub fn preview_panel(
     ui: &mut Ui,
     state: &Arc<SharedState>,
     texture: &mut Option<TextureHandle>,
-    last_annotation: &mut Option<String>,
+    last_key: &mut Option<PreviewRebuildKey>,
 ) {
-    let cache = state.get_world_view_cache();
+    // Each frame read ONLY the cheap cache meta — never the whole
+    // `WorldViewCache` with its ~700 KB base64 PNG (M-11).
+    let meta = state.world_view_cache_meta();
 
     // Rebuild the texture only when the cached render actually changed
-    // (annotation JSON differs) or the cache is gone (first render, or a
-    // disconnect cleared it — a stale frame must not linger). This avoids
-    // re-decoding the PNG every frame, which would be a noticeable CPU hit
-    // at scale=8.
-    if should_rebuild(&cache, &*last_annotation) {
+    // (snapshot_seq and/or annotation JSON differs) or the cache is gone
+    // (first render, or a disconnect cleared it — a stale frame must not
+    // linger). The full cache — including the PNG — is fetched only here,
+    // when a rebuild is genuinely needed.
+    if should_rebuild(&meta, last_key) {
+        let cache = state.get_world_view_cache();
         if let Some(ref c) = cache {
             match decode_png_to_texture(ui.ctx(), &c.png_base64) {
                 Ok(handle) => {
                     *texture = Some(handle);
-                    *last_annotation = Some(c.annotation_json.clone());
+                    *last_key = Some(PreviewRebuildKey {
+                        snapshot_seq: c.snapshot_seq,
+                        annotation_json: c.annotation_json.clone(),
+                    });
                 }
                 Err(e) => {
                     ui.colored_label(
@@ -78,13 +104,13 @@ pub fn preview_panel(
                         format!("{} {}", i18n::tr(TextKey::Error), e),
                     );
                     *texture = None;
-                    *last_annotation = None;
+                    *last_key = None;
                     state.clear_world_view_cache();
                 }
             }
         } else {
             *texture = None;
-            *last_annotation = None;
+            *last_key = None;
         }
     }
 
@@ -111,8 +137,8 @@ pub fn preview_panel(
         // Show the annotation below the image so the user can see the
         // centre coords / radius / scale / yaw without inspecting the
         // MCP response.
-        if let Some(ref ann) = *last_annotation {
-            ui.monospace(ann);
+        if let Some(ref key) = *last_key {
+            ui.monospace(&key.annotation_json);
         }
     } else if state.is_online() {
         ui.label(i18n::tr(TextKey::WorldViewPlaceholder));
@@ -129,7 +155,7 @@ pub fn preview_panel(
 /// Clears the cache first so the next `get_world_view` call is forced to
 /// re-run the renderer (instead of returning a stale cache hit), then
 /// calls the MCP-layer `get_world_view` with fixed `radius=8, scale=2`
-/// (68×68 blocks → 136×136 pixels). The result is discarded — the side
+/// (17×17 blocks → 34×34 pixels). The result is discarded — the side
 /// effect (cache populated) is what we want.
 fn refresh_render(state: &Arc<SharedState>) {
     state.clear_world_view_cache();
@@ -235,60 +261,64 @@ mod tests {
         assert!(state.last_error().is_some());
     }
 
-    // ── should_rebuild (A3) ─────────────────────────────────────────
+    // ── should_rebuild (M-11) ─────────────────────────────────────────
+
+    fn meta(seq: u64, annotation: &str) -> crate::state::WorldViewCacheMeta {
+        crate::state::WorldViewCacheMeta {
+            snapshot_seq: seq,
+            radius: 8,
+            scale: 2,
+            annotation_json: annotation.into(),
+        }
+    }
+
+    fn key(seq: u64, annotation: &str) -> PreviewRebuildKey {
+        PreviewRebuildKey {
+            snapshot_seq: seq,
+            annotation_json: annotation.into(),
+        }
+    }
 
     /// A missing cache always forces a rebuild/clear — the very first frame
     /// must build the texture, and a disconnect-cleared cache must drop the
     /// stale texture instead of keeping a frozen frame.
     #[test]
     fn test_should_rebuild_missing_cache_always_rebuilds() {
-        let cache: Option<crate::state::WorldViewCache> = None;
-        assert!(should_rebuild(&cache, &None));
-        assert!(should_rebuild(&cache, &Some("old annotation".into())));
+        let meta: Option<crate::state::WorldViewCacheMeta> = None;
+        assert!(should_rebuild(&meta, &None));
+        assert!(should_rebuild(&meta, &Some(key(1, "old annotation"))));
     }
 
-    /// A fresh cache entry with no previous annotation must be rendered.
+    /// A fresh cache entry with no previous key must be rendered.
     #[test]
     fn test_should_rebuild_first_render() {
-        let cache = Some(crate::state::WorldViewCache {
-            snapshot_seq: 1,
-            radius: 8,
-            scale: 2,
-            png_base64: "x".into(),
-            block_count: 0,
-            entity_count: 0,
-            annotation_json: "ann".into(),
-        });
-        assert!(should_rebuild(&cache, &None));
+        assert!(should_rebuild(&Some(meta(1, "ann")), &None));
     }
 
-    /// An unchanged annotation is a cache hit — no rebuild.
+    /// An unchanged (seq, annotation) pair is a cache hit — no rebuild.
     #[test]
     fn test_should_rebuild_unchanged_annotation_skips() {
-        let cache = Some(crate::state::WorldViewCache {
-            snapshot_seq: 1,
-            radius: 8,
-            scale: 2,
-            png_base64: "x".into(),
-            block_count: 0,
-            entity_count: 0,
-            annotation_json: "ann".into(),
-        });
-        assert!(!should_rebuild(&cache, &Some("ann".into())));
+        assert!(!should_rebuild(&Some(meta(1, "ann")), &Some(key(1, "ann"))));
     }
 
     /// A changed annotation forces a rebuild.
     #[test]
     fn test_should_rebuild_changed_annotation_rebuilds() {
-        let cache = Some(crate::state::WorldViewCache {
-            snapshot_seq: 1,
-            radius: 8,
-            scale: 2,
-            png_base64: "x".into(),
-            block_count: 0,
-            entity_count: 0,
-            annotation_json: "new-ann".into(),
-        });
-        assert!(should_rebuild(&cache, &Some("old-ann".into())));
+        assert!(should_rebuild(
+            &Some(meta(1, "new-ann")),
+            &Some(key(1, "old-ann"))
+        ));
+    }
+
+    /// M-11: two snapshot builds inside the same wall-clock second share a
+    /// seconds-granular timestamp in the annotation, so the annotation can
+    /// be identical while the PNG differs (block types changed). The rebuild
+    /// decision must key on `snapshot_seq` in addition to the annotation.
+    #[test]
+    fn test_preview_rebuilds_on_seq_change_with_same_annotation() {
+        assert!(
+            should_rebuild(&Some(meta(2, "ann")), &Some(key(1, "ann"))),
+            "same annotation but newer snapshot_seq must rebuild"
+        );
     }
 }

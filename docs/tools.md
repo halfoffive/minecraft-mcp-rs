@@ -1,6 +1,6 @@
 # Tools
 
-`minecraft-mcp-rs` exposes **30+ MCP tools** organized into 8 domains, plus a
+`minecraft-mcp-rs` exposes **41 MCP tools** organized into 8 domains, plus a
 unified `act` tool. Each tool module (`mcp/tools_*.rs`) exposes a builder
 function, and tool parameters are annotated with
 `#[derive(schemars::JsonSchema)]` so clients get accurate JSON schemas.
@@ -41,8 +41,8 @@ able to change the Minecraft server address before the first connect:
 
 | Tool | Description |
 |------|-------------|
-| `get_settings` | Returns the full configuration (the MCP token is redacted to `"***"`) plus runtime status: `online`, `connecting`, `mcp_server_status`, `config_path`. |
-| `update_settings` | Partial update — only provided fields change. Validated, persisted to the config file **before** being applied. Changing `mc_address`/`mc_port`/`ai_username` triggers a reconnect when connected/connecting; `mcp_transport`/`mcp_address`/`mcp_port` take effect on process restart. |
+| `get_settings` | Returns the full configuration (the MCP token is redacted to `"***"`) plus runtime status: `online`, `connecting`, `mcp_server_status`. |
+| `update_settings` | Partial update — only provided fields change. Validated **before** being applied to the running process (there is no config file; restart with `MINECRAFT_MCP_*` environment variables to persist). Changing `mc_address`/`mc_port`/`ai_username` triggers a reconnect when connected/connecting; `mcp_transport`/`mcp_address`/`mcp_port` take effect on process restart. |
 | `connect_bot` | Starts the bot connection to the configured server. No-op if already connected or connecting. |
 | `disconnect_bot` | Requests a disconnect; the reconnect loop stops. |
 
@@ -63,6 +63,7 @@ machine-readable `reason`, a `retryable` bool, and variant-specific fields:
 | -32007 | `ContainerTimeout` | `container_timeout` | true |
 | -32008 | `PathfindingFailed` | `pathfinding_failed` | false |
 | -32009 | `CommandRejected` | `command_rejected` | true |
+| -32010 | `ContainerNotOpen` | `container_not_open` | false |
 | -32600 | `PermissionDenied` | `permission_denied` | false |
 | -32602 | `ToolNotFound` / `TooFar` / `InvalidParams` | `tool_not_found` / `too_far` / `invalid_params` | false |
 | -32603 | `Internal` | `internal_error` | false |

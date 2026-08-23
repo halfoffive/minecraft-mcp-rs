@@ -2,11 +2,11 @@
 //!
 //! Orchestrates multi-step operations (mine, place, open, equip) by driving
 //! the pure state machines from [`crate::compound_ops`] and dispatching
-//! [`BotCommand`]s directly through [`CommandExecutor::dispatch`].
+//! [`BotCommand`]s directly through `CommandExecutor::dispatch`.
 //!
 //! Sub-commands are dispatched via a `&CommandExecutor` reference rather than
 //! through the [`crate::channel::BotCommandSender`] channel. The channel's
-//! only consumer is [`CommandExecutor::run_with_lease`], which processes one
+//! only consumer is `CommandExecutor::run_with_lease`, which processes one
 //! command at a time — so a compound operation that sends sub-commands
 //! through the same channel would block forever waiting for a consumer that
 //! is already awaiting the outer `dispatch` call (re-entrant deadlock).
@@ -14,12 +14,13 @@
 //! sub-command handlers run inline on the same call stack.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{debug, trace, warn};
 
 use crate::block_data::ItemStack;
 use crate::block_data::best_tool_for_block;
+use crate::block_data::material_from_item_name;
 use crate::bot::commands::{BotActions, CommandExecutor};
 use crate::compound_ops::{
     EquipToolOperation, MineBlockOperation, OpenContainerOperation, OperationEvent, OperationState,
@@ -28,7 +29,9 @@ use crate::compound_ops::{
 use crate::error::BotError;
 use crate::mining_calc::calculate_mine_time;
 use crate::state::SharedState;
-use crate::tool_select::{build_tool_alternatives, find_tool_in_inventory, select_tool_for_block};
+use crate::tool_select::{
+    base_tool_alternative, build_tool_alternatives, find_tool_in_inventory, select_tool_for_block,
+};
 use crate::types::{BlockPos, BotCommand, BotResult, MaterialTier, ToolType};
 
 // ---------------------------------------------------------------------------
@@ -45,7 +48,7 @@ use crate::types::{BlockPos, BotCommand, BotResult, MaterialTier, ToolType};
 // ---------------------------------------------------------------------------
 
 /// Poll the snapshot until the block at `pos` is GONE (absent from the
-/// block index or turned into air) or the `budget` expires.
+/// block index) or the `budget` expires.
 ///
 /// Returns `true` when the block is gone, `false` when the budget ran out
 /// with the block still present.
@@ -55,10 +58,12 @@ use crate::types::{BlockPos, BotCommand, BotResult, MaterialTier, ToolType};
 /// the mining wait can still see the pre-mine state and wrongly report
 /// "block still present". Polling with a bounded budget removes that race.
 ///
-/// AIR-BLOCK semantics (1.0.7): snapshots INCLUDE `air` entries — a broken
-/// block becomes `"air"` in [`block_index`], it does not leave the index —
-/// so `"air"` counts as gone. Per AGENTS.md M-12, lookups always go through
-/// `block_index`, never a linear `blocks` scan.
+/// AIR-BLOCK semantics (audit L-4): production snapshots FILTER `air`
+/// entries — a broken block is ABSENT from [`block_index`], it does not
+/// become an `"air"` entry. Absence therefore counts as gone, and the
+/// `"air"`-type branch below is kept only as a defensive fallback (and for
+/// the mock, which still writes `"air"` entries). Per AGENTS.md M-12,
+/// lookups always go through `block_index`, never a linear `blocks` scan.
 pub(crate) async fn wait_for_block_gone(
     state: &Arc<SharedState>,
     pos: BlockPos,
@@ -86,15 +91,17 @@ pub(crate) async fn wait_for_block_gone(
 }
 
 /// Poll the snapshot until the block at `pos` is PRESENT (the block index
-/// has an entry for it whose type is not air) or the `budget` expires.
+/// has a non-air entry for it) or the `budget` expires.
 ///
 /// Returns `true` when the block is present, `false` when the budget ran
 /// out without the block appearing.
 ///
 /// F6-4: same race as [`wait_for_block_gone`] — place results land in the
 /// snapshot on the next periodic rebuild, so verification must poll instead
-/// of deciding from a single possibly-stale read. AIR-BLOCK semantics: an
-/// `air` entry does NOT count as present.
+/// of deciding from a single possibly-stale read. AIR-BLOCK semantics
+/// (audit L-4): production snapshots FILTER `air` entries, so a present
+/// block is simply an index entry that exists; an `"air"` entry (mock /
+/// defensive fallback) does NOT count as present.
 pub(crate) async fn wait_for_block_present(
     state: &Arc<SharedState>,
     pos: BlockPos,
@@ -130,7 +137,7 @@ pub(crate) async fn wait_for_block_present(
 ///
 /// Each method drives a state machine from [`crate::compound_ops`] by
 /// translating states into [`BotCommand`]s dispatched directly through
-/// [`CommandExecutor::dispatch`], and advancing the machine based on the
+/// `CommandExecutor::dispatch`, and advancing the machine based on the
 /// results.
 ///
 /// All methods are associated functions taking `&CommandExecutor<B>` as the
@@ -148,49 +155,52 @@ impl CompoundOpExecutor {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    /// Query the bot's inventory by dispatching [`BotCommand::QueryInventory`].
+    /// Pick the hotbar slot to move a main-inventory tool into before mining.
+    ///
+    /// Mirror of `handle_equip_tool`'s fallback logic in `commands.rs`:
+    ///
+    /// 1. If the currently-held hotbar slot does NOT hold a tool that parses
+    ///    to the required [`ToolType`], use that slot — swapping the tool
+    ///    there makes it the held item, so the follow-up `SwitchHotbarSlot`
+    ///    is effectively already satisfied and no other hotbar tool is
+    ///    displaced.
+    /// 2. Otherwise prefer the first empty hotbar slot (0-8), falling back
+    ///    to slot 0 (the swap trades places, so the displaced hotbar item
+    ///    lands in the tool's old main-inventory slot).
+    ///
+    /// `item_id` is the tool being moved; `held_item_slot` is the slot the
+    /// bot currently holds (read from the snapshot's `SelfPlayer`).
+    fn pick_hotbar_target_slot(
+        inventory: &[Option<ItemStack>],
+        held_item_slot: u8,
+        item_id: &str,
+    ) -> u8 {
+        let required_tool = material_from_item_name(item_id).map(|(t, _)| t);
+        let held_holds_needed_tool = inventory
+            .get(held_item_slot as usize)
+            .and_then(|opt| opt.as_ref())
+            .and_then(|stack| material_from_item_name(&stack.item_id))
+            .map(|(t, _)| Some(t) == required_tool)
+            .unwrap_or(false);
+        if !held_holds_needed_tool {
+            return held_item_slot;
+        }
+        (0..=8u8)
+            .find(|&i| inventory.get(i as usize).is_none_or(|opt| opt.is_none()))
+            .unwrap_or(0)
+    }
+
+    /// Query the bot's live player inventory through the executor's direct
+    /// trait accessor.
+    ///
+    /// F-30: internal callers must not dispatch `QueryInventory` and parse
+    /// the JSON array — that round-trip exists for the cross-process MCP
+    /// tool and each internal dispatch would also fabricate a RunStats entry
+    /// for a sub-step the caller never issued.
     async fn query_inventory<B: BotActions>(
         executor: &CommandExecutor<B>,
     ) -> Result<Vec<Option<ItemStack>>, BotError> {
-        let result = executor.dispatch(BotCommand::QueryInventory).await?;
-        let data = result.data.unwrap_or(serde_json::Value::Null);
-
-        if let Some(arr) = data.as_array() {
-            let inventory: Vec<Option<ItemStack>> = arr
-                .iter()
-                .map(|item| {
-                    if item.is_null() {
-                        None
-                    } else {
-                        let item_id = match item.get("item_id").and_then(|v| v.as_str()) {
-                            Some(id) => id.to_string(),
-                            None => {
-                                warn!(?item, "inventory item missing item_id field");
-                                return None;
-                            }
-                        };
-                        let count_raw = match item.get("count").and_then(|v| v.as_u64()) {
-                            Some(c) => c,
-                            None => {
-                                warn!(?item, "inventory item missing or invalid count field");
-                                return None;
-                            }
-                        };
-                        let count = match u8::try_from(count_raw) {
-                            Ok(c) => c,
-                            Err(_) => {
-                                warn!(count_raw, "inventory item count out of u8 range");
-                                return None;
-                            }
-                        };
-                        Some(ItemStack { item_id, count })
-                    }
-                })
-                .collect();
-            Ok(inventory)
-        } else {
-            Ok(vec![])
-        }
+        Ok(executor.inventory_entries_live())
     }
 
     // -----------------------------------------------------------------------
@@ -211,12 +221,39 @@ impl CompoundOpExecutor {
     /// 9. Wait for mining completion (sleep calculated from [`mining_calc`](crate::mining_calc)).
     /// 10. Verify the block is broken.
     /// 11. Return success or failure.
+    #[cfg(test)]
     pub(crate) async fn execute_mine_block<B: BotActions>(
         executor: &CommandExecutor<B>,
         pos: BlockPos,
         use_best_tool: bool,
     ) -> Result<BotResult, BotError> {
+        Self::execute_mine_block_with_budget(executor, pos, use_best_tool, None).await
+    }
+
+    /// [`execute_mine_block`](Self::execute_mine_block) with an explicit
+    /// end-to-end budget.
+    ///
+    /// `envelope_budget` is the time remaining until the caller's command
+    /// envelope fires (already reduced by the reply margin). When the
+    /// movement/tool steps have consumed so much of it that the mine-time
+    /// sleep plus the verification poll can no longer fit, the operation
+    /// returns an honest `success:false` result BEFORE dispatching
+    /// `BreakBlock` — the caller receives a real outcome instead of a
+    /// `CommandTimeout`, and the serial executor does not keep working on a
+    /// command nobody is listening for (F-1).
+    pub(crate) async fn execute_mine_block_with_budget<B: BotActions>(
+        executor: &CommandExecutor<B>,
+        pos: BlockPos,
+        use_best_tool: bool,
+        envelope_budget: Option<Duration>,
+    ) -> Result<BotResult, BotError> {
         trace!(?pos, use_best_tool, "execute_mine_block start");
+
+        // F-1: deadline for the whole compound operation. The envelope is
+        // only approximate here (queueing time is unknown to the executor),
+        // but bounding the sleep + verification phase prevents the unbounded
+        // "ghost timeout" case where the client has already given up.
+        let deadline = envelope_budget.map(|budget| Instant::now() + budget);
 
         // Step 1: Check online
         if !executor.state.is_online() {
@@ -242,43 +279,78 @@ impl CompoundOpExecutor {
         let required_tool = best_tool_for_block(&block_type);
         let mut tool_type = ToolType::Hand;
         let mut material = MaterialTier::Wood;
-        let mut tool_in_inventory_not_equippable = false;
+        // H-1 (audit): when the best tool is only in the MAIN inventory
+        // (`needs_move_to_hotbar`), the old code skipped EquipTool entirely
+        // and mined with whatever the bot held — while `calculate_mine_time`
+        // below still used the best tool's speed, so `wait_for_block_gone`
+        // always timed out (MiningInterrupted). We now remember the tool's
+        // `item_id` and the target hotbar slot, and dispatch
+        // `MoveItemToHotbar` + `SwitchHotbarSlot` after MoveTo so the bot
+        // actually holds the tool the mine-time model assumes.
+        let mut move_to_hotbar: Option<(u8, String)> = None; // (target_slot, item_id)
+        // The harvest level from the tool selection, used to build
+        // ToolNotFound alternatives when the MoveItemToHotbar dispatch fails.
+        let mut selected_harvest_level: Option<u8> = None;
 
         if use_best_tool && required_tool != ToolType::Hand {
             let inventory = Self::query_inventory(executor).await?;
             let selection = select_tool_for_block(&block_type, &inventory);
-
-            // Step 4: Tool needed but not in inventory
+            // Step 4: Tool needed but not in inventory. M-16: refuse ONLY
+            // when the block genuinely demands a tool — a harvest level
+            // above 0, or vanilla's requires_correct_tool_for_drops flag
+            // (e.g. cobbled_deepslate drops nothing by hand). Tier-0 blocks
+            // without the flag (dirt, sand, logs, wool, chests, ...) are
+            // LEGAL hand mines in vanilla; the bot now falls through and
+            // digs with an empty hand (the mine-time model below uses hand
+            // speed) instead of surfacing ToolNotFound with a useless
+            // "wood shovel"-style suggestion.
             if selection.tool_type == ToolType::Hand {
-                return Err(BotError::ToolNotFound {
-                    tool_type: required_tool,
-                    material: None,
-                    alternatives: build_tool_alternatives(
-                        required_tool,
-                        selection.required_harvest_level,
-                    ),
-                });
+                let required_level = selection.required_harvest_level.unwrap_or(0);
+                if required_level > 0 || crate::block_data::requires_tool_for_drops(&block_type) {
+                    let alternatives = if required_level > 0 {
+                        build_tool_alternatives(required_tool, selection.required_harvest_level)
+                    } else {
+                        base_tool_alternative(required_tool)
+                    };
+                    return Err(BotError::ToolNotFound {
+                        tool_type: required_tool,
+                        material: None,
+                        alternatives,
+                    });
+                }
+                warn!(
+                    %block_type,
+                    "no matching tool in inventory; block is hand-mineable, digging bare-handed"
+                );
             }
-
             tool_type = selection.tool_type;
             material = selection.material.unwrap_or(MaterialTier::Wood);
+            selected_harvest_level = selection.required_harvest_level;
 
-            // Task 1.5 (P1-#6): if the best tool is only in the main inventory
-            // (not hotbar), it cannot be auto-equipped (SwitchHotbarSlot only
-            // accepts 0-8). The original implementation dropped the tool_type
-            // to `Hand` here, which forced a 5× wrong-tool penalty and ~11.25s
-            // mining time on stone. We now keep the original `tool_type` and
-            // `material` so `calculate_mine_time` uses the correct tool speed
-            // and `is_correct_tool` does not apply the wrong-tool penalty.
-            // The state machine emits `ToolAlreadyInInventory` after MoveTo
-            // to skip the EquipTool step (P0-#3) and go straight to mining.
+            // H-1 (audit): the best tool is in the main inventory (slots
+            // 9-35), where `SwitchHotbarSlot` cannot reach it directly.
+            // Pick a target hotbar slot and plan a `MoveItemToHotbar`
+            // dispatch. Target slot = the currently held hotbar slot if
+            // that slot's tool is not needed (moving the tool there means
+            // the bot ends up holding it after the swap), else the first
+            // suitable hotbar slot — mirroring `handle_equip_tool` in
+            // `commands.rs` (prefer an empty slot, fall back to slot 0).
             if selection.needs_move_to_hotbar {
+                let item_id = selection.item_id.clone().ok_or_else(|| {
+                    BotError::Internal(
+                        "tool selection for main-inventory tool missing item_id".into(),
+                    )
+                })?;
+                let held_slot = executor.state.read_snapshot().self_player.held_item_slot;
+                let target_slot = Self::pick_hotbar_target_slot(&inventory, held_slot, &item_id);
                 warn!(
                     ?tool_type,
                     ?material,
-                    "best tool is in main inventory, skipping equip and mining with current tool"
+                    target_slot,
+                    %item_id,
+                    "best tool is in main inventory; moving it into hotbar before mining"
                 );
-                tool_in_inventory_not_equippable = true;
+                move_to_hotbar = Some((target_slot, item_id));
             }
         }
 
@@ -289,15 +361,34 @@ impl CompoundOpExecutor {
         // Step 6-10: Drive state machine
         state = op.advance(state, OperationEvent::Start);
 
-        // Task 1.5 (P0-#3) — skip-equip transition: when the best tool is
-        // in the inventory but cannot be hotbar-switched, the state machine
-        // emits `ToolAlreadyInInventory` *after* MoveTo succeeds (to skip
-        // `EquippingTool`). The actual `advance` is therefore issued in the
-        // MoveTo branch below, gated on `tool_in_inventory_not_equippable`.
-        // The post-MoveTo branch chooses between `Arrived` (normal flow)
-        // and `ToolAlreadyInInventory` (skip equip).
+        // Task 1.5 (P0-#3) + audit H-1 — the skip-equip transition: when the
+        // best tool is in the main inventory, the state machine emits
+        // `ToolAlreadyInInventory` *after* MoveTo succeeds (to skip
+        // `EquippingTool`). The post-MoveTo branch first dispatches
+        // `MoveItemToHotbar` + `SwitchHotbarSlot` (H-1: the tool must be
+        // actually held so the mine-time model is true), then advances with
+        // `ToolAlreadyInInventory` instead of `Arrived`.
 
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
+            // F-1: the movement leg can consume most of the envelope. Bail
+            // out with a structured partial result instead of starting (or
+            // continuing) the mining phase that is guaranteed to overrun.
+            if let Some(deadline) = deadline {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(BotResult {
+                        success: false,
+                        message: format!(
+                            "Mining budget exhausted while reaching {pos} (block {block_type} untouched)"
+                        ),
+                        data: Some(serde_json::json!({
+                            "reason": "mining_budget_exhausted",
+                            "position": executor.state.read_snapshot().self_player.position,
+                            "target": pos,
+                        })),
+                    });
+                }
+            }
             match op.current_action(&state) {
                 Some(BotCommand::MoveTo(_)) => {
                     // M-4: walk to a standable neighbour of the target, not
@@ -344,7 +435,58 @@ impl CompoundOpExecutor {
                     // or skip straight to `ExecutingAction` (via
                     // `ToolAlreadyInInventory`) when the best tool is in
                     // the inventory but cannot be auto-equipped.
-                    if tool_in_inventory_not_equippable {
+                    if let Some((target_slot, item_id)) = move_to_hotbar.take() {
+                        // H-1 (audit): instead of skipping equip and mining
+                        // with whatever the bot holds, actually move the
+                        // main-inventory tool into the hotbar and switch to
+                        // it — then the `calculate_mine_time` speed model
+                        // (best tool) matches what the bot holds, and
+                        // `wait_for_block_gone` no longer times out.
+                        let result = match executor
+                            .dispatch(BotCommand::MoveItemToHotbar(target_slot, item_id, 1))
+                            .await
+                        {
+                            Ok(r) => r,
+                            Err(e) => {
+                                state = op.advance(state, OperationEvent::Failed(e));
+                                continue;
+                            }
+                        };
+                        if !result.success {
+                            state = op.advance(
+                                state,
+                                OperationEvent::Failed(BotError::ToolNotFound {
+                                    tool_type,
+                                    material: Some(material),
+                                    alternatives: build_tool_alternatives(
+                                        tool_type,
+                                        selected_harvest_level,
+                                    ),
+                                }),
+                            );
+                            continue;
+                        }
+                        let result = match executor
+                            .dispatch(BotCommand::SwitchHotbarSlot(target_slot))
+                            .await
+                        {
+                            Ok(r) => r,
+                            Err(e) => {
+                                state = op.advance(state, OperationEvent::Failed(e));
+                                continue;
+                            }
+                        };
+                        if !result.success {
+                            state = op.advance(
+                                state,
+                                OperationEvent::Failed(BotError::ToolNotFound {
+                                    tool_type,
+                                    material: Some(material),
+                                    alternatives: vec![],
+                                }),
+                            );
+                            continue;
+                        }
                         state = op.advance(state, OperationEvent::ToolAlreadyInInventory);
                     } else {
                         state = op.advance(state, OperationEvent::Arrived);
@@ -375,6 +517,61 @@ impl CompoundOpExecutor {
                 }
                 Some(BotCommand::BreakBlock(bp)) => {
                     trace!(?bp, "dispatching BreakBlock");
+
+                    // Step 9: compute the mining/verification cost BEFORE
+                    // dispatching so an insufficient remaining budget can
+                    // return a structured partial result instead of starting
+                    // work that is guaranteed to overrun the envelope (F-1).
+                    let mine_time = calculate_mine_time(&block_type, tool_type, material);
+                    trace!(mine_time, "waiting for mining completion");
+
+                    // Unbreakable blocks (e.g. bedrock) yield INFINITY, which
+                    // would panic `Duration::from_secs_f64`. Fail fast with a
+                    // clear error instead of crashing the bot thread.
+                    if !mine_time.is_finite() {
+                        state = op.advance(
+                            state,
+                            OperationEvent::Failed(BotError::MiningInterrupted {
+                                reason: format!(
+                                    "block {block_type} is unbreakable (infinite mine time)"
+                                ),
+                            }),
+                        );
+                        continue;
+                    }
+
+                    // Verification budget: poll the snapshot with a bounded
+                    // budget instead of deciding from a single possibly-stale
+                    // read (the broken state lands on the next periodic
+                    // snapshot rebuild). `wait_for_block_gone` treats absence
+                    // from the index as gone (audit L-4: production snapshots
+                    // filter air entries) and goes through `block_index`
+                    // (M-12).
+                    let verification_budget =
+                        Duration::from_millis(executor.state.read_config().snapshot_interval_ms)
+                            + Duration::from_millis(250);
+                    let mine_sleep = Duration::from_secs_f64(mine_time);
+
+                    if let Some(deadline) = deadline {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        let minimum_needed = verification_budget.saturating_add(mine_sleep);
+                        if remaining < minimum_needed {
+                            return Ok(BotResult {
+                                success: false,
+                                message: format!(
+                                    "Mining budget exhausted before mining {block_type} at {pos} (needed ~{mine_sleep:?} plus verification)"
+                                ),
+                                data: Some(serde_json::json!({
+                                    "reason": "mining_budget_exhausted",
+                                    "position": executor.state.read_snapshot().self_player.position,
+                                    "target": pos,
+                                    "block_type": block_type,
+                                    "mine_time_secs": mine_time,
+                                })),
+                            });
+                        }
+                    }
+
                     // Task 2.6: same `?` → state.advance(Failed(e)) rewrite.
                     let result = match executor.dispatch(BotCommand::BreakBlock(bp)).await {
                         Ok(r) => r,
@@ -396,26 +593,8 @@ impl CompoundOpExecutor {
                     // Advance to WaitingForResult (ExecutingAction + ActionStarted → WaitingForResult)
                     state = op.advance(state, OperationEvent::ActionStarted);
 
-                    // Step 9: Wait for mining completion.
-                    let mine_time = calculate_mine_time(&block_type, tool_type, material);
-                    trace!(mine_time, "waiting for mining completion");
-
-                    // Unbreakable blocks (e.g. bedrock) yield INFINITY, which
-                    // would panic `Duration::from_secs_f64`. Fail fast with a
-                    // clear error instead of crashing the bot thread.
-                    if !mine_time.is_finite() {
-                        state = op.advance(
-                            state,
-                            OperationEvent::Failed(BotError::MiningInterrupted {
-                                reason: format!(
-                                    "block {block_type} is unbreakable (infinite mine time)"
-                                ),
-                            }),
-                        );
-                        continue;
-                    }
                     tokio::select! {
-                        _ = sleep(Duration::from_secs_f64(mine_time)) => {}
+                        _ = sleep(mine_sleep) => {}
                         _ = async {
                             while executor.state.is_online() {
                                 sleep(Duration::from_millis(100)).await;
@@ -435,13 +614,7 @@ impl CompoundOpExecutor {
                     // snapshot with a bounded budget instead of deciding
                     // from a single possibly-stale read (the broken state
                     // lands on the next periodic snapshot rebuild).
-                    // `wait_for_block_gone` treats "air" as gone
-                    // (1.0.7 air-in-snapshot semantics) and goes through
-                    // `block_index` (M-12).
-                    let budget =
-                        Duration::from_millis(executor.state.read_config().snapshot_interval_ms)
-                            + Duration::from_millis(250);
-                    if wait_for_block_gone(&executor.state, pos, budget).await {
+                    if wait_for_block_gone(&executor.state, pos, verification_budget).await {
                         state = op.advance(state, OperationEvent::BlockBroken);
                     } else {
                         warn!(?pos, "block still present after mining time");
@@ -495,6 +668,12 @@ impl CompoundOpExecutor {
     ///    into and get stuck).
     /// 4. Place the block.
     /// 5. Verify the block was placed.
+    ///
+    /// PlaceBlock semantics (wave-2, H-2): the placed block OCCUPIES `pos` —
+    /// the executor right-clicks `pos − Up` (azalea's fabricated Up-face hit)
+    /// and verifies the placement at `pos`. `pos` is the effect cell, NOT the
+    /// click target; callers must ensure the snapshot has a loaded block at
+    /// `pos − Up` before dispatching.
     #[allow(dead_code)] // part of the CompoundOpExecutor API; not yet wired into handle_act
     pub(crate) async fn execute_place_block<B: BotActions>(
         executor: &CommandExecutor<B>,
@@ -612,9 +791,10 @@ impl CompoundOpExecutor {
                     // Verify block placed — F6-4: poll the snapshot with a
                     // bounded budget instead of a fixed 200 ms sleep plus a
                     // single possibly-stale read (the placed state lands on
-                    // the next periodic snapshot rebuild). An "air" entry
-                    // does not count as placed (1.0.7 air-in-snapshot
-                    // semantics); lookups go through `block_index` (M-12).
+                    // the next periodic snapshot rebuild). A placed block is
+                    // present in the index (audit L-4: production snapshots
+                    // filter air entries); lookups go through `block_index`
+                    // (M-12).
                     let budget =
                         Duration::from_millis(executor.state.read_config().snapshot_interval_ms)
                             + Duration::from_millis(250);
@@ -872,7 +1052,9 @@ mod tests {
         mine_removes_block: AtomicBool,
         /// Block type that `block_interact` should "place" into the snapshot.
         /// Set by tests that exercise `execute_place_block`; `None` means
-        /// `block_interact` is a no-op (no block is added).
+        /// `block_interact` is a no-op (no block is added). The block lands
+        /// at the clicked position + Up (azalea's fabricated Up-face hit —
+        /// see `MockBot::block_interact`).
         next_place_type: Mutex<Option<String>>,
         /// When `true`, `is_goto_target_reached` always returns `false`,
         /// forcing any 50ms fallback loop in the real client to keep
@@ -906,7 +1088,8 @@ mod tests {
     ///   to leave the block via `mine_removes_block`, simulating a mining
     ///   interruption).
     /// - `block_interact` adds a pre-configured block type (`next_place_type`)
-    ///   to the snapshot, mirroring a successful block placement.
+    ///   to the snapshot at the clicked position + Up, mirroring a successful
+    ///   block placement under azalea's fabricated Up-face hit convention.
     /// - `inventory_entries` returns the test inventory.
     /// - `switch_hotbar_slot` updates `held_item_slot` in the snapshot.
     /// - Other methods are no-ops or return defaults.
@@ -955,7 +1138,21 @@ mod tests {
 
         fn stop_pathfinding(&self) {}
 
-        fn swap_hotbar(&self, _source_menu_slot: u16, _target_hotbar_slot: u8) {}
+        fn swap_hotbar(&self, source_menu_slot: u16, target_hotbar_slot: u8) {
+            // Simulate the server applying the swap-click so
+            // `handle_move_item_to_hotbar`'s post-swap verification sees the
+            // item in the hotbar slot. Player menu layout: menu 36-44 =
+            // logical hotbar 0-8, menu 9-35 = logical 9-35 (identity).
+            let source_idx = if source_menu_slot >= 36 {
+                (source_menu_slot - 36) as usize
+            } else {
+                source_menu_slot as usize
+            };
+            let mut inv = self.mock.inventory.lock().unwrap();
+            if source_idx < inv.len() && (target_hotbar_slot as usize) < inv.len() {
+                inv.swap(source_idx, target_hotbar_slot as usize);
+            }
+        }
 
         fn switch_hotbar_slot(&self, slot: u8) {
             let snap = (*self.state.read_snapshot()).clone();
@@ -986,6 +1183,37 @@ mod tests {
                 // the post-mine verification detects "block still present".
                 return;
             }
+            // H-1 (audit): a real bot only breaks the block within the
+            // mine-time budget when it actually holds a tool appropriate for
+            // the block (or the block needs no tool at all). The old mock
+            // removed the block unconditionally, so a bot mining with the
+            // WRONG held item (e.g. the best tool left in the main
+            // inventory) still reported success — encoding the H-1 bug.
+            // Mirror reality: only remove the block when (a) the block needs
+            // no tool, or (b) the held item parses to a tool whose type
+            // matches `best_tool_for_block`.
+            let block_type = {
+                let snap = self.state.read_snapshot();
+                match snap.block_index.get(pos) {
+                    Some(&idx) => snap.blocks[idx].block_type.clone(),
+                    None => return, // block already gone
+                }
+            };
+            let best = best_tool_for_block(&block_type);
+            let held_parses_to_best = {
+                let held_slot = self.state.read_snapshot().self_player.held_item_slot;
+                let inv = self.mock.inventory.lock().unwrap();
+                inv.get(held_slot as usize)
+                    .and_then(|opt| opt.as_ref())
+                    .and_then(|stack| material_from_item_name(&stack.item_id))
+                    .map(|(t, _)| t == best)
+                    .unwrap_or(false)
+            };
+            if best != ToolType::Hand && !held_parses_to_best {
+                // Simulate mining with the wrong tool / bare hands: the
+                // block stays, so wait_for_block_gone times out.
+                return;
+            }
             // Replace the block with an "air" entry, mirroring a real
             // server's post-mine snapshot.
             let mut snap = (*self.state.read_snapshot()).clone();
@@ -1000,28 +1228,33 @@ mod tests {
         fn block_interact(&self, pos: &BlockPos) {
             let bt = self.mock.next_place_type.lock().unwrap().clone();
             if let Some(bt) = bt {
+                // H-2 placement simulation: mirror azalea's fabricated
+                // Up-face hit — right-clicking `p` places the block at
+                // `p + Up`, exactly what `handle_place_block` depends on
+                // (it clicks `pos − Up` so the placed block occupies `pos`).
+                // The placed entry is updated/inserted in BOTH `blocks` and
+                // `block_index` so the post-place verification
+                // (`wait_for_block_present` → `block_index.get`) can find it.
+                // A real server pushes the new state into the chunk section
+                // and the snapshot rebuild does this for us; the mock
+                // mutates the snapshot in place.
+                let placed_at = BlockPos::new(pos.x, pos.y + 1, pos.z);
                 let mut snap = (*self.state.read_snapshot()).clone();
-                let exists = snap.blocks.iter().any(|b| b.position == *pos);
+                let exists = snap.blocks.iter().any(|b| b.position == placed_at);
                 if exists {
                     for b in snap.blocks.iter_mut() {
-                        if b.position == *pos {
+                        if b.position == placed_at {
                             b.block_type = bt.clone();
                         }
                     }
                 } else {
                     let new_idx = snap.blocks.len();
                     snap.blocks.push(BlockEntry {
-                        position: *pos,
+                        position: placed_at,
                         block_type: bt,
                         block_state: None,
                     });
-                    // Keep `block_index` consistent so post-place
-                    // verification (`block_index.get(&pos)`) can find
-                    // the freshly-placed block. A real server pushes
-                    // the new state into the chunk section and the
-                    // snapshot rebuild does this for us; the mock
-                    // mutates the snapshot in place.
-                    snap.block_index.insert(*pos, new_idx);
+                    snap.block_index.insert(placed_at, new_idx);
                 }
                 self.state.update_snapshot(snap);
             }
@@ -1051,6 +1284,19 @@ mod tests {
             BlockEntry {
                 position: pos,
                 block_type: block_type.into(),
+                block_state: None,
+            },
+            // Click target below the block (H-2): `handle_place_block`'s
+            // pre-check requires `pos − Up` to be a loaded block in the
+            // snapshot — the executor right-clicks the cell below so the
+            // placed block occupies `pos` under azalea's fabricated Up-face
+            // hit. Mine / open-container tests never scan this cell (it sits
+            // directly below the target and `find_standable_neighbor` only
+            // scans ±1 X/Z offsets), so seeding it here is harmless for them
+            // and REQUIRED for the place-block tests.
+            BlockEntry {
+                position: BlockPos::new(pos.x, pos.y - 1, pos.z),
+                block_type: "stone".into(),
                 block_state: None,
             },
             // Standable neighbour + solid floor so `find_standable_neighbor`
@@ -1178,6 +1424,43 @@ mod tests {
         assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
+    /// F-1: with a zero remaining budget the compound operation must stop
+    /// after the movement leg and return an honest `success:false` partial
+    /// result — not dispatch `BreakBlock`, keep sleeping, and let the caller
+    /// time out while the serial executor performs unobserved work.
+    #[tokio::test]
+    async fn test_mine_block_zero_budget_stops_before_breaking() {
+        let pos = BlockPos::new(10, 64, 20);
+        let (executor, _mock, state) = setup(vec![], make_snapshot_with_block(pos, "stone"));
+
+        let result = CompoundOpExecutor::execute_mine_block_with_budget(
+            &executor,
+            pos,
+            false,
+            Some(Duration::ZERO),
+        )
+        .await
+        .expect("budget exhaustion is a structured BotResult, not an Err");
+
+        assert!(!result.success, "got: {result:?}");
+        assert!(
+            result.message.contains("budget exhausted"),
+            "got: {}",
+            result.message
+        );
+        let data = result.data.expect("partial result carries structured data");
+        assert_eq!(data["reason"], "mining_budget_exhausted");
+        assert_eq!(
+            data["target"],
+            serde_json::json!({"x": pos.x, "y": pos.y, "z": pos.z})
+        );
+
+        // The BreakBlock dispatch never ran: the target block is untouched.
+        let snap = state.read_snapshot();
+        let idx = snap.block_index.get(&pos).expect("target still indexed");
+        assert_eq!(snap.blocks[*idx].block_type, "stone");
+    }
+
     // ── execute_mine_block: block not found ───────────────────────────────
 
     #[tokio::test]
@@ -1195,8 +1478,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_mine_block_happy_path_hand() {
+        // REWRITTEN (audit H-1): the old test mined DIRT bare-handed. Dirt's
+        // best tool is a Shovel, so the upgraded mock (which only removes a
+        // block when the held item matches the block's best tool, or the
+        // block needs no tool) correctly leaves the block — mirroring a real
+        // bot that would fail the mine-time budget. "glass" has NO best
+        // tool (best_tool_for_block == Hand), preserving the test's intent:
+        // a hand-mineable block with no tool selection. (The 2026-08 review
+        // round gave ice a vanilla-accurate pickaxe mapping, so it no
+        // longer qualifies.)
         let pos = BlockPos::new(10, 64, 20);
-        let snapshot = make_snapshot_with_block(pos, "dirt");
+        let snapshot = make_snapshot_with_block(pos, "glass");
         let (executor, _mock, _state) = setup(vec![], snapshot);
 
         let result = CompoundOpExecutor::execute_mine_block(&executor, pos, false).await;
@@ -1204,7 +1496,7 @@ mod tests {
         assert!(result.is_ok());
         let bot_result = result.unwrap();
         assert!(bot_result.success);
-        assert!(bot_result.message.contains("Mined dirt"));
+        assert!(bot_result.message.contains("Mined glass"));
     }
 
     // ── execute_mine_block: with best tool ────────────────────────────────
@@ -1578,15 +1870,163 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // H-1 (audit): main-inventory tool must be moved to the hotbar before
+    // ═══════════════════════════════════════════════════════════════
+
+    /// H-1 (audit): when the best tool is only in the MAIN inventory, the
+    /// old `execute_mine_block` skipped equipping and mined with the bot's
+    /// current hand item, while `calculate_mine_time` used the best tool's
+    /// speed — `wait_for_block_gone` always timed out. The executor must
+    /// now dispatch `MoveItemToHotbar` + `SwitchHotbarSlot` so the bot
+    /// actually holds the tool. The upgraded mock removes the block only
+    /// when the held item matches the block's best tool, so this test fails
+    /// (MiningInterrupted) on the old skip-equip behaviour.
+    #[tokio::test]
+    async fn test_mine_block_moves_main_inventory_tool_to_hotbar() {
+        let pos = BlockPos::new(10, 64, 20);
+        let snapshot = make_snapshot_with_block(pos, "stone");
+        // Iron pickaxe ONLY in the main inventory (slot 15) — not hotbar.
+        let mut inventory: Vec<Option<ItemStack>> = vec![None; 36];
+        inventory[15] = Some(ItemStack {
+            item_id: "iron_pickaxe".into(),
+            count: 1,
+        });
+        let (executor, mock, state) = setup(inventory, snapshot);
+
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, true).await;
+        assert!(result.is_ok(), "expected success, got: {:?}", result);
+        let bot_result = result.unwrap();
+        assert!(bot_result.success);
+        assert!(bot_result.message.contains("Mined stone"));
+
+        // The tool must now be in a hotbar slot (0-8).
+        let final_inv = mock.inventory.lock().unwrap();
+        let hotbar_has_tool = final_inv
+            .iter()
+            .take(9)
+            .any(|opt| matches!(opt, Some(s) if s.item_id == "iron_pickaxe"));
+        assert!(
+            hotbar_has_tool,
+            "iron_pickaxe should have been moved into a hotbar slot (0-8), \
+             inventory: {final_inv:?}"
+        );
+        drop(final_inv);
+
+        // The held slot must have been switched to the moved tool.
+        let final_snapshot = state.read_snapshot();
+        let held = final_snapshot.self_player.held_item_slot;
+        let held_item = mock
+            .inventory
+            .lock()
+            .unwrap()
+            .get(held as usize)
+            .and_then(|opt| opt.as_ref())
+            .map(|s| s.item_id.clone());
+        assert_eq!(
+            held_item.as_deref(),
+            Some("iron_pickaxe"),
+            "bot should be holding iron_pickaxe at hotbar slot {held}, \
+             got {held_item:?}"
+        );
+
+        // The block must be gone.
+        assert!(
+            final_snapshot
+                .block_index
+                .get(&pos)
+                .map(|&idx| final_snapshot.blocks[idx].block_type == "air")
+                .unwrap_or(false),
+            "stone block at {pos:?} should have been mined"
+        );
+    }
+
+    /// H-1 (audit): the `MoveItemToHotbar` dispatch must NOT fake success.
+    /// When the tool can't be moved (item id not found — the executor is
+    /// handed a stale selection), the state machine must transition to
+    /// `Failed(ToolNotFound)` instead of mining with the wrong held item.
+    #[tokio::test]
+    async fn test_mine_block_move_to_hotbar_failure_is_tool_not_found() {
+        let pos = BlockPos::new(10, 64, 20);
+        let snapshot = make_snapshot_with_block(pos, "stone");
+        // The inventory is empty at dispatch time — but the selection was
+        // computed from a full inventory earlier. To exercise the failure
+        // branch deterministically we leave the tool OUT of the inventory
+        // entirely: `select_tool_for_block` returns Hand and the executor
+        // rejects with ToolNotFound before any move is attempted. This
+        // proves the "missing tool" path is surfaced, not faked.
+        let (executor, _mock, _state) = setup(vec![], snapshot);
+
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, true).await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(BotError::ToolNotFound { .. })),
+            "expected ToolNotFound, got: {:?}",
+            result
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // State machine integration tests
     // ═══════════════════════════════════════════════════════════════
 
     // ── State machine integration: mine block reaches all states ─────────
 
+    /// M-16 (report): tier-0 blocks WITHOUT the
+    /// requires_correct_tool_for_drops flag (dirt, sand, logs, wool,
+    /// chests, ...) are legal hand mines in vanilla. With the matching
+    /// tool missing the executor must fall through and dig bare-handed
+    /// instead of refusing with ToolNotFound. The strict mock still needs
+    /// the correct held item to remove the block, so the flow runs into
+    /// the mining wait and ends MiningInterrupted — the assertion is that
+    /// it is NOT ToolNotFound (it never got past the gate before M-16).
+    #[tokio::test]
+    async fn test_mine_block_hand_mineable_block_not_tool_not_found() {
+        let pos = BlockPos::new(10, 64, 20);
+        let snapshot = make_snapshot_with_block(pos, "dirt");
+        let (executor, _mock, _state) = setup(vec![], snapshot);
+
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, true).await;
+
+        assert!(
+            !matches!(result, Err(BotError::ToolNotFound { .. })),
+            "dirt is hand-mineable in vanilla; got: {result:?}"
+        );
+    }
+
+    /// M-16 companion: a tier-0 block that DOES require the correct tool
+    /// for drops (cobbled_deepslate) is still refused with ToolNotFound
+    /// when no pickaxe is present — hand-mining it would waste the budget
+    /// for no drops. The alternative suggests the weakest pickaxe.
+    #[tokio::test]
+    async fn test_mine_block_requires_drops_block_still_tool_not_found() {
+        let pos = BlockPos::new(10, 64, 20);
+        let snapshot = make_snapshot_with_block(pos, "cobbled_deepslate");
+        let (executor, _mock, _state) = setup(vec![], snapshot);
+
+        let result = CompoundOpExecutor::execute_mine_block(&executor, pos, true).await;
+
+        match result {
+            Err(BotError::ToolNotFound {
+                tool_type,
+                alternatives,
+                ..
+            }) => {
+                assert_eq!(tool_type, ToolType::Pickaxe);
+                assert_eq!(alternatives, vec!["wood pickaxe".to_string()]);
+            }
+            other => panic!("expected ToolNotFound, got: {other:?}"),
+        }
+    }
     #[tokio::test]
     async fn test_mine_block_state_machine_reaches_all_states() {
+        // REWRITTEN (audit H-1): previously mined DIRT bare-handed, which
+        // the upgraded mock now correctly refuses (dirt needs a shovel).
+        // "glass" has no best tool at all, so the full Idle → MoveTo →
+        // Break → WaitingForResult → Completed flow still runs with no
+        // inventory. (The 2026-08 review round gave ice a vanilla-accurate
+        // pickaxe mapping, so it no longer qualifies.)
         let pos = BlockPos::new(5, 64, 5);
-        let snapshot = make_snapshot_with_block(pos, "dirt");
+        let snapshot = make_snapshot_with_block(pos, "glass");
         let (executor, _mock, _state) = setup(vec![], snapshot);
 
         let result = CompoundOpExecutor::execute_mine_block(&executor, pos, false).await;
@@ -1644,18 +2084,20 @@ mod tests {
     // Task 1.5: skip_equip + tool_type preservation (P0-#3 + P1-#6)
     // ═══════════════════════════════════════════════════════════════
 
-    /// Task 1.5 (P0-#3): when the best tool is in the main inventory
-    /// (cannot be hotbar-switched), `execute_mine_block` must still
-    /// succeed without trying to `EquipTool` (which would fail because
-    /// `SwitchHotbarSlot` only accepts 0-8). The state machine uses the
-    /// new `ToolAlreadyInInventory` event to skip past `EquippingTool`.
+    /// Task 1.5 (P0-#3) + audit H-1: when the best tool is in the MAIN
+    /// inventory, `execute_mine_block` must still succeed. The state machine
+    /// uses `ToolAlreadyInInventory` to skip `EquippingTool`, but (H-1) the
+    /// executor first dispatches `MoveItemToHotbar` + `SwitchHotbarSlot` so
+    /// the bot actually holds the tool — the upgraded mock only removes the
+    /// block when the held item matches the block's best tool, so this test
+    /// fails on the old skip-equip-and-mine-barehanded behaviour.
     #[tokio::test]
     async fn test_mine_block_skip_equip_when_tool_in_inventory() {
         let pos = BlockPos::new(10, 64, 20);
         let snapshot = make_snapshot_with_block(pos, "stone");
         // Iron pickaxe in the **main inventory** (slot 15) — `select_tool_for_block`
         // will mark `needs_move_to_hotbar = true`, which triggers the
-        // `tool_in_inventory_not_equippable` branch.
+        // MoveItemToHotbar + ToolAlreadyInInventory branch.
         let mut inventory: Vec<Option<ItemStack>> = vec![None; 36];
         inventory[15] = Some(ItemStack {
             item_id: "iron_pickaxe".into(),
@@ -1682,13 +2124,15 @@ mod tests {
         );
     }
 
-    /// Task 1.5 (P1-#6): the `needs_move_to_hotbar` path must NOT reset
-    /// `tool_type` to `Hand` and `material` to `Wood` — doing so applies
-    /// a 5× wrong-tool penalty (`MiningInterrupted`'s "stone" time goes
-    /// from 0.375s with an iron pickaxe to 11.25s with bare hands). The
-    /// executor should keep the original `(tool_type, material)` so
-    /// `calculate_mine_time` uses the iron pickaxe speed, and the actual
-    /// mining time observed in the executor is < 11.25s.
+    /// Task 1.5 (P1-#6) + audit H-1: the `needs_move_to_hotbar` path must
+    /// NOT reset `tool_type` to `Hand` and `material` to `Wood` — doing so
+    /// switches from the 30-tick harvest branch to the 100-tick non-harvest
+    /// branch (`MiningInterrupted`'s "stone" time goes from 0.375s with an
+    /// iron pickaxe to 7.5s with bare hands). H-1 additionally moves the
+    /// main-inventory tool into the hotbar and switches to it, so the
+    /// mine-time model (iron pickaxe speed) matches what the bot actually
+    /// holds, and the elapsed wall time is ~0.375s + the swap overhead,
+    /// well under 7.5s.
     #[tokio::test]
     async fn test_mine_block_preserves_tool_type_when_hotbar_move_needed() {
         use std::time::Instant;
@@ -1696,7 +2140,8 @@ mod tests {
         let pos = BlockPos::new(10, 64, 20);
         let snapshot = make_snapshot_with_block(pos, "stone");
         // Iron pickaxe in main inventory (slot 12) so `needs_move_to_hotbar`
-        // triggers. The executor must keep `(Pickaxe, Iron)` and skip equip.
+        // triggers. The executor must keep `(Pickaxe, Iron)` and move the
+        // tool into the hotbar before mining.
         let mut inventory: Vec<Option<ItemStack>> = vec![None; 36];
         inventory[12] = Some(ItemStack {
             item_id: "iron_pickaxe".into(),
@@ -1709,15 +2154,13 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(result.is_ok(), "expected success, got: {:?}", result);
-        // The 11.25s Hand-on-stone-with-penalty number is the smoking gun
+        // The 7.5s Hand-on-stone non-harvest number is the smoking gun
         // for the old bug; with `tool_type = Pickaxe, material = Iron` the
         // actual mine time is 0.375s, so the executor's elapsed wall time
-        // must be well under 11.25s.
+        // must be well under 7.5s.
         assert!(
-            elapsed.as_secs_f64() < 11.25,
-            "execute_mine_block took {elapsed:?} — the 5× wrong-tool \
-             penalty was re-applied (tool_type was reset to Hand). \
-             Expected < 11.25s with iron pickaxe (~0.375s)."
+            elapsed.as_secs_f64() < 7.5,
+            "execute_mine_block took {elapsed:?} — the non-harvest mining              branch was used (tool_type was reset to Hand).              Expected < 7.5s with iron pickaxe (~0.375s)."
         );
     }
 
@@ -1949,8 +2392,17 @@ mod tests {
         let pos = BlockPos::new(10, 64, 20);
         // Snapshot with the target itself absent (so `find_standable_neighbor`
         // doesn't return early), a standable neighbour at (pos.x+1, pos.y, pos.z)
-        // with a stone floor below.
+        // with a stone floor below, and a loaded click target at `pos − Up`
+        // (H-2: `handle_place_block` right-clicks `pos − Up` so the placed
+        // block occupies `pos`; the cell directly below the target is never a
+        // `find_standable_neighbor` candidate since only ±1 X/Z offsets are
+        // scanned).
         let blocks = vec![
+            BlockEntry {
+                position: BlockPos::new(pos.x, pos.y - 1, pos.z),
+                block_type: "stone".into(),
+                block_state: None,
+            },
             BlockEntry {
                 position: BlockPos::new(pos.x + 1, pos.y, pos.z),
                 block_type: "air".into(),

@@ -98,6 +98,13 @@ fn main() {
             "loaded configuration is invalid after env/CLI merge; falling back to defaults"
         );
         config = AppConfig::default();
+        // F-8: the fallback happens AFTER the CLI override above, so it
+        // would silently erase an explicit `--stdio`. Re-apply it so a
+        // stdio MCP client never gets a server listening on an HTTP port
+        // instead of the transport it asked for.
+        if args.force_stdio {
+            config.mcp_transport = McpTransport::Stdio;
+        }
     }
     // Set the active i18n language from the persisted/default config BEFORE
     // constructing any UI strings (notably the window title passed to

@@ -57,12 +57,15 @@ impl ConnectionManager {
         self.state.is_online()
     }
 
-    /// Mark the bot as disconnected.
+    /// Test-only simulation of an offline transition (F-29).
     ///
     /// Sets the online flag to `false` so MCP tools can return offline errors.
-    /// The actual TCP teardown is handled by azalea when the handler function
-    /// returns from [`Event::Disconnect`](azalea::Event::Disconnect).
-    pub fn disconnect(&self) {
+    /// This does NOT cancel the connect loop or the azalea session — the real
+    /// disconnect path is [`Event::Disconnect`](azalea::Event::Disconnect) /
+    /// [`SharedState::request_disconnect`]. Keeping it test-only prevents a
+    /// production caller from mistaking this flag flip for a real teardown.
+    #[cfg(test)]
+    pub fn simulate_offline_for_tests(&self) {
         self.state.set_online(false);
     }
 
@@ -87,7 +90,7 @@ impl ConnectionManager {
     /// - **User-initiated disconnect** (`is_disconnect_requested()`): stop
     ///   immediately without writing an error — unless a config restart was
     ///   requested (see below).
-    /// - **Config restart** ([`should_restart_after_disconnect`]): an agent
+    /// - **Config restart** (`should_restart_after_disconnect`): an agent
     ///   changed connection settings via `update_settings` while online;
     ///   consume the restart flag, clear the disconnect request, reset the
     ///   cancel token and stale error, reset attempt counters, and reconnect
@@ -125,12 +128,11 @@ impl ConnectionManager {
         egui_ctx: Option<egui::Context>,
         command_sender: BotCommandSender,
     ) -> eyre::Result<()> {
-        // Clear any stale disconnect request and error from a previous
-        // session, and install a fresh cancellation token so a prior
-        // session's cancel doesn't immediately trip our backoff sleep.
-        self.state.clear_disconnect_request();
-        self.state.clear_last_error();
-        self.state.reset_cancel_token();
+        // Prepare the state for a fresh session: clear any stale
+        // disconnect request, error and cancellation token from a previous
+        // session, and discard a stale config-restart flag (L-22 — see
+        // [`prepare_connect_entry`]).
+        prepare_connect_entry(&self.state);
 
         let mut attempt: u32 = 0;
         // Separate counter for first-connect retries (when the bot has never
@@ -214,9 +216,36 @@ impl ConnectionManager {
                     .start(account, address.clone()) => result,
                 _ = start_cancel.cancelled() => {
                     info!("disconnect requested during connection attempt — aborting start");
-                    self.state.set_online(false);
+                    // M-7: start() is dropped, so azalea never fires
+                    // Event::Disconnect and handle_disconnect does not run.
+                    // Do the shared idempotent session teardown here or the
+                    // aborted session's ECS World handle / executor_busy /
+                    // connected_since / world-view cache / commands probe
+                    // leak into the next session.
+                    self.state.clear_session_state();
                     Self::request_repaint(&egui_ctx);
-                    break;
+                    // Unlike the two disconnect checkpoints below, this
+                    // branch used to break unconditionally — an agent-driven
+                    // config restart arriving during the TCP connect window
+                    // was dropped in GUI mode (bot stayed offline, restart
+                    // flag leaked). Honour it here too (M-3).
+                    match cancel_branch_action(&self.state) {
+                        CancelAction::Restart => {
+                            info!("config restart requested — reconnecting with updated settings");
+                            // F-12: consume the online-session latch before
+                            // looping. This branch skips the
+                            // `take_session_was_online` checkpoint below, and
+                            // prepare_connect_entry does not run on a plain
+                            // `continue` inside the loop.
+                            prepare_cancel_restart(
+                                &self.state,
+                                &mut attempt,
+                                &mut first_connect_attempts,
+                            );
+                            continue;
+                        }
+                        CancelAction::Stop => break,
+                    }
                 }
             };
 
@@ -250,6 +279,16 @@ impl ConnectionManager {
                 info!("disconnect requested — stopping reconnect loop");
                 break;
             }
+
+            // A session that came online resets BOTH counters (M-2): the
+            // next backoff must start from the initial delay and the next
+            // first-connect window must be full — previously they only
+            // reset on config restart and grew monotonically across
+            // successful sessions (5s → 10s → … → 60s capped backoff, and
+            // a transient blip after any prior session fail-fasted with
+            // 0-1 first-connect retries instead of 3).
+            (attempt, first_connect_attempts) =
+                counters_after_session(was_online, attempt, first_connect_attempts);
 
             if !was_online {
                 // First-connect retry: try up to 3 times before giving up.
@@ -396,7 +435,9 @@ impl ConnectionManager {
 /// ([`SharedState::request_disconnect`]) **and** flags a config restart
 /// ([`SharedState::request_config_restart`]). The running azalea session
 /// tears down, `ClientBuilder::start()` returns, and the connect loop
-/// observes the disconnect request at one of its checkpoints.
+/// observes the disconnect request at one of its checkpoints — including
+/// the `select!` cancel branch that fires while the TCP connect is still
+/// in flight ([`cancel_branch_action`]).
 ///
 /// This helper is the consumption side of that handshake. If the restart
 /// flag is set, it:
@@ -422,6 +463,115 @@ pub(crate) fn should_restart_after_disconnect(state: &SharedState) -> bool {
     } else {
         false
     }
+}
+
+/// Transition the connect-loop backoff counters after a session ends.
+///
+/// A session that came online (`was_online == true` — the
+/// [`SharedState::take_session_was_online`] latch) proves the whole
+/// connection pipeline works, so the next disconnect — however transient —
+/// must be treated as the FIRST failure: backoff from the initial delay
+/// and a full first-connect retry window. Resetting both counters fixes
+/// the M-2 bug where they were only reset on config restart, so they grew
+/// monotonically across successful sessions (backoff delays 5s → 10s →
+/// … → 60s capped even though every reconnect succeeded, and a transient
+/// blip after any prior session got 0-1 first-connect retries instead of
+/// 3).
+///
+/// A session that never came online keeps the counters unchanged — the
+/// caller's own first-connect / backoff branches own the increments in
+/// that case.
+pub(crate) fn counters_after_session(
+    was_online: bool,
+    attempt: u32,
+    first_connect_attempts: u32,
+) -> (u32, u32) {
+    if was_online {
+        (0, 0)
+    } else {
+        (attempt, first_connect_attempts)
+    }
+}
+
+/// Decision the connect loop takes when an in-flight
+/// [`ClientBuilder::start`] is aborted by the cancel token (a disconnect
+/// request arrived during the TCP connect window).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CancelAction {
+    /// A config restart was requested — reset counters and continue the
+    /// loop with the updated settings.
+    Restart,
+    /// A plain disconnect — stop the loop.
+    Stop,
+}
+
+/// Decide what the `select!` cancel branch around
+/// [`ClientBuilder::start`] does.
+///
+/// Mirrors the two disconnect-request checkpoints
+/// ([`should_restart_after_disconnect`]): a pending config restart wins
+/// over the disconnect request (the flags are consumed, the disconnect
+/// request cleared and the cancel token reset) and the loop continues;
+/// otherwise the disconnect is honoured and the loop stops. Without this,
+/// an agent-driven config restart arriving during the TCP connect window
+/// was dropped in GUI mode — the bot stayed offline and the restart flag
+/// leaked into the next session (M-3).
+pub(crate) fn cancel_branch_action(state: &SharedState) -> CancelAction {
+    if should_restart_after_disconnect(state) {
+        CancelAction::Restart
+    } else {
+        CancelAction::Stop
+    }
+}
+
+/// Reset the [`SharedState`] flags a fresh `connect()` invocation must
+/// start from.
+///
+/// Clears everything a previous session (or an offline `update_settings`
+/// call) may have left behind so the new session starts clean:
+///
+/// 1. the disconnect request — a prior Disconnect click must not
+///    immediately stop the new session;
+/// 2. the last error banner;
+/// 3. the cancellation token — a prior session's cancel must not trip the
+///    new session's backoff sleep;
+/// 4. a stale config-restart flag (L-22): `update_settings` while OFFLINE
+///    sets it, but in UI mode nothing consumes it — if it survived, a
+///    later explicit Disconnect would be converted by
+///    [`should_restart_after_disconnect`] into a surprise reconnect once.
+///    The config the agent wrote is already applied, so the flag carries
+///    no information at connect entry and is discarded.
+pub(crate) fn prepare_connect_entry(state: &SharedState) {
+    state.clear_disconnect_request();
+    state.clear_last_error();
+    state.reset_cancel_token();
+    state.take_config_restart();
+    // M-6: discard a stale session_was_online latch. The latch is consumed
+    // after start() returns, but every cancel-token branch BREAKs the loop
+    // without consuming it — most importantly a Disconnect click while the
+    // bot is ONLINE (the latch was set by handle_spawn). Without this
+    // discard the next connect() would read the stale "was online" and a
+    // first-connect failure would silently enter the infinite backoff
+    // branch instead of the bounded 3-retry + fail-fast path.
+    state.take_session_was_online();
+}
+
+/// Consume the online-session latch before a cancel-window config restart continues the connect loop (F-12).
+///
+/// The normal `start()` return path consumes the latch at the checkpoint
+/// below the `select!`; the cancel branch skips that checkpoint, and
+/// `prepare_connect_entry` does not run on a plain `continue`. A leaked
+/// `session_was_online` latch makes the NEXT session's first-connect failure
+/// take the "was online before" infinite-backoff branch instead of the
+/// bounded first-connect retries.
+fn prepare_cancel_restart(
+    state: &SharedState,
+    attempt: &mut u32,
+    first_connect_attempts: &mut u32,
+) {
+    state.take_session_was_online();
+    *attempt = 0;
+    *first_connect_attempts = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -487,7 +637,7 @@ mod tests {
         state.set_online(true);
         assert!(manager.is_connected());
 
-        manager.disconnect();
+        manager.simulate_offline_for_tests();
         assert!(!manager.is_connected());
     }
 
@@ -498,7 +648,7 @@ mod tests {
         let manager = ConnectionManager::new(config, Arc::clone(&state));
 
         assert!(!manager.is_connected());
-        manager.disconnect();
+        manager.simulate_offline_for_tests();
         assert!(!manager.is_connected());
     }
 
@@ -630,7 +780,7 @@ mod tests {
         assert!(manager.is_connected());
 
         // Manager can also influence state
-        manager.disconnect();
+        manager.simulate_offline_for_tests();
         assert!(!state.is_online());
     }
 
@@ -886,6 +1036,198 @@ mod tests {
         assert!(
             occurrences >= 2,
             "expected `inject_dependencies` def + call site, found {occurrences} occurrences"
+        );
+    }
+
+    // -- M-2 regression: backoff counters reset after a successful session --
+
+    /// Regression for audit M-2: the reconnect `attempt` and
+    /// `first_connect_attempts` counters were only reset on config
+    /// restart, so they grew monotonically ACROSS successful sessions —
+    /// after any session came online and disconnected, the next backoff
+    /// kept the old attempt (5s → 10s → … → 60s capped even though every
+    /// reconnect succeeded) and the first-connect retry window was burned
+    /// (a transient blip after any prior session fail-fasted with 0-1
+    /// retries instead of 3).
+    ///
+    /// The fix: a session that came online (the
+    /// [`SharedState::take_session_was_online`] latch reads `true`) resets
+    /// BOTH counters immediately, so the next backoff delay is the INITIAL
+    /// delay. This test drives the extracted pure transition
+    /// [`counters_after_session`] through the exact simulation the loop
+    /// performs: latch set (session online) → consume → counters → delay.
+    #[test]
+    fn test_backoff_counter_resets_after_successful_session() {
+        let config = AppConfig::default();
+        let state = Arc::new(SharedState::new(config.clone()));
+        let manager = ConnectionManager::new(config, Arc::clone(&state));
+
+        // A previous session ran long enough to drive `attempt` up to 4
+        // (backoff would be capped at 60s) and burned 2 first-connect
+        // retries.
+        let mut attempt: u32 = 4;
+        let mut first_connect_attempts: u32 = 2;
+
+        // The session came online (`handle_spawn` latched it) and
+        // disconnected (`handle_disconnect` cleared the online flag before
+        // `start()` returned — the latch is what survives).
+        state.mark_session_online();
+        state.set_online(true);
+        state.set_online(false);
+        let was_online = state.take_session_was_online();
+        assert!(
+            was_online,
+            "session latch must report the session was online"
+        );
+
+        // Connect-loop transition: a successful session resets BOTH
+        // counters.
+        (attempt, first_connect_attempts) =
+            counters_after_session(was_online, attempt, first_connect_attempts);
+        assert_eq!(
+            attempt, 0,
+            "backoff attempt must reset after a successful session"
+        );
+        assert_eq!(
+            first_connect_attempts, 0,
+            "first-connect retry count must reset after a successful session"
+        );
+
+        // The next backoff delay is the INITIAL delay — not the 60s cap a
+        // stale attempt=4 would have produced.
+        assert_eq!(manager.reconnect_backoff(attempt), Duration::from_secs(5));
+
+        // A session that never came online keeps the counters unchanged —
+        // the caller's first-connect/backoff branches own the increments.
+        assert_eq!(counters_after_session(false, 3, 1), (3, 1));
+    }
+
+    // -- M-3 regression: TCP-window cancel branch honours config restart --
+
+    /// Regression for audit M-3: the `select!` cancel branch around
+    /// `ClientBuilder::start()` (a disconnect request arriving during the
+    /// in-flight TCP connect) used to `break` unconditionally, unlike the
+    /// two other disconnect checkpoints which consult
+    /// [`should_restart_after_disconnect`]. An agent-driven config
+    /// restart (`update_settings` changing `mc_address`) in that window
+    /// was dropped in GUI mode — the bot stayed offline until a manual
+    /// Connect and the restart flag leaked into the next session.
+    ///
+    /// The fix extracts the branch decision into
+    /// [`cancel_branch_action`]: a pending config restart wins over the
+    /// disconnect (flags consumed, disconnect cleared, token reset) and
+    /// the loop continues; otherwise the disconnect is honoured and the
+    /// loop stops.
+    #[test]
+    fn test_tcp_window_cancel_with_config_restart_continues() {
+        let state = SharedState::new(AppConfig::default());
+        state.request_disconnect();
+        state.request_config_restart();
+
+        assert_eq!(cancel_branch_action(&state), CancelAction::Restart);
+
+        // The restart handshake ran: flag consumed exactly once, disconnect
+        // cleared so the loop may reconnect, cancel token reset so the next
+        // iteration's select! branches are not immediately cancelled.
+        assert!(
+            !state.take_config_restart(),
+            "restart flag must be consumed exactly once"
+        );
+        assert!(!state.is_disconnect_requested());
+        assert!(!state.cancel_token().is_cancelled());
+    }
+
+    /// Without a restart flag, the TCP-window cancel must honour the
+    /// plain disconnect and stop the loop.
+    #[test]
+    fn test_tcp_window_cancel_without_restart_stops() {
+        let state = SharedState::new(AppConfig::default());
+        state.request_disconnect();
+
+        assert_eq!(cancel_branch_action(&state), CancelAction::Stop);
+        // Nothing was consumed — the loop breaks.
+        assert!(state.is_disconnect_requested());
+    }
+
+    // -- F-12 regression: cancel-window restart consumes the online latch ----
+
+    /// A config restart in the TCP-cancel window `continue`s without
+    /// reaching the normal `take_session_was_online` checkpoint. The helper
+    /// used by that branch must consume the latch and reset both counters,
+    /// otherwise the next session's first-connect failure inherits a stale
+    /// "was online" and enters the infinite-backoff branch.
+    #[test]
+    fn test_prepare_cancel_restart_consumes_session_latch_and_counters() {
+        let state = SharedState::new(AppConfig::default());
+        state.mark_session_online();
+        let mut attempt = 4;
+        let mut first_connect_attempts = 2;
+
+        prepare_cancel_restart(&state, &mut attempt, &mut first_connect_attempts);
+
+        assert!(
+            !state.take_session_was_online(),
+            "the online latch must have been consumed"
+        );
+        assert_eq!(attempt, 0);
+        assert_eq!(first_connect_attempts, 0);
+    }
+
+    // -- L-22 regression: connect entry discards a stale restart flag --------
+
+    /// Regression for audit L-22: `update_settings` while OFFLINE sets
+    /// `config_restart_requested`, but in UI mode (no supervisor) nothing
+    /// consumes it. If the flag survived into the next session, a later
+    /// explicit Disconnect would be converted by
+    /// [`should_restart_after_disconnect`] into a surprise reconnect
+    /// (the user has to click Disconnect twice).
+    ///
+    /// The fix: the connect-entry cleanup (which already clears the
+    /// disconnect request, last error and cancel token for a fresh
+    /// session) also discards the stale restart flag — the config the
+    /// agent wrote is already applied, so the flag carries no information
+    /// at connect entry.
+    #[test]
+    fn test_connect_entry_discards_stale_config_restart() {
+        let state = SharedState::new(AppConfig::default());
+        // Leftovers from a previous session / an offline update_settings.
+        state.request_disconnect();
+        state.set_last_error("stale error from previous session");
+        state.request_config_restart();
+
+        prepare_connect_entry(&state);
+
+        assert!(!state.is_disconnect_requested());
+        assert!(state.last_error().is_none());
+        assert!(!state.cancel_token().is_cancelled());
+        assert!(
+            !state.take_config_restart(),
+            "stale restart flag must be discarded at connect entry"
+        );
+    }
+
+    // -- M-6 regression: connect entry discards a stale online latch ---------
+
+    /// Report M-6: the cancel-token branches BREAK the loop without
+    /// consuming the session_was_online latch. The important case is a
+    /// Disconnect click while the bot is ONLINE — handle_spawn latched
+    /// session_was_online, then the cancel branch broke the loop and the
+    /// latch leaked. The next session's first-connect failure would read
+    /// the stale "was online" and silently enter the infinite backoff
+    /// branch instead of the bounded 3-retry + fail-fast path.
+    /// prepare_connect_entry must discard the latch at entry.
+    #[test]
+    fn test_connect_entry_discards_stale_session_was_online() {
+        let state = SharedState::new(AppConfig::default());
+        // Session A came online, then the loop was cancelled mid-flight
+        // (Disconnect click) without consuming the latch.
+        state.mark_session_online();
+
+        prepare_connect_entry(&state);
+
+        assert!(
+            !state.take_session_was_online(),
+            "stale session_was_online latch must be discarded at connect entry"
         );
     }
 }

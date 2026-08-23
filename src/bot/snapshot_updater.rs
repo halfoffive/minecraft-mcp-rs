@@ -3,6 +3,13 @@
 //! [`SnapshotUpdater`] encapsulates the throttled world-state collection
 //! logic: reading bot position/health/gamemode, scanning dirty blocks,
 //! and atomically updating [`SharedState`] via [`WorldSnapshot`].
+//!
+//! # Snapshot invariants
+//!
+//! Production snapshots **never contain air entries** — a broken block is
+//! simply absent from `blocks`/`block_index`. Both refresh paths (dirty-block
+//! single reads and dirty-chunk full scans) apply the same `is_air()` filter,
+//! so the same world state always produces the same snapshot shape.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -15,7 +22,8 @@ use crate::bot::commands::canonical_player_inventory;
 use crate::snapshot::{DirtyTracker, SnapshotBuilder};
 use crate::state::SharedState;
 use crate::types::{
-    BlockEntry, BlockPos, EntityEntry, GameMode, InventorySlot, SelfPlayer, WorldSnapshot,
+    BlockEntry, BlockPos, EntityEntry, GameMode, InventorySlot, SelfPlayer, UNKNOWN_ENTITY_ID,
+    WorldSnapshot,
 };
 use crate::utils::to_snake_case;
 
@@ -92,6 +100,20 @@ impl SnapshotUpdater {
         }
     }
 
+    /// Rewind the throttle timer after a failed build (F-31).
+    ///
+    /// `check_and_update_timer` must arm the gate before the build task is
+    /// spawned, otherwise every throttled tick (~18 of 20 per second) would
+    /// spawn a wasted task. But a failed build used to leave that full
+    /// interval in place, so the next attempt had to wait an entire snapshot
+    /// period. This schedules the retry after only
+    /// [`SNAPSHOT_BUILD_RETRY_DELAY`].
+    pub(crate) fn schedule_retry_after_failure(&self) {
+        let rewind =
+            Duration::from_millis(self.interval_ms).saturating_sub(SNAPSHOT_BUILD_RETRY_DELAY);
+        *self.last_update.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now() - rewind;
+    }
+
     // ── Main tick handler ───────────────────────────────────
 
     /// Build a fresh snapshot and store it in [`SharedState`], moving the
@@ -102,7 +124,7 @@ impl SnapshotUpdater {
     /// this to trigger a UI repaint).
     ///
     /// The caller is expected to have passed the
-    /// [`check_and_update_timer`](Self::check_and_update_timer) gate first
+    /// `check_and_update_timer` gate first
     /// — this method does not throttle.
     pub async fn build_and_store(&self, bot: &Client) -> bool {
         match build_snapshot_inner(bot, &self.shared_state, &self.dirty_tracker).await {
@@ -113,6 +135,9 @@ impl SnapshotUpdater {
             }
             Err(e) => {
                 warn!("snapshot build failed: {e}");
+                // F-31: don't make the next attempt wait a full snapshot
+                // interval — retry after the short failure delay.
+                self.schedule_retry_after_failure();
                 false
             }
         }
@@ -122,6 +147,58 @@ impl SnapshotUpdater {
 // ═══════════════════════════════════════════════════════════════
 // Inner snapshot builder (free function — testable in isolation)
 // ═══════════════════════════════════════════════════════════════
+
+/// Per-build cap on fully-scanned dirty chunks (report M-25).
+///
+/// A full chunk scan costs up to 98,304 get_block_state calls and the
+/// entire scan loop runs inside a single future with no await — an
+/// unbounded first-login burst (~289 chunks at the default radius) stalled
+/// the LocalSet for hundreds of milliseconds, freezing the command
+/// executor and azalea event handlers. Chunks beyond the cap stay dirty in
+/// the tracker and are scanned (nearest-first) on the next build.
+const MAX_DIRTY_CHUNKS_PER_BUILD: usize = 32;
+
+/// Retry delay after a failed snapshot build (F-31).
+const SNAPSHOT_BUILD_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+/// A dirty-chunk coordinate pair (report M-25 scan planning).
+type ChunkPair = (i32, i32);
+
+/// Plan one build's dirty-chunk scan (report M-25): keep only chunks within
+/// `chunk_scan_radius` of the player chunk, order them nearest-first (ties
+/// broken deterministically by coordinates), and cap at
+/// [`MAX_DIRTY_CHUNKS_PER_BUILD`]. Returns `(to_scan, deferred)` — the
+/// deferred chunk set stays dirty on the tracker and is scanned (again
+/// nearest-first) on the next build. Pure so the scheduling is
+/// unit-testable without a bot.
+fn plan_dirty_chunk_scan(
+    dirty_chunks: &std::collections::HashSet<ChunkPair>,
+    player_chunk: ChunkPair,
+    chunk_scan_radius: i32,
+) -> (Vec<ChunkPair>, Vec<ChunkPair>) {
+    let mut in_radius: Vec<ChunkPair> = dirty_chunks
+        .iter()
+        .copied()
+        .filter(|&(cx, cz)| {
+            ((cx - player_chunk.0).abs()).max((cz - player_chunk.1).abs()) <= chunk_scan_radius
+        })
+        .collect();
+    in_radius.sort_by_key(|&(cx, cz)| {
+        (
+            (cx - player_chunk.0).abs().max((cz - player_chunk.1).abs()),
+            cx,
+            cz,
+        )
+    });
+    let deferred = in_radius.split_off(MAX_DIRTY_CHUNKS_PER_BUILD.min(in_radius.len()));
+    (in_radius, deferred)
+}
+
+/// Absolute Y of a chunk section's bottom edge, derived from the
+/// dimension's actual `min_y` instead of the overworld default.
+fn section_base_y(world_min_y: i32, section_idx: usize) -> i32 {
+    world_min_y + (section_idx as i32) * 16
+}
 
 fn block_within_chunk_radius(pos: BlockPos, player_chunk: (i32, i32), radius: i32) -> bool {
     let chunk = (pos.x >> 4, pos.z >> 4);
@@ -210,9 +287,28 @@ async fn build_snapshot_inner(
 
     // ── Read world for changed blocks ────────────────────────
     let mut new_blocks = Vec::new();
+
+    // M-25: filter the dirty chunks to the scan radius, order them
+    // deterministically nearest-first, and cap the per-build count. The
+    // whole chunk-scan loop below runs inside one future with NO await, so
+    // an unbounded first-login burst (~289 chunks) stalled the LocalSet
+    // for hundreds of milliseconds — the serial executor, azalea events,
+    // everything behind it. Chunks beyond the cap stay dirty and are
+    // scanned (nearest-first) on the next build. Declared OUTSIDE the
+    // "if" block so the builder tracker (after the scan) can mark exactly
+    // the chunks processed this build.
+    let (in_radius_chunks, overflow_chunks) =
+        plan_dirty_chunk_scan(&dirty_chunks, player_chunk, chunk_scan_radius);
+
     if !dirty_blocks.is_empty() || !dirty_chunks.is_empty() {
         let world = bot.world();
         let world_guard = world.read();
+        // F-11: the section base must come from the dimension's actual
+        // ChunkStorage, not the overworld default -64. Custom dimensions can
+        // shift the whole vertical range and the previous hardcoded value made
+        // every scanned BlockPos (and therefore the snapshot) vertically
+        // offset for those dimensions.
+        let world_min_y = world_guard.chunks.min_y;
 
         // M-10: Read individual dirty blocks (from block-update events)
         // rather than scanning their entire chunk. Skip blocks whose chunk
@@ -238,6 +334,16 @@ async fn build_snapshot_inner(
             }
             let az_pos = azalea::core::position::BlockPos::new(pos.x, pos.y, pos.z);
             if let Some(block_state) = world_guard.get_block_state(az_pos) {
+                // Invariant: production snapshots never contain air entries —
+                // a broken block is simply absent (same filter as the
+                // dirty-chunk scan below, so both paths produce identical
+                // snapshot shapes for the same world state). No consumer
+                // depends on air entries: `wait_for_block_gone`/`wait_for_block_present`
+                // treat absent == air, `find_standable_neighbor` treats
+                // absent as free, and `get_nearby_blocks` had to filter them.
+                if block_state.is_air() {
+                    continue;
+                }
                 let block_name = block_state_to_name(block_state);
                 new_blocks.push(BlockEntry {
                     position: *pos,
@@ -247,15 +353,21 @@ async fn build_snapshot_inner(
             }
         }
 
-        // M-7: Only scan dirty chunks within `chunk_scan_radius` of the
+        // M-7: Only scan dirty chunks within chunk_scan_radius of the
         // player's current chunk. Chunks outside this radius are skipped to
         // avoid expensive 98,304-position scans for far-away chunks.
         //
+        // M-25: the scan additionally bounds the number of chunks per build
+        // (MAX_DIRTY_CHUNKS_PER_BUILD, nearest first). The whole scan runs
+        // inside one future with NO await, so an unbounded first-login burst
+        // (~289 chunks) stalled the LocalSet for hundreds of milliseconds —
+        // the serial executor, azalea events, everything behind it. Chunks
+        // beyond the cap stay dirty and are scanned on the next build.
+        //
         // Scan each dirty chunk in full so the blocks inside it are re-read
         // from the world. SnapshotBuilder::build() removes every block whose
-        // chunk is in `dirty_chunks` (within radius — see builder_tracker
-        // below), so without re-adding the surviving blocks here they would
-        // be permanently lost from the snapshot.
+        // chunk is in the builder tracker below, so without re-adding the
+        // surviving blocks here they would be permanently lost.
         //
         // Chunk dimensions for Minecraft 1.21 are 16×384×16: x and z span
         // 16 blocks within the chunk, y spans the full build height
@@ -264,23 +376,21 @@ async fn build_snapshot_inner(
         //
         // Section-level scan optimisation: a chunk has 24 vertical sections
         // (16×16×16 = 4096 blocks each). Before scanning a section, we read
-        // its `block_count` (number of non-air blocks) from the chunk's
-        // `sections` array. If `block_count == 0`, the entire section is
-        // air and we skip its 4096 `get_block_state` calls — for typical
-        // surface chunks this skips ~23/24 sections, reducing the per-chunk
-        // scan from 98304 calls to ~4096 (only the surface section).
-        for &(chunk_x, chunk_z) in &dirty_chunks {
-            let dist = ((chunk_x - player_chunk.0).abs()).max((chunk_z - player_chunk.1).abs());
-            if dist > chunk_scan_radius {
-                continue;
-            }
+        // its block_count (number of non-air blocks) from the chunk's
+        // sections array. If block_count == 0, the entire section is air
+        // and we skip its 4096 get_block_state calls — for typical surface
+        // chunks this skips ~23/24 sections, reducing the per-chunk scan
+        // (in_radius_chunks / overflow_chunks are declared before the
+        // "if" block so the builder tracker below still sees them.)
+
+        for &(chunk_x, chunk_z) in &in_radius_chunks {
             let base_x = chunk_x * 16;
             let base_z = chunk_z * 16;
 
             // Build the list of section indices to scan. We hold the
             // chunk's read lock just long enough to read each section's
-            // `block_count`, then release before the per-block scan
-            // (which acquires its own lock through `world.get_block_state`).
+            // block_count, then release before the per-block scan
+            // (which acquires its own lock through world.get_block_state).
             let chunk_pos = azalea::core::position::ChunkPos::new(chunk_x, chunk_z);
             let sections_to_scan: Vec<usize> =
                 if let Some(chunk_arc) = world_guard.chunks.get(&chunk_pos) {
@@ -293,16 +403,21 @@ async fn build_snapshot_inner(
                         .map(|(i, _)| i)
                         .collect()
                 } else {
-                    // Chunk not loaded (shouldn't happen for a dirty chunk,
-                    // but be defensive): fall back to scanning all 24
-                    // sections so we don't silently drop blocks.
-                    (0..24).collect()
+                    // Chunk not loaded (shouldn't happen for a dirty chunk, but
+                    // be defensive). M-25: do NOT fall back to scanning all 24
+                    // sections — an unloaded chunk has no blocks to read, so
+                    // the fallback only wasted 98,304 get_block_state calls.
+                    // The chunk's old blocks are removed from the snapshot by
+                    // the builder tracker below, and a later chunk-load event
+                    // re-marks the chunk dirty so the reloaded blocks come back.
+                    debug!(chunk_x, chunk_z, "dirty chunk not loaded — skipping scan");
+                    Vec::new()
                 };
 
             for section_idx in sections_to_scan {
-                // Section 0 covers y=-64..-48, section 1 covers y=-48..-32,
-                // ..., section 23 covers y=304..320.
-                let section_min_y = -64 + (section_idx as i32) * 16;
+                // With the overworld default (min_y=-64, 24 sections) this
+                // covers y=-64..-48, ..., y=304..320.
+                let section_min_y = section_base_y(world_min_y, section_idx);
                 for dx in 0..16i32 {
                     for dy in 0..16i32 {
                         for dz in 0..16i32 {
@@ -324,6 +439,21 @@ async fn build_snapshot_inner(
                 }
             }
         }
+
+        // M-25: chunks deferred past the per-build cap stay dirty so the
+        // next build scans them (nearest-first). They are NOT marked in
+        // the builder tracker — their old blocks stay in the snapshot
+        // (stale but consistent) until the deferred scan runs.
+        if !overflow_chunks.is_empty() {
+            debug!(
+                count = overflow_chunks.len(),
+                "dirty-chunk scan capped; deferring to the next snapshot build"
+            );
+            let mut tracker = dirty_tracker.lock().unwrap_or_else(|e| e.into_inner());
+            for &(chunk_x, chunk_z) in &overflow_chunks {
+                tracker.mark_chunk_dirty((chunk_x, chunk_z));
+            }
+        }
         drop(world_guard);
     }
 
@@ -333,21 +463,33 @@ async fn build_snapshot_inner(
     // are preserved (stale but acceptable for far-away regions). Individual
     // dirty blocks are always marked so their old versions are removed and
     // the freshly-read versions are added.
+    //
+    // M-25: only the chunks ACTUALLY processed this build are marked — a
+    // chunk deferred past the per-build cap keeps its old blocks (stale but
+    // consistent) and stays dirty on the main tracker (re-marked inside the
+    // scan block above) so the next build scans it.
+    //
+    // F-26: individual dirty blocks inside a deferred (overflow) chunk were
+    // neither read above (the full scan was deferred) nor covered by the
+    // chunk-level mark. Marking them here used to delete their old snapshot
+    // entries with no replacement, making changed blocks "disappear" for one
+    // build. Keep those old entries until the deferred scan actually runs.
+    let overflow_set: std::collections::HashSet<ChunkPair> =
+        overflow_chunks.iter().copied().collect();
     let mut builder_tracker = DirtyTracker::new();
     for pos in &dirty_blocks {
+        let chunk = (pos.x >> 4, pos.z >> 4);
+        if overflow_set.contains(&chunk) {
+            continue;
+        }
         builder_tracker.mark_block_dirty(*pos);
     }
-    for &(chunk_x, chunk_z) in &dirty_chunks {
-        let dist = ((chunk_x - player_chunk.0).abs()).max((chunk_z - player_chunk.1).abs());
-        if dist <= chunk_scan_radius {
-            builder_tracker.mark_chunk_dirty((chunk_x, chunk_z));
-        }
+    for &(chunk_x, chunk_z) in &in_radius_chunks {
+        builder_tracker.mark_chunk_dirty((chunk_x, chunk_z));
     }
-
     // Only the old snapshot's blocks are carried into the builder — the
-    // production path replaces every other field via `with_*` below, so the
-    // old snapshot (incl. its `block_index` HashMap) is not deep-cloned.
-    // Before carrying them over, prune blocks outside `retention_chunks` so
+    // old snapshot (incl. its block_index HashMap) is not deep-cloned.
+    // Before carrying them over, prune blocks outside retention_chunks so
     // the snapshot (and its O(1) block_index) stays bounded no matter how
     // far the bot travels.
     let retained_old_blocks: Vec<BlockEntry> = old_snapshot
@@ -528,9 +670,13 @@ fn collect_entities(bot: &Client) -> Vec<EntityEntry> {
         {
             continue;
         }
-        let minecraft_id = id_by_entity.get(&entity).copied().unwrap_or(0);
+        // F-27: a missing entity ID must not collapse to 0 — id 0 may be a
+        // real entity in the index, and `attack_entity(0)` would be ambiguous.
+        let minecraft_id = id_by_entity.get(&entity).copied();
         entries.push(EntityEntry {
-            id: u32::try_from(minecraft_id).unwrap_or(0),
+            id: minecraft_id
+                .and_then(|mc_id| u32::try_from(mc_id).ok())
+                .unwrap_or(UNKNOWN_ENTITY_ID),
             uuid: (**uuid).to_string(),
             entity_type: entity_type_string(kind.map(|k| k.0)),
             position: BlockPos::new(
@@ -641,6 +787,97 @@ mod tests {
 
     // ── Retention pruning ────────────────────────────────────
 
+    /// A block that the server reports as air (e.g. after being broken) must
+    /// disappear from the snapshot entirely: production snapshots never
+    /// contain air entries — a broken block is simply absent. The dirty-block
+    /// single-read path previously stored air entries while the dirty-chunk
+    /// scan path skipped them, so the same world state produced different
+    /// snapshot shapes depending on which path refreshed it.
+    #[tokio::test]
+    async fn test_dirty_block_update_to_air_removes_entry() {
+        let state = Arc::new(SharedState::new(AppConfig::default()));
+        let tracker = Arc::new(Mutex::new(DirtyTracker::new()));
+
+        // Old snapshot: a stone block at P.
+        let p = BlockPos::new(5, 64, 5);
+        state.update_snapshot(WorldSnapshot {
+            blocks: vec![BlockEntry {
+                position: p,
+                block_type: "stone".into(),
+                block_state: None,
+            }],
+            ..Default::default()
+        });
+
+        // Underlying world: chunk (0,0) loaded and entirely air.
+        let mut chunk_storage = azalea::world::ChunkStorage::new(384, -64);
+        let chunk = Arc::new(parking_lot::RwLock::new(azalea::world::Chunk::default()));
+        chunk_storage.map.insert(
+            azalea::core::position::ChunkPos::new(0, 0),
+            Arc::downgrade(&chunk),
+        );
+        let instance = Arc::new(parking_lot::RwLock::new(azalea::world::Instance::from(
+            chunk_storage,
+        )));
+
+        let mut world = bevy_ecs::world::World::new();
+        let bot_entity = world.spawn(()).id();
+        world.entity_mut(bot_entity).insert((
+            azalea::entity::Position::new(azalea::core::position::Vec3::new(0.5, 64.0, 0.5)),
+            azalea::entity::metadata::Health(20.0),
+            azalea::local_player::Hunger::default(),
+            azalea::local_player::LocalGameMode::from(azalea::core::game_type::GameMode::Survival),
+            azalea::player::GameProfileComponent(azalea::auth::game_profile::GameProfile::new(
+                uuid::Uuid::new_v4(),
+                "AI_Bot".to_string(),
+            )),
+            azalea::local_player::InstanceHolder {
+                instance: instance.clone(),
+                partial_instance: Arc::new(parking_lot::RwLock::new(
+                    azalea::world::PartialInstance::default(),
+                )),
+            },
+            azalea::entity::inventory::Inventory::default(),
+        ));
+        let bot = azalea::Client::new(bot_entity, Arc::new(parking_lot::Mutex::new(world)));
+
+        // Mark P dirty; the world now reports air there (default chunk).
+        tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_block_dirty(p);
+
+        let snapshot = build_snapshot_inner(&bot, &state, &tracker)
+            .await
+            .expect("build should succeed");
+
+        // Invariant: a broken block is absent — no air entry, no index slot.
+        assert!(
+            !snapshot.blocks.iter().any(|b| b.position == p),
+            "air entry for {p:?} must be filtered out, got: {:?}",
+            snapshot
+                .blocks
+                .iter()
+                .filter(|b| b.position == p)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !snapshot.block_index.contains_key(&p),
+            "block_index must not contain the removed block at {p:?}"
+        );
+    }
+
+    /// F-11: section bases derive from the dimension's real `min_y`, so a
+    /// custom dimension is not scanned with the overworld's -64 offset.
+    #[test]
+    fn test_section_base_y_uses_world_min_y() {
+        assert_eq!(section_base_y(-64, 0), -64);
+        assert_eq!(section_base_y(-64, 23), 304);
+        assert_eq!(section_base_y(0, 0), 0);
+        assert_eq!(section_base_y(0, 23), 368);
+        assert_eq!(section_base_y(-16, 3), 32);
+    }
+
     #[test]
     fn test_block_within_chunk_radius_prunes_far_chunks() {
         let player_chunk = (0, 0);
@@ -738,6 +975,7 @@ mod tests {
     #[test]
     fn test_multiple_dirty_marks_accumulate() {
         let tracker = Arc::new(Mutex::new(DirtyTracker::new()));
+
         let updater = SnapshotUpdater::new(
             Arc::new(SharedState::new(AppConfig::default())),
             Arc::clone(&tracker),
@@ -751,6 +989,50 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(chunks.len(), 1);
     }
+
+    /// Report M-25: the dirty-chunk scan plan keeps only in-radius chunks,
+    /// orders them nearest-first, and caps the per-build count — the
+    /// deferred remainder must be re-scanned in a later build instead of
+    /// stalling the LocalSet with hundreds of chunk scans in one future.
+    #[test]
+    fn test_plan_dirty_chunk_scan_nearest_first_and_capped() {
+        use std::collections::HashSet;
+
+        // Neighbourhood: in-radius chunks are sorted by Chebyshev distance
+        // (ties by coordinates), far chunks are filtered out.
+        let mut set = HashSet::new();
+        set.insert((0, 0)); // distance 0
+        set.insert((1, 0)); // distance 1
+        set.insert((0, 2)); // distance 2
+        set.insert((3, 0)); // distance 3
+        set.insert((9, 0)); // outside radius 8 — filtered
+        let (scan, deferred) = plan_dirty_chunk_scan(&set, (0, 0), 8);
+        assert_eq!(scan, vec![(0, 0), (1, 0), (0, 2), (3, 0)]);
+        assert!(deferred.is_empty());
+
+        // Cap: 40 in-radius chunks -> 32 scanned (nearest first), 8 deferred
+        // for the next build.
+        let mut big = HashSet::new();
+        for i in 0..40 {
+            // 5 x positions (-2..=2) x 8 z positions (0..=7): 40 distinct,
+            // all within Chebyshev distance 8 of (0,0).
+            big.insert((i % 5 - 2, i / 5));
+        }
+        let (scan_big, deferred_big) = plan_dirty_chunk_scan(&big, (0, 0), 8);
+        assert_eq!(scan_big.len(), MAX_DIRTY_CHUNKS_PER_BUILD);
+        assert_eq!(deferred_big.len(), 40 - MAX_DIRTY_CHUNKS_PER_BUILD);
+        // Nearest-first: the player's own chunk is the first entry.
+        assert_eq!(scan_big[0], (0, 0));
+        // Scan + deferred cover the whole in-radius set exactly once.
+        let mut all = scan_big.clone();
+        all.extend(deferred_big.iter().copied());
+        all.sort();
+        let mut expect = big.into_iter().collect::<Vec<_>>();
+        expect.sort();
+        assert_eq!(all, expect);
+    }
+
+    // ── Throttling ──────────────────────────────────────────
 
     // ── Throttling ──────────────────────────────────────────
 
@@ -795,6 +1077,32 @@ mod tests {
             500, // interval: 500ms, elapsed: 600ms → allowed
         );
         assert!(updater.check_and_update_timer());
+    }
+
+    /// F-31: after a failed build the timer is rewound so the next attempt
+    /// only waits the short retry delay — not a whole snapshot interval.
+    #[test]
+    fn test_failed_build_schedules_short_retry() {
+        let updater = make_updater_with_recent_timer();
+        updater.schedule_retry_after_failure();
+
+        // The rewind is `interval - 250ms`, so the gate is still closed
+        // immediately after the failure…
+        assert!(!updater.check_and_update_timer());
+
+        // …but the recorded last-update is strictly closer than a fresh
+        // successful gate would have left it.
+        let elapsed = {
+            let last = updater
+                .last_update
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            last.elapsed()
+        };
+        assert!(
+            elapsed < Duration::from_millis(updater.interval_ms),
+            "failed-build rewind must be shorter than a full interval, got {elapsed:?}"
+        );
     }
 
     #[test]
@@ -998,7 +1306,10 @@ mod tests {
         let player = entities.iter().find(|e| e.entity_type == "player").unwrap();
         assert_eq!(player.display_name, Some("Steve".to_string()));
         assert_eq!(player.health, Some(20.0));
-        assert_eq!(player.id, 0, "not in entity_by_id → id falls back to 0");
+        assert_eq!(
+            player.id, UNKNOWN_ENTITY_ID,
+            "not in entity_by_id → the id must be the explicit unknown sentinel, not 0"
+        );
     }
 
     /// A dead mob (health metadata 0.0) must be excluded from the entity list

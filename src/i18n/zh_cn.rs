@@ -1,8 +1,9 @@
 //! Simplified Chinese (简体中文) translations for the UI i18n layer.
 //!
 //! Mirrors `super::en::lookup` arm-for-arm with Simplified Chinese values.
-//! The catch-all arm falls back to [`super::key_name`] so the function is
-//! total even if a new variant is added before this file is updated.
+//! The match is exhaustive with **no catch-all arm** — adding a [`TextKey`]
+//! variant fails to COMPILE until it is translated in this file (the
+//! compile-time completeness guard).
 //!
 //! Punctuation follows Simplified Chinese conventions (full-width colons
 //! `：`, full-width ellipsis `…`); the dot/bullet prefixes on connection
@@ -12,10 +13,11 @@ use super::TextKey;
 
 /// Translate `key` to Simplified Chinese.
 ///
-/// Returns a static Chinese string.  The catch-all arm guarantees totality:
-/// any unrecognised key surfaces its variant name rather than panicking.
+/// Returns a static Chinese string. The match is exhaustive — a new
+/// [`TextKey`] variant must be added here (and in `en::lookup`) before
+/// the crate compiles.
 pub(crate) fn lookup(key: TextKey) -> &'static str {
-    #[allow(unreachable_patterns)] // keep catch-all for future TextKey variants
+    // compile-time exhaustiveness guard: no catch-all
     match key {
         // ── Top-level / section headings ───────────────────────────────
         TextKey::AppTitle => "Minecraft MCP 服务器",
@@ -112,7 +114,8 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         // ── MCP config panel ───────────────────────────────────────────
         TextKey::Copy => "复制",
         TextKey::CopyHint => "将此 JSON 复制到你的 MCP 客户端配置中（Claude Desktop / Cursor）：",
-        TextKey::NpxConfig => "npm / npx / bunx（无需 Rust 工具链）：",
+        TextKey::NpxConfig => "npm / npx（无需 Rust 工具链）：",
+        TextKey::BunxConfig => "bunx（Bun 运行时，无需 Rust 工具链）：",
 
         // ── Language picker ────────────────────────────────────────────
         TextKey::Language => "语言：",
@@ -125,9 +128,6 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::Refresh => "刷新",
         TextKey::RefreshTooltip => "以半径8、缩放2重新渲染当前快照",
         TextKey::WorldViewPlaceholder => "暂无缓存的截图 — 点击「刷新」渲染当前快照。",
-
-        // ── Catch-all: never panic, surface the variant name ───────────
-        _ => super::key_name(key),
     }
 }
 
@@ -221,6 +221,7 @@ mod tests {
             TextKey::Copy,
             TextKey::CopyHint,
             TextKey::NpxConfig,
+            TextKey::BunxConfig,
             TextKey::Language,
             TextKey::LangEn,
             TextKey::LangZhCn,

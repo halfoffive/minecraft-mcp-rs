@@ -1,9 +1,11 @@
 //! Application shell: window setup, layout, dispatch.
 //!
 //! [`MinecraftApp`] implements [`eframe::App`] and renders the settings
-//! and status panels inside a central layout.  It requests periodic repaints
-//! at ~10 FPS so that live state changes (bot connection, world snapshot,
-//! chat messages) are reflected in the UI without a manual refresh.
+//! and status panels inside a central layout.  It requests a repaint once
+//! per second as a fallback so live state changes (bot connection, world
+//! snapshot, chat messages) are reflected in the UI without a manual
+//! refresh; state-change-driven repaints (via `ctx.request_repaint()` from
+//! the bot event handlers) refresh the UI immediately in between.
 //!
 //! # Threading
 //!
@@ -59,10 +61,21 @@ pub struct MinecraftApp {
     /// Texture handle for the world-view preview panel. Persisted across
     /// frames so we don't re-upload the same PNG every redraw.
     preview_texture: Option<egui::TextureHandle>,
-    /// Cached annotation JSON from the last preview render. When the cached
-    /// PNG's annotation differs, we rebuild the texture; otherwise we reuse
-    /// it (saves a base64 decode + PNG decode every frame).
-    preview_last_annotation: Option<String>,
+    /// Rebuild key for the preview texture: the `(snapshot_seq,
+    /// annotation_json)` pair the texture was last built from (M-11). When
+    /// the cached render's key differs, we rebuild the texture; otherwise we
+    /// reuse it (saves a base64 decode + PNG decode every frame). Keying on
+    /// `snapshot_seq` as well as the annotation catches two 500ms snapshot
+    /// builds sharing one second whose annotations coincide but whose PNGs
+    /// differ.
+    preview_last_key: Option<preview::PreviewRebuildKey>,
+    /// Cached chat messages for the status panel (L-20): re-cloned only when
+    /// the chat cursor advances, not every frame.
+    chat_cache: status::ChatCache,
+    /// Cached MCP-client JSON for the MCP Config panel (L-19): rebuilt only
+    /// when a JSON-affecting edit field changes. Lazy-initialised from the
+    /// first frame's `EditConfig`.
+    mcp_config_cache: Option<mcp_config::McpConfigCache>,
 }
 
 /// Mutable copy of every [`AppConfig`] field for the settings panel.
@@ -91,8 +104,43 @@ pub struct EditConfig {
     pub mcp_auth_enabled: bool,
     /// Transport mechanism the MCP server uses to talk to clients.
     pub mcp_transport: McpTransport,
-    /// UI display language (mirrors [`AppConfig::language`]).
-    pub language: Language,
+    /// Per-field dirty flags (M-8): which fields the user actually edited
+    /// since the buffer was initialised. `EditConfig::apply` merges ONLY
+    /// the dirty fields, so agent-driven changes made through the
+    /// `update_settings` MCP tool are never silently rolled back by the
+    /// stale buffer.
+    ///
+    /// The UI language deliberately has NO buffer field (M-9): the settings
+    /// panel binds its dropdown directly to `config.language`, and
+    /// `sync_language_from_config` is the single writer for
+    /// `i18n::current()`.
+    pub dirty: EditConfigDirty,
+}
+
+/// Per-field dirty flags for the settings-panel edit buffer (M-8).
+///
+/// Each settings widget marks its field dirty when the user actually edits
+/// it (egui's [`egui::Response::changed`]). `EditConfig::apply` then
+/// merges only the dirty fields into a fresh `state.read_config().clone()`,
+/// and clears all flags after a successful apply.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EditConfigDirty {
+    pub mc_address: bool,
+    pub mc_port: bool,
+    pub ai_username: bool,
+    pub mcp_address: bool,
+    pub mcp_port: bool,
+    pub task_name: bool,
+    pub chunk_scan_radius: bool,
+    pub block_perception_radius: bool,
+    pub snapshot_interval_ms: bool,
+    pub reconnect_initial_delay_ms: bool,
+    pub reconnect_max_delay_ms: bool,
+    pub command_timeout_secs: bool,
+    pub fly_timeout_secs: bool,
+    pub mcp_token: bool,
+    pub mcp_auth_enabled: bool,
+    pub mcp_transport: bool,
 }
 
 impl From<&AppConfig> for EditConfig {
@@ -114,7 +162,7 @@ impl From<&AppConfig> for EditConfig {
             mcp_token: cfg.mcp_token.clone(),
             mcp_auth_enabled: cfg.mcp_auth_enabled,
             mcp_transport: cfg.mcp_transport,
-            language: cfg.language,
+            dirty: EditConfigDirty::default(),
         }
     }
 }
@@ -122,38 +170,101 @@ impl From<&AppConfig> for EditConfig {
 impl EditConfig {
     /// Write the edited values back into [`SharedState`] config.
     ///
+    /// Merges ONLY the fields the user actually edited (their dirty flags
+    /// are set by the settings widgets via [`egui::Response::changed`])
+    /// into a fresh clone of the current config — untouched fields keep
+    /// whatever the config currently holds, so agent-driven changes made
+    /// through `update_settings` are never rolled back by the stale buffer
+    /// (M-8).
+    ///
     /// Validates the resulting [`AppConfig`] before applying it; on
     /// validation failure returns the error message and leaves the stored
-    /// config untouched so the user can correct the invalid field.
-    pub(crate) fn apply(&self, state: &SharedState) -> Result<(), String> {
+    /// config untouched so the user can correct the invalid field. On
+    /// success all dirty flags are cleared.
+    pub(crate) fn apply(&mut self, state: &SharedState) -> Result<(), String> {
         // Build the candidate config from a clone of the current values, then
         // validate before taking the write lock. The window between read and
-        // write is benign here because `apply` is the sole writer of config
+        // write is benign here because `apply` is the sole UI writer of config
         // (invoked only from the UI thread on Connect click).
         let mut new_config = state.read_config().clone();
-        new_config.mc_address = self.mc_address.clone();
-        new_config.mc_port = self.mc_port;
-        new_config.ai_username = self.ai_username.clone();
-        new_config.mcp_address = self.mcp_address.clone();
-        new_config.mcp_port = self.mcp_port;
-        new_config.task_name = self.task_name.clone();
-        new_config.chunk_scan_radius = self.chunk_scan_radius;
-        new_config.block_perception_radius = self.block_perception_radius;
-        new_config.snapshot_interval_ms = self.snapshot_interval_ms;
-        new_config.reconnect_initial_delay_ms = self.reconnect_initial_delay_ms;
-        new_config.reconnect_max_delay_ms = self.reconnect_max_delay_ms;
-        new_config.command_timeout_secs = self.command_timeout_secs;
-        new_config.fly_timeout_secs = self.fly_timeout_secs;
-        new_config.mcp_token = self.mcp_token.clone();
-        new_config.mcp_auth_enabled = self.mcp_auth_enabled;
-        new_config.mcp_transport = self.mcp_transport;
-        new_config.language = self.language;
+        if self.dirty.mc_address {
+            new_config.mc_address = self.mc_address.clone();
+        }
+        if self.dirty.mc_port {
+            new_config.mc_port = self.mc_port;
+        }
+        if self.dirty.ai_username {
+            new_config.ai_username = self.ai_username.clone();
+        }
+        if self.dirty.mcp_address {
+            new_config.mcp_address = self.mcp_address.clone();
+        }
+        if self.dirty.mcp_port {
+            new_config.mcp_port = self.mcp_port;
+        }
+        if self.dirty.task_name {
+            new_config.task_name = self.task_name.clone();
+        }
+        if self.dirty.chunk_scan_radius {
+            new_config.chunk_scan_radius = self.chunk_scan_radius;
+        }
+        if self.dirty.block_perception_radius {
+            new_config.block_perception_radius = self.block_perception_radius;
+        }
+        if self.dirty.snapshot_interval_ms {
+            new_config.snapshot_interval_ms = self.snapshot_interval_ms;
+        }
+        if self.dirty.reconnect_initial_delay_ms {
+            new_config.reconnect_initial_delay_ms = self.reconnect_initial_delay_ms;
+        }
+        if self.dirty.reconnect_max_delay_ms {
+            new_config.reconnect_max_delay_ms = self.reconnect_max_delay_ms;
+        }
+        if self.dirty.command_timeout_secs {
+            new_config.command_timeout_secs = self.command_timeout_secs;
+        }
+        if self.dirty.fly_timeout_secs {
+            new_config.fly_timeout_secs = self.fly_timeout_secs;
+        }
+        if self.dirty.mcp_token {
+            new_config.mcp_token = self.mcp_token.clone();
+        }
+        if self.dirty.mcp_auth_enabled {
+            new_config.mcp_auth_enabled = self.mcp_auth_enabled;
+        }
+        if self.dirty.mcp_transport {
+            new_config.mcp_transport = self.mcp_transport;
+        }
 
         new_config.validate()?;
         state.update_config(|cfg| {
             *cfg = new_config;
         });
+        // Only a successful apply clears the dirty flags — a rejected edit
+        // must keep them so the user can correct the invalid field.
+        self.dirty = EditConfigDirty::default();
         Ok(())
+    }
+}
+
+/// Single writer for `i18n::current()` on the UI path (M-9).
+///
+/// Called once per frame from [`App`::ui]: it synchronises the active i18n
+/// language with the persisted [`AppConfig::language`] and caches the
+/// last-seen language so the per-frame `read_config` acquisition is skipped
+/// once the language is stable.
+///
+/// The settings panel's Language dropdown binds DIRECTLY to
+/// `config.language` (no edit-buffer copy) and the `update_settings` MCP
+/// tool writes `config.language` too; this function is the only place that
+/// calls `i18n::set`, so those two writers can never fight (previously the
+/// panel re-applied a stale edit-buffer language every frame, permanently
+/// overriding an agent-driven language change).
+fn sync_language_from_config(state: &SharedState, last_language: &mut Language) {
+    let cfg_lang = state.read_config().language;
+    if *last_language != cfg_lang {
+        *last_language = cfg_lang;
+        crate::i18n::set(cfg_lang);
     }
 }
 
@@ -179,7 +290,9 @@ impl MinecraftApp {
             edit_config: None,
             last_language: initial_lang,
             preview_texture: None,
-            preview_last_annotation: None,
+            preview_last_key: None,
+            chat_cache: status::ChatCache::new(),
+            mcp_config_cache: None,
         }
     }
 
@@ -297,15 +410,13 @@ impl App for MinecraftApp {
     /// and margins.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // ── Per-frame language sync ─────────────────────────────────
-        // Synchronise `i18n::current()` with the persisted `AppConfig`
-        // only when the language actually changes.  We check against a
-        // cached `last_language` to avoid a `read_config` RwLock
-        // acquisition on every frame.
-        let cfg_lang = self.state.read_config().language;
-        if self.last_language != cfg_lang {
-            self.last_language = cfg_lang;
-            crate::i18n::set(cfg_lang);
-        }
+        // `sync_language_from_config` is the single writer for
+        // `i18n::current()` (M-9): the settings panel and the
+        // `update_settings` MCP tool both write `config.language`, and this
+        // per-frame sync applies the change on the next frame. The cached
+        // `last_language` avoids a `read_config` RwLock acquisition every
+        // frame once the language is stable.
+        sync_language_from_config(&self.state, &mut self.last_language);
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.heading(crate::i18n::tr(crate::i18n::TextKey::AppTitle));
@@ -331,7 +442,7 @@ impl App for MinecraftApp {
                 });
 
                 ui.collapsing(crate::i18n::tr(crate::i18n::TextKey::Status), |ui| {
-                    status::status_panel(ui, &self.state);
+                    status::status_panel(ui, &self.state, &mut self.chat_cache);
                 });
 
                 ui.collapsing(crate::i18n::tr(crate::i18n::TextKey::Preview), |ui| {
@@ -339,13 +450,16 @@ impl App for MinecraftApp {
                         ui,
                         &self.state,
                         &mut self.preview_texture,
-                        &mut self.preview_last_annotation,
+                        &mut self.preview_last_key,
                     );
                 });
 
                 ui.collapsing(crate::i18n::tr(crate::i18n::TextKey::McpConfig), |ui| {
                     if let Some(ref edit) = self.edit_config {
-                        mcp_config::mcp_config_panel(ui, edit);
+                        let cache = self
+                            .mcp_config_cache
+                            .get_or_insert_with(|| mcp_config::McpConfigCache::new(edit));
+                        mcp_config::mcp_config_panel(ui, edit, cache);
                     }
                 });
             });
@@ -366,7 +480,13 @@ mod tests {
     use crate::config::AppConfig;
     use crate::state::SharedState;
 
-    /// `EditConfig::apply` persists every edited field into `SharedState`.
+    /// `EditConfig::apply` persists every field the user actually edited
+    /// (dirty flags set) into `SharedState`.
+    ///
+    /// Rewritten for the M-8 dirty-flag API: `apply` merges only fields
+    /// whose dirty flag is set, so the test now marks each edited field
+    /// dirty (exactly what the settings widgets do via
+    /// `Response::changed`).
     #[test]
     fn test_edit_config_apply_persists_changes() {
         let state = SharedState::new(AppConfig::default());
@@ -376,6 +496,12 @@ mod tests {
         edit.ai_username = "Robot".into();
         edit.mcp_port = 9011;
         edit.command_timeout_secs = 42;
+        // Mark the edited fields dirty (mirrors the settings widgets).
+        edit.dirty.mc_address = true;
+        edit.dirty.mc_port = true;
+        edit.dirty.ai_username = true;
+        edit.dirty.mcp_port = true;
+        edit.dirty.command_timeout_secs = true;
 
         edit.apply(&state).expect("valid edit should apply");
 
@@ -385,6 +511,180 @@ mod tests {
         assert_eq!(cfg.ai_username, "Robot");
         assert_eq!(cfg.mcp_port, 9011);
         assert_eq!(cfg.command_timeout_secs, 42);
+        // Dirty flags are cleared after a successful apply.
+        assert_eq!(edit.dirty, EditConfigDirty::default());
+    }
+
+    /// F-5: every edit-buffer field (one case per field) must survive the
+    /// dirty-flag → `apply` → `read_config` round-trip. The old test only
+    /// hand-picked five fields, so a newly added field whose settings widget
+    /// forgot to set its dirty flag could silently never persist.
+    ///
+    /// Keep this list in lock-step with [`EditConfig`]: each case mutates
+    /// exactly one field and its dirty flag, then verifies the persisted
+    /// [`AppConfig`] value. (The UI language is intentionally absent from
+    /// `EditConfig` — see M-9.)
+    #[test]
+    fn test_edit_config_every_field_dirty_apply_roundtrip() {
+        type Case = (
+            String,
+            Box<dyn Fn(&mut EditConfig)>,
+            Box<dyn Fn(&AppConfig)>,
+        );
+        type Cases = Vec<Case>;
+
+        fn case<M, C>(name: &str, mutate: M, check: C) -> Case
+        where
+            M: Fn(&mut EditConfig) + 'static,
+            C: Fn(&AppConfig) + 'static,
+        {
+            (name.to_string(), Box::new(mutate), Box::new(check))
+        }
+
+        let cases: Cases = vec![
+            case(
+                "mc_address",
+                |e| {
+                    e.mc_address = "mc.example.com".into();
+                    e.dirty.mc_address = true;
+                },
+                |c| assert_eq!(c.mc_address, "mc.example.com"),
+            ),
+            case(
+                "mc_port",
+                |e| {
+                    e.mc_port = 25566;
+                    e.dirty.mc_port = true;
+                },
+                |c| assert_eq!(c.mc_port, 25566),
+            ),
+            case(
+                "ai_username",
+                |e| {
+                    e.ai_username = "Robot".into();
+                    e.dirty.ai_username = true;
+                },
+                |c| assert_eq!(c.ai_username, "Robot"),
+            ),
+            case(
+                "mcp_address",
+                |e| {
+                    e.mcp_address = "127.0.0.2".into();
+                    e.dirty.mcp_address = true;
+                },
+                |c| assert_eq!(c.mcp_address, "127.0.0.2"),
+            ),
+            case(
+                "mcp_port",
+                |e| {
+                    e.mcp_port = 9011;
+                    e.dirty.mcp_port = true;
+                },
+                |c| assert_eq!(c.mcp_port, 9011),
+            ),
+            case(
+                "task_name",
+                |e| {
+                    e.task_name = "patrol".into();
+                    e.dirty.task_name = true;
+                },
+                |c| assert_eq!(c.task_name, "patrol"),
+            ),
+            case(
+                "chunk_scan_radius",
+                |e| {
+                    e.chunk_scan_radius = 10;
+                    e.dirty.chunk_scan_radius = true;
+                },
+                |c| assert_eq!(c.chunk_scan_radius, 10),
+            ),
+            case(
+                "block_perception_radius",
+                |e| {
+                    e.block_perception_radius = 40;
+                    e.dirty.block_perception_radius = true;
+                },
+                |c| assert_eq!(c.block_perception_radius, 40),
+            ),
+            case(
+                "snapshot_interval_ms",
+                |e| {
+                    e.snapshot_interval_ms = 750;
+                    e.dirty.snapshot_interval_ms = true;
+                },
+                |c| assert_eq!(c.snapshot_interval_ms, 750),
+            ),
+            case(
+                "reconnect_initial_delay_ms",
+                |e| {
+                    e.reconnect_initial_delay_ms = 7000;
+                    e.dirty.reconnect_initial_delay_ms = true;
+                },
+                |c| assert_eq!(c.reconnect_initial_delay_ms, 7000),
+            ),
+            case(
+                "reconnect_max_delay_ms",
+                |e| {
+                    e.reconnect_max_delay_ms = 120000;
+                    e.dirty.reconnect_max_delay_ms = true;
+                },
+                |c| assert_eq!(c.reconnect_max_delay_ms, 120000),
+            ),
+            case(
+                "command_timeout_secs",
+                |e| {
+                    e.command_timeout_secs = 42;
+                    e.dirty.command_timeout_secs = true;
+                },
+                |c| assert_eq!(c.command_timeout_secs, 42),
+            ),
+            case(
+                "fly_timeout_secs",
+                |e| {
+                    e.fly_timeout_secs = 90;
+                    e.dirty.fly_timeout_secs = true;
+                },
+                |c| assert_eq!(c.fly_timeout_secs, 90),
+            ),
+            case(
+                "mcp_token",
+                |e| {
+                    e.mcp_token = "token-123".into();
+                    e.dirty.mcp_token = true;
+                },
+                |c| assert_eq!(c.mcp_token, "token-123"),
+            ),
+            case(
+                "mcp_auth_enabled",
+                |e| {
+                    e.mcp_auth_enabled = true;
+                    e.dirty.mcp_auth_enabled = true;
+                },
+                |c| assert!(c.mcp_auth_enabled),
+            ),
+            case(
+                "mcp_transport",
+                |e| {
+                    e.mcp_transport = McpTransport::Stdio;
+                    e.dirty.mcp_transport = true;
+                },
+                |c| assert_eq!(c.mcp_transport, McpTransport::Stdio),
+            ),
+        ];
+
+        for (name, mutate, check) in cases {
+            let state = SharedState::new(AppConfig::default());
+            let mut edit = EditConfig::from(&state.read_config().clone());
+            mutate(&mut edit);
+            edit.apply(&state)
+                .unwrap_or_else(|err| panic!("{name}: apply failed: {err}"));
+            check(&state.read_config());
+            assert_eq!(
+                edit.dirty,
+                EditConfigDirty::default(),
+                "{name}: dirty flags must clear"
+            );
+        }
     }
 
     /// An invalid edit (empty `mc_address`) is rejected and leaves the
@@ -394,9 +694,70 @@ mod tests {
         let state = SharedState::new(AppConfig::default());
         let mut edit = EditConfig::from(&state.read_config().clone());
         edit.mc_address.clear();
+        edit.dirty.mc_address = true;
 
         assert!(edit.apply(&state).is_err());
         // The original config is unchanged.
         assert!(!state.read_config().mc_address.is_empty());
+        // Failed validation must NOT clear the dirty flag — the user still
+        // needs to correct the field.
+        assert!(edit.dirty.mc_address);
+    }
+
+    /// M-8: `EditConfig::apply` must not roll back agent-driven config
+    /// changes for fields the user did not edit. The buffer is initialised
+    /// once from config; when the agent later changes `mc_port` via
+    /// `update_settings`, a user edit to ONLY `mc_address` must leave
+    /// `mc_port` untouched (previously `apply` overwrote every field from
+    /// the stale buffer, silently reverting the agent's change).
+    #[test]
+    fn test_apply_does_not_roll_back_unedited_agent_change() {
+        let state = SharedState::new(AppConfig::default());
+        // Buffer initialised from the config at startup.
+        let mut edit = EditConfig::from(&state.read_config().clone());
+        // Agent changes mc_port via update_settings AFTER the buffer was made.
+        state.update_config(|cfg| cfg.mc_port = 25566);
+        // User edits only mc_address in the buffer (dirty flag set).
+        edit.mc_address = "mc.example.com".into();
+        edit.dirty.mc_address = true;
+
+        edit.apply(&state).expect("valid edit should apply");
+
+        let cfg = state.read_config();
+        assert_eq!(cfg.mc_address, "mc.example.com", "edited field applies");
+        assert_eq!(cfg.mc_port, 25566, "unedited field must survive apply");
+        // Dirty flags are cleared after a successful apply.
+        assert!(!edit.dirty.mc_address);
+    }
+
+    /// M-9: an agent-driven `update_settings(language=zh_cn)` must not be
+    /// reverted by the settings panel. `sync_language_from_config` (called
+    /// once per frame from `ui()`) is the single writer for
+    /// `i18n::current()`; the panel no longer owns a language buffer and
+    /// never calls `i18n::set` with a stale value.
+    #[test]
+    fn test_language_change_via_config_not_fought_by_panel() {
+        let _lock = crate::i18n::I18N_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::i18n::set(Language::En);
+        let state = SharedState::new(AppConfig::default());
+        // Agent changed the language via update_settings.
+        state.update_config(|cfg| cfg.language = Language::ZhCn);
+
+        let mut last_language = Language::En;
+        // Frame 1: the app syncs i18n from config (single writer).
+        sync_language_from_config(&state, &mut last_language);
+        assert_eq!(crate::i18n::current(), Language::ZhCn);
+        assert_eq!(last_language, Language::ZhCn);
+
+        // Frame 2 (and every subsequent): the sync no-ops (already in sync)
+        // and the panel cannot fight it — there is no edit-buffer language
+        // to re-apply, so i18n stays ZhCn.
+        sync_language_from_config(&state, &mut last_language);
+        assert_eq!(crate::i18n::current(), Language::ZhCn);
+
+        // Restore the global i18n state for other tests.
+        crate::i18n::set(Language::En);
     }
 }

@@ -16,11 +16,14 @@ use crate::types::{BlockPos, BotCommand};
 // ── Container state helpers ─────────────────────────────────────────────────
 
 /// Ensure a container is currently open, returning a [`BotError`] otherwise.
+///
+/// The "no container open" case is a runtime *state* error, not a parameter
+/// error — it maps to the dedicated [`BotError::ContainerNotOpen`] variant
+/// (-32010, `reason: container_not_open`) so MCP clients can distinguish
+/// "open a container first" from malformed input (audit L-9).
 fn check_container_open(state: &SharedState) -> Result<(), BotError> {
     if !state.has_container_open() {
-        return Err(BotError::InvalidParams(
-            "No container is currently open".to_string(),
-        ));
+        return Err(BotError::ContainerNotOpen);
     }
     Ok(())
 }
@@ -59,20 +62,12 @@ pub async fn handle_open_container(
         return Err(BotError::InvalidParams(e));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     check_container_not_open(state)?;
 
     let cmd = BotCommand::OpenContainer(BlockPos::new(input.x, input.y, input.z));
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── take_from_container ─────────────────────────────────────────────────────
@@ -116,20 +111,12 @@ pub async fn handle_take_from_container(
         )));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     check_container_open(state)?;
 
     let cmd = BotCommand::TakeFromContainer(input.slot, count);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── put_into_container ──────────────────────────────────────────────────────
@@ -171,20 +158,12 @@ pub async fn handle_put_into_container(
         )));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     check_container_open(state)?;
 
     let cmd = BotCommand::PutIntoContainer(input.slot, count);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── close_container ─────────────────────────────────────────────────────────
@@ -202,20 +181,12 @@ pub async fn handle_close_container(
     sender: &BotCommandSender,
     _input: CloseContainerInput,
 ) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     check_container_open(state)?;
 
     let cmd = BotCommand::CloseContainer;
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -306,6 +277,25 @@ mod tests {
         assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
+    #[tokio::test]
+    async fn test_take_from_container_no_container_open_returns_container_not_open() {
+        // L-9: with no container open (but the bot online and the params
+        // valid), `check_container_open` must return the dedicated
+        // `ContainerNotOpen` runtime-state variant — NOT `InvalidParams`,
+        // which is reserved for malformed input.
+        let (state, sender) = setup();
+        make_online(&state);
+        let input = TakeFromContainerInput {
+            slot: 0,
+            count: Some(1),
+        };
+        let result = handle_take_from_container(&state, &sender, input).await;
+        assert!(
+            matches!(result, Err(BotError::ContainerNotOpen)),
+            "no open container is a runtime state error (L-9), got: {result:?}"
+        );
+    }
+
     // ── put_into_container ──────────────────────────────────────
 
     #[tokio::test]
@@ -328,8 +318,12 @@ mod tests {
         make_online(&state);
         let input = CloseContainerInput {};
         let result = handle_close_container(&state, &sender, input).await;
-        assert!(matches!(result, Err(BotError::InvalidParams(ref msg))
-                if msg.contains("No container is currently open")));
+        // L-9: the missing-container state is reported via the dedicated
+        // ContainerNotOpen variant, not a generic InvalidParams.
+        assert!(
+            matches!(result, Err(BotError::ContainerNotOpen)),
+            "expected ContainerNotOpen, got: {result:?}"
+        );
     }
 
     // ── Schema tests ────────────────────────────────────────────

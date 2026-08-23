@@ -48,61 +48,73 @@ pub struct SetGameModeInput {
 ///
 /// Returns an offline error if the bot is not connected. Otherwise validates
 /// the message is non-empty (whitespace-only is also rejected), then sends
-/// [`BotCommand::SendChat`] through the command channel.
+/// [`BotCommand::SendChat`] through the command channel. Returns the
+/// executor's `BotResult` serialized as JSON (`success`, `message`, `data`) —
+/// the same response shape every other action tool uses.
 pub async fn handle_send_chat(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     message: String,
 ) -> Result<String, BotError> {
-    if message.trim().is_empty() {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
         return Err(BotError::InvalidParams(
             "Message cannot be empty".to_string(),
         ));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is offline".to_string()));
+    // send_chat is a chat channel, not an implicit command-execution channel
+    // (audit F-2): azalea's `chat()` forwards a leading `/` as a server
+    // command packet, which would bypass execute_command's honest
+    // rejection-feedback verification and could report a fake success.
+    if trimmed.starts_with('/') {
+        return Err(BotError::InvalidParams(
+            "Chat messages starting with '/' are forwarded as server commands by the Minecraft protocol. Use execute_command for commands, which verifies server feedback.".to_string(),
+        ));
     }
 
+    crate::mcp::common::require_online(state)?;
+
     let cmd = BotCommand::SendChat(message);
-    match sender.send_command(cmd).await {
-        Ok(result) => Ok(result.message),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 /// Execute a Minecraft command.
 ///
 /// Returns an offline error if the bot is not connected. Otherwise validates
-/// the command is non-empty, auto-prepends `/` if it does not already start
-/// with one, then sends [`BotCommand::ExecuteCommand`].
+/// the command is non-empty (whitespace-only is also rejected), auto-prepends
+/// `/` if it does not already start with one, then sends
+/// [`BotCommand::ExecuteCommand`]. The input is trimmed once so the
+/// empty-check and the `/`-prepend agree on the same string (padded input
+/// like `" seed "` dispatches exactly `/seed`, never `/ seed`). Returns the
+/// executor's `BotResult` serialized as JSON (`success`, `message`, `data`)
+/// — the same response shape every other action tool uses.
 pub async fn handle_execute_command(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     command: String,
 ) -> Result<String, BotError> {
-    if command.trim().is_empty() {
+    // Trim once: the empty-check and the /-prepend must use the same string,
+    // otherwise padded input (" seed ") becomes "/ seed " — an unknown
+    // command that yields a spurious command_rejected (L-5).
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
         return Err(BotError::InvalidParams(
             "Command cannot be empty".to_string(),
         ));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // Auto-prepend `/` if the user omitted it.
-    let cmd_str = if command.starts_with('/') {
-        command
+    let cmd_str = if trimmed.starts_with('/') {
+        trimmed.to_string()
     } else {
-        format!("/{}", command)
+        format!("/{trimmed}")
     };
 
     let cmd = BotCommand::ExecuteCommand(cmd_str);
-    match sender.send_command(cmd).await {
-        Ok(result) => Ok(result.message),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 /// Set the bot's game mode.
@@ -110,6 +122,8 @@ pub async fn handle_execute_command(
 /// Returns an offline error if the bot is not connected. Otherwise validates
 /// the mode string (case-insensitive) is one of: survival, creative,
 /// adventure, or spectator. Requires operator permissions on the server.
+/// Returns the executor's `BotResult` serialized as JSON (`success`,
+/// `message`, `data`) — the same response shape every other action tool uses.
 pub async fn handle_set_game_mode(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
@@ -127,15 +141,10 @@ pub async fn handle_set_game_mode(
         }
     };
 
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::SetGameMode(game_mode);
-    match sender.send_command(cmd).await {
-        Ok(result) => Ok(result.message),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ---------------------------------------------------------------------------
@@ -147,9 +156,7 @@ pub async fn handle_set_game_mode(
 /// Each entry is an object `{"sender":"...","message":"..."}`. Returns an
 /// error when the bot is not connected to a server.
 pub fn get_chat_history(state: &Arc<SharedState>) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let messages = state.get_chat_messages();
     let entries: Vec<_> = messages
@@ -213,9 +220,18 @@ mod tests {
         let (sender, _rx) = make_echo_channel();
         let state = make_state(true);
         let result = handle_send_chat(&state, &sender, "hello".into()).await;
+        // Rewritten for L-12: the handler now returns the serialized
+        // BotResult JSON (was: a bare message string — the old assertion
+        // `!contains("Error")` encoded that shape).
+        let v: serde_json::Value = serde_json::from_str(&result.expect("send_chat should succeed"))
+            .expect("valid BotResult JSON");
+        assert_eq!(v["success"], true);
         assert!(
-            !result.as_ref().unwrap().contains("Error"),
-            "unexpected error: {result:?}"
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("executed"),
+            "message should carry the executor's reply"
         );
     }
 
@@ -265,6 +281,30 @@ mod tests {
         assert!(matches!(result, Err(BotError::Offline(_))));
     }
 
+    /// F-2: a leading `/` would be forwarded by azalea's `chat()` as a
+    /// server command packet, silently bypassing `execute_command` and its
+    /// rejection-feedback verification. The MCP layer must reject it before
+    /// anything reaches the channel.
+    #[tokio::test]
+    async fn test_handle_send_chat_rejects_command_prefix() {
+        let (sender, _rx) = make_echo_channel();
+        let state = make_state(true);
+        let result = handle_send_chat(&state, &sender, "/give Steve diamond".into()).await;
+        match result {
+            Err(BotError::InvalidParams(msg)) => {
+                assert!(
+                    msg.contains("execute_command"),
+                    "msg must redirect to execute_command, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidParams for '/'-prefixed chat, got {other:?}"),
+        }
+
+        // Leading whitespace must not smuggle the command through.
+        let padded = handle_send_chat(&state, &sender, "   /give Steve diamond".into()).await;
+        assert!(matches!(padded, Err(BotError::InvalidParams(_))));
+    }
+
     // -- execute_command ------------------------------------------------------
 
     #[tokio::test]
@@ -294,6 +334,23 @@ mod tests {
         );
     }
 
+    /// RED (L-5): the empty-check trimmed the input but the `/`-prepend used
+    /// the raw string, so " seed " became "/ seed " — an unknown command that
+    /// produced a spurious `command_rejected`. The dispatched command must be
+    /// exactly "/seed" (no leading space).
+    #[tokio::test]
+    async fn test_execute_command_trims_whitespace_before_prepending() {
+        let (sender, mut rx) = make_echo_channel();
+        let state = make_state(true);
+        let _ = handle_execute_command(&state, &sender, " seed ".into()).await;
+
+        let sent = rx.recv().await.expect("should receive command");
+        assert_eq!(
+            sent, "ExecuteCommand(\"/seed\")",
+            "whitespace-padded input must be trimmed before /-prepending, got: {sent}"
+        );
+    }
+
     #[tokio::test]
     async fn test_handle_execute_command_empty_rejected() {
         let (sender, _rx) = make_echo_channel();
@@ -317,10 +374,13 @@ mod tests {
         let (sender, mut rx) = make_echo_channel();
         let state = make_state(true);
         let result = handle_set_game_mode(&state, &sender, "survival".into()).await;
-        assert!(
-            !result.as_ref().unwrap().contains("Error"),
-            "unexpected error: {result:?}"
-        );
+        // Rewritten for L-12: the handler now returns the serialized
+        // BotResult JSON (was: a bare message string — the old assertion
+        // `!contains("Error")` encoded that shape).
+        let v: serde_json::Value =
+            serde_json::from_str(&result.expect("set_game_mode should succeed"))
+                .expect("valid BotResult JSON");
+        assert_eq!(v["success"], true);
 
         let sent = rx.recv().await.expect("should receive command");
         assert!(sent.contains("SetGameMode(Survival)"));
@@ -389,6 +449,59 @@ mod tests {
         let state = make_state(false);
         let result = handle_set_game_mode(&state, &sender, "creative".into()).await;
         assert!(matches!(result, Err(BotError::Offline(_))));
+    }
+
+    /// RED (L-12, breaking wire change): `send_chat`, `execute_command` and
+    /// `set_game_mode` return the serialized `BotResult` JSON (success,
+    /// message, data) like every other action tool — not a bare message
+    /// string. The returned string must parse as JSON with "success" and
+    /// "message" matching the executor's BotResult.
+    #[tokio::test]
+    async fn test_chat_tools_return_bot_result_json() {
+        let (sender, _rx) = make_echo_channel();
+        let state = make_state(true);
+
+        let chat = handle_send_chat(&state, &sender, "hello".into())
+            .await
+            .expect("send_chat should succeed");
+        let v: serde_json::Value =
+            serde_json::from_str(&chat).expect("send_chat must return BotResult JSON");
+        assert_eq!(v["success"], true, "got: {chat}");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("executed"),
+            "message must carry the executor's BotResult message, got: {chat}"
+        );
+
+        let exec = handle_execute_command(&state, &sender, "seed".into())
+            .await
+            .expect("execute_command should succeed");
+        let v: serde_json::Value =
+            serde_json::from_str(&exec).expect("execute_command must return BotResult JSON");
+        assert_eq!(v["success"], true, "got: {exec}");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("executed"),
+            "message must carry the executor's BotResult message, got: {exec}"
+        );
+
+        let mode = handle_set_game_mode(&state, &sender, "creative".into())
+            .await
+            .expect("set_game_mode should succeed");
+        let v: serde_json::Value =
+            serde_json::from_str(&mode).expect("set_game_mode must return BotResult JSON");
+        assert_eq!(v["success"], true, "got: {mode}");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("executed"),
+            "message must carry the executor's BotResult message, got: {mode}"
+        );
     }
 
     // -- get_chat_history -----------------------------------------------------

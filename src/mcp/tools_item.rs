@@ -34,18 +34,10 @@ pub async fn handle_switch_hotbar_slot(
             input.slot
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::SwitchHotbarSlot(input.slot);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── drop_item ──────────────────────────────────────────────────────────────
@@ -79,18 +71,10 @@ pub async fn handle_drop_item(
             "Count must be between 1 and 64, got {count}"
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::DropItem(input.slot, count);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── set_hotbar_item ─────────────────────────────────────────────────────────
@@ -141,18 +125,10 @@ pub async fn handle_set_hotbar_item(
             "count must be between 1 and 64, got {count}"
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::MoveItemToHotbar(input.hotbar_slot, input.item_id, count);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── use_item ───────────────────────────────────────────────────────────────
@@ -181,11 +157,7 @@ pub async fn handle_use_item(
             "item_slot must be 0-8, got {slot}"
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // When a slot is requested, send a single atomic UseItemWithSlot command
     // so the switch + use cannot be interleaved with other commands under
@@ -194,11 +166,7 @@ pub async fn handle_use_item(
         Some(slot) => BotCommand::UseItemWithSlot(slot),
         None => BotCommand::UseItem,
     };
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── equip_tool ─────────────────────────────────────────────────────────────
@@ -273,11 +241,7 @@ pub async fn handle_equip_tool(
         None => None,
     };
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // Route to the material-aware command only when a preference is given, so
     // callers without one keep the plain EquipTool behaviour.
@@ -318,11 +282,7 @@ pub async fn handle_collect_items(
             input.radius
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // Force a snapshot refresh first so the executor sees dropped item
     // entities that arrived after the last 500 ms-throttled snapshot — a
@@ -331,11 +291,7 @@ pub async fn handle_collect_items(
     crate::mcp::tools_query::refresh_snapshot_and_wait(state).await;
 
     let cmd = BotCommand::CollectItems(input.radius);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── give_item ───────────────────────────────────────────────────────────────
@@ -364,10 +320,12 @@ pub struct GiveItemInput {
 /// [`BotCommand::MoveItemToHotbar`] path (reliable wherever the item already
 /// landed in the inventory). A rejection of the initial `/give` (for example
 /// an unknown item id) is propagated as [`BotError::CommandRejected`] instead
-/// of a fake success. Requires server commands (op) — command availability
-/// is verified live via a `/seed` probe, and only a probe-confirmed rejection
-/// yields `PermissionDenied` (the cached snapshot's `commands_enabled` can be
-/// a stale `PermissionLevel` heuristic right after a reconnect).
+/// of a fake success, and a `success:false` `/give` result is returned
+/// verbatim instead of fabricating "Gave ...". Requires server commands
+/// (op) — command availability is verified live via a `/seed` probe, and
+/// only a probe-confirmed rejection yields `PermissionDenied` (the cached
+/// snapshot's `commands_enabled` can be a stale `PermissionLevel` heuristic
+/// right after a reconnect).
 pub async fn handle_give_item(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
@@ -400,11 +358,7 @@ pub async fn handle_give_item(
             "hotbar_slot must be 0-8, got {hotbar_slot}"
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
     // Commands-availability gate. The cached snapshot's `commands_enabled`
     // may reflect the `PermissionLevel` heuristic, which lags the real
     // server state right after a reconnect (the permission component reads
@@ -440,7 +394,15 @@ pub async fn handle_give_item(
     };
 
     let give_cmd = BotCommand::ExecuteCommand(format!("/give {username} {namespaced} {count}"));
-    sender.send_command(give_cmd).await?;
+    // Bind the result instead of dropping it (L-6): the executor can report
+    // `success:false` without an `Err` (e.g. server feedback indicates the
+    // give was not delivered). Fabricating "Gave ..." would be a fake
+    // success — return the honest BotResult verbatim instead.
+    let give_result = sender.send_command(give_cmd).await?;
+    if !give_result.success {
+        return serde_json::to_string(&give_result)
+            .map_err(|e| BotError::Internal(format!("Serialization error: {e}")));
+    }
 
     if target_hotbar {
         let replace_cmd = BotCommand::ExecuteCommand(format!(
@@ -466,8 +428,16 @@ pub async fn handle_give_item(
             Err(BotError::CommandRejected { .. }) => {
                 // `/item replace` is not supported on every server. The item
                 // is already in the inventory (the /give succeeded), so fall
-                // back to the reliable swap-click move.
-                let swap = BotCommand::MoveItemToHotbar(hotbar_slot, input.item_id.clone(), count);
+                // back to the reliable swap-click move. The inventory stores
+                // BARE ids ("cobblestone") while the input may carry a
+                // "minecraft:" namespace (valid in commands) — strip it so
+                // the MoveItemToHotbar match finds the stack (L-7).
+                let bare_id = input
+                    .item_id
+                    .strip_prefix("minecraft:")
+                    .unwrap_or(&input.item_id)
+                    .to_string();
+                let swap = BotCommand::MoveItemToHotbar(hotbar_slot, bare_id, count);
                 match sender.send_command(swap).await {
                     Ok(swap_result) => {
                         return serde_json::to_string(&crate::types::BotResult {
@@ -1039,6 +1009,46 @@ mod tests {
         responder.await.expect("responder finished");
     }
 
+    /// RED (L-6): the executor can report `Ok(BotResult{success:false})`
+    /// without an Err (e.g. server feedback indicates the give was not
+    /// delivered). give_item must not fabricate a "Gave ..." success — it
+    /// returns the honest BotResult (message/data verbatim) instead.
+    #[tokio::test]
+    async fn test_give_item_reports_executor_failure() {
+        let state = make_give_state();
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            consume_probe(&mut receiver).await;
+            let give = receiver.recv().await.expect("give command");
+            give.respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: false,
+                    message: "server said no".into(),
+                    data: Some(serde_json::json!({ "reason": "give_undelivered" })),
+                }))
+                .unwrap();
+        });
+
+        let input = GiveItemInput {
+            item_id: "dirt".into(),
+            count: None,
+            target: None,
+            hotbar_slot: None,
+        };
+        let result = handle_give_item(&state, &sender, input)
+            .await
+            .expect("executor failure must be returned, not errored");
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["success"], false,
+            "must not claim success when the executor failed: {result}"
+        );
+        assert_eq!(parsed["message"], "server said no");
+        assert_eq!(parsed["data"]["reason"], "give_undelivered");
+        responder.await.expect("responder finished");
+    }
+
     #[tokio::test]
     async fn test_give_item_to_hotbar_sends_item_replace() {
         let state = make_give_state();
@@ -1136,6 +1146,67 @@ mod tests {
             count: None,
             target: Some("hotbar".into()),
             hotbar_slot: Some(3),
+        };
+        let result = handle_give_item(&state, &sender, input).await.unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["data"]["method"], "swap_click");
+        responder.await.expect("responder finished");
+    }
+
+    /// RED (L-7): with a namespaced item_id the /give succeeds (namespaced
+    /// ids are valid in commands) but the swap fallback previously passed the
+    /// raw id to `MoveItemToHotbar`, which matches against the inventory's
+    /// BARE ids — "minecraft:cobblestone" never matched and the tool reported
+    /// InvalidParams for an item that exists. The fallback must strip the
+    /// "minecraft:" prefix before the inventory match.
+    #[tokio::test]
+    async fn test_give_item_namespaced_swap_fallback_strips_prefix() {
+        let state = make_give_state();
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            consume_probe(&mut receiver).await;
+            let first = receiver.recv().await.expect("give");
+            first
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .unwrap();
+            let second = receiver.recv().await.expect("replace");
+            second
+                .respond_to
+                .send(Err(BotError::CommandRejected {
+                    command: "/item replace ...".into(),
+                    feedback: "Unknown command".into(),
+                }))
+                .unwrap();
+            let third = receiver.recv().await.expect("swap fallback");
+            assert!(
+                matches!(
+                    third.command,
+                    BotCommand::MoveItemToHotbar(0, ref id, 1) if id == "cobblestone"
+                ),
+                "namespaced id must be stripped for the bare-id inventory match, got: {:?}",
+                third.command
+            );
+            third
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .unwrap();
+        });
+
+        let input = GiveItemInput {
+            item_id: "minecraft:cobblestone".into(),
+            count: None,
+            target: Some("hotbar".into()),
+            hotbar_slot: None,
         };
         let result = handle_give_item(&state, &sender, input).await.unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();

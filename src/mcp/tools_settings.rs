@@ -118,7 +118,8 @@ pub fn get_settings(state: &Arc<SharedState>) -> Result<String, BotError> {
 /// Input for the `update_settings` MCP tool.
 ///
 /// All fields are optional — only the provided fields change (partial
-/// update). Values are validated via [`AppConfig::validate`] and applied in
+/// update). Values are validated via
+/// [`AppConfig::validate`](crate::config::AppConfig::validate) and applied in
 /// memory for the running process only — restart with `MINECRAFT_MCP_*`
 /// environment variables to persist across restarts.
 #[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
@@ -214,7 +215,7 @@ fn language_to_str(language: Language) -> &'static str {
 /// Handle the `update_settings` MCP tool.
 ///
 /// Partial update: only the provided fields change. The candidate config is
-/// validated ([`AppConfig::validate`]) and applied in memory (no file
+/// validated ([`AppConfig::validate`](crate::config::AppConfig::validate)) and applied in memory (no file
 /// persistence). Changing `mc_address`/`mc_port`/`ai_username` triggers a
 /// bot reconnect when connected/connecting; changes to
 /// `mcp_transport`/`mcp_address`/`mcp_port` take effect on process restart.
@@ -328,28 +329,36 @@ pub fn update_settings(
             applied.insert("mcp_transport".into(), json!(transport_to_str(transport)));
         }
     }
+    let mut new_language: Option<Language> = None;
     if let Some(v) = input.language {
         let language = parse_language(&v)?;
         if language != candidate.language {
             candidate.language = language;
             applied.insert("language".into(), json!(language_to_str(language)));
-            // Next-frame effect in UI mode; harmless in headless mode.
-            crate::i18n::set(language);
+            new_language = Some(language);
         }
     }
 
+    // Validate BEFORE any global side effect: the old order called
+    // i18n::set() inside the loop above, so a REJECTED update had already
+    // flipped the UI language globally while leaving the config unchanged.
     candidate.validate().map_err(BotError::InvalidParams)?;
 
-    // No file persistence: `MINECRAFT_MCP_*` environment variables are the
-    // configuration source, so runtime updates live in memory only.
-
+    // Commit the validated candidate to the live in-memory config before any
+    // reconnect/restart side effects use it downstream.
     state.update_config(|cfg| *cfg = candidate.clone());
 
+    if let Some(language) = new_language {
+        // Next-frame effect in UI mode; harmless in headless mode.
+        crate::i18n::set(language);
+    }
+
+    // No file persistence: MINECRAFT_MCP_* environment variables are the
+    // configuration source, so runtime updates live in memory only.
     // Connection fields changed → the bot must reconnect to honour them.
     let connection_fields_changed = old.mc_address != candidate.mc_address
         || old.mc_port != candidate.mc_port
         || old.ai_username != candidate.ai_username;
-    // `applied` only contains fields whose values actually changed.
     let transport_restart_fields_changed = applied.contains_key("mcp_transport")
         || applied.contains_key("mcp_address")
         || applied.contains_key("mcp_port");
@@ -357,14 +366,26 @@ pub fn update_settings(
     let mut reconnect_triggered = false;
     if connection_fields_changed {
         if state.is_online() || state.is_connecting() {
-            // The connect loop consumes the restart flag: disconnect, then
-            // re-read the fresh config and reconnect.
+            // Online/connecting: the CONNECT LOOP owns the restart flag
+            // (single-ownership rule, M-10). request_config_restart +
+            // request_disconnect tear the running session down; the connect
+            // loop's checkpoint consumes the flag, clears the disconnect
+            // request, resets the cancel token and reconnects in-place with
+            // the fresh config. The bot thread never exits, so the headless
+            // supervisor keeps polling the same handle and must NOT consume
+            // the flag — otherwise it could spawn a second bot thread while
+            // the old loop reconnects (two azalea sessions → kick loop).
             state.request_config_restart();
             state.request_disconnect();
             reconnect_triggered = true;
         } else {
-            // Headless supervisor consumes the flag on its next pass; in UI
-            // mode it is a harmless no-op until the user clicks Connect.
+            // Offline: nobody is connected, so the new config is already
+            // applied for the next Connect. The restart flag is set for the
+            // HEADLESS supervisor, which consumes it only when no bot thread
+            // exists (spawn.rs quiet-wait / next-action) and respawns the
+            // bot. In UI mode it is stale by design: `connect()`'s entry
+            // cleanup discards it (L-22) so a later explicit Disconnect is
+            // never converted into a surprise reconnect.
             state.request_config_restart();
         }
     }
@@ -694,6 +715,9 @@ mod tests {
 
     #[test]
     fn test_update_settings_language_change_applies_and_sets_i18n() {
+        let _lock = crate::i18n::I18N_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let state = state_with_known_token();
         // Force a known starting language — the default follows the system
         // locale (which may already be zh_cn on this machine).

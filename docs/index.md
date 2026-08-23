@@ -3,27 +3,26 @@ layout: home
 
 hero:
   name: minecraft-mcp-rs
-  text: "A Minecraft bot controlled via the Model Context Protocol (MCP)."
-  tagline: "Bridge an LLM client to a live Minecraft world."
+  text: "A Minecraft bot, driven by your LLM."
+  tagline: "41 MCP tools bridging Claude Desktop, Cursor or any MCP host to a live Minecraft 1.21.11 world. Zero Rust toolchain — one npx command."
   actions:
     - theme: brand
-      text: Get Started
+      text: Quick Run with npx
       link: /guide/getting-started
+    - theme: alt
+      text: Install via npm
+      link: /npm
     - theme: alt
       text: GitHub
       link: https://github.com/halfoffive/minecraft-mcp-rs
 
 features:
-  - title: "30+ MCP Tools"
-    details: "Bot abilities organized into 8 domains — query, movement, block, item, container, combat, chat, and settings — plus a unified `act` tool. Exposed over stdio or remote HTTP."
-  - title: "Live World State"
-    details: "The bot periodically snapshots its surroundings into a thread-safe `SharedState`, readable by all tools. Only changed blocks/chunks are recomputed between polling intervals."
-  - title: "Remote HTTP Server"
-    details: "A loopback-only (`127.0.0.1`) MCP HTTP server, optional Bearer-token auth (off by default). Transport mode is selectable in the UI; a copyable JSON config is generated for Claude Desktop / Cursor."
-  - title: "AI Vision"
-    details: "The `get_world_view` tool renders a top-down PNG of nearby blocks and returns it as base64, letting multimodal models reason about the world visually."
-  - title: "Smart Movement & Flight"
-    details: "`smart_move` auto-jumps over 1-block gaps and stops on larger obstacles; `fly_to` flies to a target in creative mode. Compound operations compose primitive commands."
-  - title: "Desktop UI"
-    details: "An egui/eframe desktop app with a live status panel, fully editable settings, and an MCP Config panel — alongside auto-reconnect with exponential backoff."
+  - title: "41 MCP Tools"
+    details: "Bot abilities organized into 8 domains — query, movement, block, item, container, combat, chat, and settings — plus a unified `act` tool. Over stdio or loopback HTTP."
+  - title: "Live World Perception"
+    details: "Dirty-region snapshots keep a thread-safe view of the world fresh; only changed blocks and chunks are re-read between polls."
+  - title: "Vision for Multimodal LLMs"
+    details: "`get_world_view` renders a top-down PNG with a yaw heading arrow and returns it beside a JSON annotation — the model sees what the bot sees."
+  - title: "Honest Errors"
+    details: "Every failure carries a machine-readable reason and retryable hint; placements are verified against the world — never fake successes."
 ---

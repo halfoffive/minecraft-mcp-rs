@@ -19,43 +19,48 @@ use crate::types::BotCommand;
 /// Input for the `attack_entity` MCP tool.
 #[derive(Deserialize, Default, rmcp::schemars::JsonSchema)]
 pub struct AttackEntityInput {
-    /// The Minecraft entity ID to attack.
+    /// The Minecraft entity ID to attack. Valid range: 0..=2147483647
+    /// (vanilla entity IDs never exceed i32::MAX).
+    #[schemars(range(min = 0, max = 2147483647))]
     pub entity_id: u32,
 }
 
 /// Handle `attack_entity` MCP tool.
 ///
-/// Verifies the entity exists in the current world snapshot, checks online
-/// status, then sends [`BotCommand::AttackEntity`].
+/// Rejects entity IDs above `i32::MAX` with a cheap bounds check BEFORE the
+/// online gate and the snapshot existence scan (L-14), verifies the entity
+/// exists in the current world snapshot, checks online status, then sends
+/// [`BotCommand::AttackEntity`].
 pub async fn handle_attack_entity(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     input: AttackEntityInput,
 ) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
+    // L-14: malformed parameter wins over any state-dependent error (R-6
+    // convention) — a u32 above i32::MAX cannot be a vanilla entity ID and
+    // must never reach the snapshot scan.
+    if input.entity_id > i32::MAX as u32 {
+        return Err(BotError::InvalidParams(format!(
+            "Entity ID {} is out of range (valid 0..=2147483647)",
+            input.entity_id
+        )));
     }
+
+    crate::mcp::common::require_online(state)?;
 
     // Verify the entity exists in the current snapshot
     {
         let snap = state.read_snapshot();
         let found = snap.entities.iter().any(|e| e.id == input.entity_id);
         if !found {
-            return Err(BotError::InvalidParams(format!(
-                "Entity with ID {} not found in current world snapshot",
-                input.entity_id
-            )));
+            // F-34: the ID is in the valid range but absent from the
+            // snapshot — a not-found condition, not a malformed parameter.
+            return Err(BotError::EntityNotFound(input.entity_id));
         }
     }
 
     let cmd = BotCommand::AttackEntity(input.entity_id);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── shield_block ────────────────────────────────────────────────────────────
@@ -78,11 +83,7 @@ pub async fn handle_shield_block(
     sender: &BotCommandSender,
     input: ShieldBlockInput,
 ) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::ShieldBlock(input.blocking);
     match sender.send_command(cmd).await {
@@ -181,15 +182,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_attack_entity_rejects_over_i32_max_before_scan() {
+        // L-14: entity IDs above i32::MAX cannot exist on a vanilla server
+        // and must be rejected by a cheap bounds check BEFORE the online gate
+        // and the snapshot existence scan — the state here is offline with an
+        // empty snapshot, so any scan/online error would be Offline or
+        // "not found", never the bounds error.
+        let (state, sender) = setup();
+        let input = AttackEntityInput {
+            entity_id: i32::MAX as u32 + 1,
+        };
+        let result = handle_attack_entity(&state, &sender, input).await;
+        assert!(
+            matches!(result, Err(BotError::InvalidParams(ref msg))
+                if msg.contains("out of range") && !msg.contains("not found")),
+            "expected a bounds InvalidParams before any snapshot scan, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_attack_entity_not_found() {
         let (state, sender) = setup();
         make_online(&state);
         // No entities in default snapshot
         let input = AttackEntityInput { entity_id: 99 };
         let result = handle_attack_entity(&state, &sender, input).await;
-        assert!(
-            matches!(result, Err(BotError::InvalidParams(ref msg)) if msg.contains("not found"))
-        );
+        assert!(matches!(result, Err(BotError::EntityNotFound(99))));
     }
 
     #[tokio::test]

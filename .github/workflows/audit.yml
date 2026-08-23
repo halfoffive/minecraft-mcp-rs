@@ -1,0 +1,49 @@
+# Supply-chain audit: runs `cargo audit` (RustSec advisory database) over
+# every committed lockfile - the root one plus the vendored patches
+# (patches/rmcp, patches/rsa), which carry their own Cargo.lock files.
+#
+# Blocking gate. Known-unfixable findings are triaged in ./.cargo/audit.toml
+# (each entry documents the blocking dependency and its revisit condition);
+# each directory may carry its own .cargo/audit.toml - the Audit step runs
+# with that directory as its working directory, and cargo-audit discovers
+# configs ONLY at <workdir>/.cargo/audit.toml or ~/.cargo/audit.toml.
+name: Security audit
+
+on:
+  push:
+    paths:
+      - 'Cargo.lock'
+      - 'audit.toml'
+      - 'patches/*/Cargo.lock'
+      - '.github/workflows/audit.yml'
+  schedule:
+    # Weekly, Mondays 04:23 UTC (off the top of the hour to reduce load).
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    name: cargo audit (${{ matrix.dir }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: .
+          - dir: patches/rmcp
+          - dir: patches/rsa
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Audit ${{ matrix.dir }}/Cargo.lock
+        working-directory: ${{ matrix.dir }}
+        run: cargo audit --file Cargo.lock
