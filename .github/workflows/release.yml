@@ -386,7 +386,13 @@ jobs:
             name=$(node -p "require('./' + process.argv[1] + '/package.json').name" "$dir")
             ver=$(node -p "require('./' + process.argv[1] + '/package.json').version" "$dir")
             if npm view "$name@$ver" version >/dev/null 2>&1; then
-              echo "::notice::$name@$ver already published — skipping"
+              echo "::notice::$name@$ver already published — ensuring dist-tag '${{ needs.mode.outputs.npm_tag }}'"
+              # Idempotency fallback: a previous run may have published this
+              # version under the OTHER dist-tag (e.g. a `release` branch
+              # push raced the stable tag and landed `next` first). Without
+              # this re-tag, an already-published version would never move
+              # to `latest` (or back) and the channel would stay stale.
+              npm dist-tag add "$name@$ver" "${{ needs.mode.outputs.npm_tag }}"
             else
               (cd "$dir" && npm publish --provenance --access public --tag "${{ needs.mode.outputs.npm_tag }}")
             fi
