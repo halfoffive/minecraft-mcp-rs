@@ -105,10 +105,13 @@ pub struct AppConfig {
     pub fly_timeout_secs: u64,
     /// Authentication token presented by MCP clients over HTTP
     /// (default: a random UUID v4 generated per fresh [`AppConfig::default()`]
-    /// / missing-field deserialization; override via the settings panel).
+    /// / missing-field deserialization; override via the settings panel or
+    /// the `MINECRAFT_MCP_TOKEN` environment variable).
     ///
-    /// The token is serialized so it persists across restarts; public
-    /// surfaces (e.g. the `get_settings` MCP tool) must redact it.
+    /// Nothing is persisted to disk (env vars are the only configuration
+    /// source — see [`AppConfig::from_env`]); runtime changes live in memory
+    /// for this process only. Public surfaces (e.g. the `get_settings` MCP
+    /// tool) must redact it.
     #[serde(default = "default_mcp_token")]
     pub mcp_token: String,
     /// Whether MCP clients must present a valid bearer token (default:

@@ -69,9 +69,7 @@ pub async fn get_self_info(
     state: &Arc<SharedState>,
     input: SelfInfoInput,
 ) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is currently offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
     if input.force {
         refresh_snapshot_and_wait(state).await;
     }
@@ -91,9 +89,7 @@ pub async fn get_inventory(
     state: &Arc<SharedState>,
     input: InventoryInput,
 ) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is currently offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
     if input.force {
         refresh_snapshot_and_wait(state).await;
     }
@@ -228,9 +224,7 @@ pub fn get_nearby_blocks(
             "max_blocks must be in range 1..=10000, got {max_blocks}"
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is currently offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
     let snapshot = state.read_snapshot();
     let center = snapshot.self_player.position;
     let r = clamp_to_i32(radius);
@@ -363,9 +357,7 @@ pub fn get_nearby_entities_capped(
             "max_entities must be in range 1..=10000, got {max_entities}"
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is currently offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
     let snapshot = state.read_snapshot();
     let center = snapshot.self_player.position;
     let r = clamp_to_i32(radius);
@@ -401,9 +393,7 @@ pub fn get_nearby_entities_capped(
 ///
 /// Returns a JSON array of `(chunk_x, chunk_z)` tuples.
 pub fn get_chunk_summary(state: &Arc<SharedState>) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is currently offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
     let snapshot = state.read_snapshot();
     serde_json::to_string(&snapshot.chunk_summary)
         .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
@@ -447,9 +437,7 @@ pub async fn get_server_info(
     sender: &BotCommandSender,
     input: ServerInfoInput,
 ) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is currently offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // (Re)run the live probe when requested or when we have no cached result
     // at all. Sending the probe through the command channel keeps it serial
@@ -540,9 +528,7 @@ pub struct HotbarInput {
 /// (the shared root cause behind their historical slot mistakes). `force`
 /// behaves like [`get_inventory`].
 pub async fn get_hotbar(state: &Arc<SharedState>, input: HotbarInput) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is currently offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
     if input.force {
         refresh_snapshot_and_wait(state).await;
     }
@@ -682,9 +668,7 @@ pub fn get_world_view(
     // scale is clamped inside render_topdown_enhanced; we don't reject
     // out-of-range values here, just fall back to 1 (so existing clients
     // passing `scale=0` or omitting it entirely get the legacy behaviour).
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is currently offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // Clamp scale to a supported value (1/2/4/8). Invalid inputs fall
     // back to 1 so the annotation JSON accurately reflects what was

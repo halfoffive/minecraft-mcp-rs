@@ -908,6 +908,7 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
         BotCommand::UseItemOnBlock(BlockPos::new(0, 64, 0), None, None),
         BotCommand::SwitchHotbarSlot(0),
         BotCommand::DropItem(0, 1),
+        BotCommand::MoveItemToHotbar(0, "dirt".into(), 1),
         BotCommand::UseItem,
         BotCommand::UseItemWithSlot(0),
         BotCommand::EquipTool(ToolType::Pickaxe),
@@ -936,8 +937,8 @@ async fn test_all_bot_command_variants_exist_no_craft_item() {
 
     assert_eq!(
         commands.len(),
-        27,
-        "should have exactly 27 BotCommand variants (7 dead Query* variants removed in 1.1.0)"
+        28,
+        "should have exactly 28 BotCommand variants (7 dead Query* variants removed in 1.1.0; MoveItemToHotbar added in 1.1.5)"
     );
 
     for cmd in commands {

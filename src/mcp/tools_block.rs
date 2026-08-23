@@ -72,11 +72,7 @@ pub async fn handle_break_block(
         return Err(BotError::InvalidParams(e));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let pos = BlockPos::new(input.x, input.y, input.z);
     let cmd = if input.use_best_tool.unwrap_or(true) {
@@ -88,11 +84,7 @@ pub async fn handle_break_block(
     } else {
         BotCommand::BreakBlock(pos)
     };
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── place_block ────────────────────────────────────────────────────────────
@@ -153,11 +145,7 @@ pub async fn handle_place_block(
         )));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::PlaceBlock(
         BlockPos::new(input.x, input.y, input.z),
@@ -315,18 +303,10 @@ pub async fn handle_use_item_on_block(
         return Err(BotError::InvalidParams(e));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::UseItemOnBlock(interact_target, input.item_slot, Some(effect));
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
