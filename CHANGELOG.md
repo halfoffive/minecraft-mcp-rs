@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI: `setup-rust-toolchain` input renamed `targets` → `target`.** The
+  action's current v1 input list no longer accepts the plural `targets`;
+  every matrix job (build.yml) and release job (release.yml) logged
+  `Unexpected input(s) 'targets'` annotations and silently skipped the
+  explicit `rustup target add`. Native-arch runners masked the functional
+  impact (host triple == build target), but any future cross-compilation
+  target would have failed. Both workflows now pass the singular `target`
+  input.
+
 ## [1.3.2] - 2026-08-23
 
 ### Fixed
