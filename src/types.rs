@@ -368,9 +368,10 @@ pub struct InventorySlot {
 /// bot/MCP layer for pathfinding and block lookups. For higher-precision
 /// rendering (e.g. the top-down [`crate::mcp::render::render_topdown`] view),
 /// `position_precise` carries the original floating-point coordinates.
-/// Likewise `yaw` exposes the player's horizontal look direction (radians,
-/// Minecraft convention: 0 = south, +π/2 = west, ±π = north, −π/2 = east),
-/// enabling the renderer to draw a heading arrow at the player's pixel.
+/// Likewise `yaw` exposes the player's horizontal look direction in DEGREES
+/// (Minecraft convention: 0 = south, +90 = west, ±180 = north, −90 = east;
+/// normalized to `[-180, 180)` by `crate::utils::normalize_yaw`), enabling
+/// the renderer to draw a heading arrow at the player's pixel.
 ///
 /// Both `position_precise` and `yaw` are `#[serde(skip)]` so the JSON
 /// contract for `SelfPlayer` is unchanged — they are derived fields that
@@ -395,12 +396,14 @@ pub struct SelfPlayer {
     /// the up-to-1-block truncation bias of `position`.
     #[serde(skip)]
     pub position_precise: Option<[f64; 3]>,
-    /// Horizontal look direction in degrees (Minecraft convention, −180..180).
+    /// Horizontal look direction in DEGREES (Minecraft convention, −180..180).
     ///
     /// Populated by [`SnapshotUpdater`](crate::bot::snapshot_updater::SnapshotUpdater)
-    /// from `azalea::entity::metadata::Player`. Used by the top-down
+    /// from `azalea::entity::LookDirection::y_rot()` (radians, folded into
+    /// degrees by `crate::utils::normalize_yaw`). Used by the top-down
     /// renderer to draw a small heading arrow at the player's pixel so
-    /// multimodal LLMs can tell which way the bot is facing.
+    /// multimodal LLMs can tell which way the bot is facing. The renderer
+    /// converts back with `to_radians()`.
     #[serde(skip)]
     pub yaw: Option<f32>,
 }

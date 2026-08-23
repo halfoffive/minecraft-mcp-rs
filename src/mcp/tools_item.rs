@@ -34,18 +34,10 @@ pub async fn handle_switch_hotbar_slot(
             input.slot
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::SwitchHotbarSlot(input.slot);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── drop_item ──────────────────────────────────────────────────────────────
@@ -79,18 +71,10 @@ pub async fn handle_drop_item(
             "Count must be between 1 and 64, got {count}"
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::DropItem(input.slot, count);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── set_hotbar_item ─────────────────────────────────────────────────────────
@@ -141,18 +125,10 @@ pub async fn handle_set_hotbar_item(
             "count must be between 1 and 64, got {count}"
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::MoveItemToHotbar(input.hotbar_slot, input.item_id, count);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── use_item ───────────────────────────────────────────────────────────────
@@ -181,11 +157,7 @@ pub async fn handle_use_item(
             "item_slot must be 0-8, got {slot}"
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // When a slot is requested, send a single atomic UseItemWithSlot command
     // so the switch + use cannot be interleaved with other commands under
@@ -194,11 +166,7 @@ pub async fn handle_use_item(
         Some(slot) => BotCommand::UseItemWithSlot(slot),
         None => BotCommand::UseItem,
     };
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── equip_tool ─────────────────────────────────────────────────────────────
@@ -273,11 +241,7 @@ pub async fn handle_equip_tool(
         None => None,
     };
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // Route to the material-aware command only when a preference is given, so
     // callers without one keep the plain EquipTool behaviour.
@@ -318,11 +282,7 @@ pub async fn handle_collect_items(
             input.radius
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // Force a snapshot refresh first so the executor sees dropped item
     // entities that arrived after the last 500 ms-throttled snapshot — a
@@ -331,11 +291,7 @@ pub async fn handle_collect_items(
     crate::mcp::tools_query::refresh_snapshot_and_wait(state).await;
 
     let cmd = BotCommand::CollectItems(input.radius);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── give_item ───────────────────────────────────────────────────────────────
@@ -402,11 +358,7 @@ pub async fn handle_give_item(
             "hotbar_slot must be 0-8, got {hotbar_slot}"
         )));
     }
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
     // Commands-availability gate. The cached snapshot's `commands_enabled`
     // may reflect the `PermissionLevel` heuristic, which lags the real
     // server state right after a reconnect (the permission component reads

@@ -7,7 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.3.2-rc.1] - 2026-08-22
+## [1.3.2] - 2026-08-23
+
+### Fixed
+
+- **`update_settings` tool description no longer claims "Persisted to the
+  config file"** — config files were removed (S-8); settings are env-var
+  sourced and in-memory at runtime. The old wording misled MCP clients into
+  believing runtime changes survive a restart.
+- **Unified offline error wording across the tool surface:** the 23
+  hand-rolled `is_online()` gates had drifted to three different messages.
+  They now all route through the new `mcp::common::require_online`, whose
+  single message is `"Bot is currently offline"`. The repeated
+  send-command-and-serialize tail collapsed into
+  `mcp::common::send_and_serialize`.
+- **`tests/integration.rs` variant guard updated to 28:** the runtime list
+  was silently missing `MoveItemToHotbar` (added 1.1.5) and asserted 27.
+- **Doc drift:** `SelfPlayer::yaw` docs now consistently say DEGREES (one
+  site claimed radians); `AppConfig::mcp_token` doc dropped the stale
+  "persists across restarts"; AGENTS.md's `nether_gold_ore` entry corrected
+  to the M-21 level-0 adjudication; AGENTS.md's `act` result entry corrected
+  to the L-15 SelfPlayer-clone override.
+
+### Changed
+
+- **npm launcher hardening for npx/bunx:** the launcher spawns with
+  `windowsHide: true` and self-heals a lost executable bit on POSIX
+  (`EACCES`/`ENOEXEC` → one `chmod 0o755` + retry), so cached npx/bunx runs
+  no longer dead-end on mode-stripped tarball extraction.
+
+### Docs
+
+- **New "Building from Source" tutorial** under `/dev/building` (bilingual),
+  covering prerequisites, the pinned-nightly rationale, the full test/lint
+  gate suite, release artifacts, and common build issues; build details
+  moved out of Getting Started, which now leads with the zero-Rust
+  `npx`/`bunx` quick run.
+- **Install flows lead with `npx`/`bunx`** across README, the npm page, and
+  Getting Started; global install demoted to secondary. The npm page's
+  stale "config file / `--config`" section was replaced by a
+  `MINECRAFT_MCP_*` quick-reference table (the mechanism was removed in S-8).
+- **Tool count stated precisely as 41** everywhere ("30+" remnants removed).
+- **VitePress theme polish:** industrial-block styling (Chakra Petch /
+  IBM Plex faces, blueprint-grid hero, pixel-block accents, staggered load
+  reveal). Colors are untouched — every rule consumes VitePress default CSS
+  variables only.
 
 ### Added
 

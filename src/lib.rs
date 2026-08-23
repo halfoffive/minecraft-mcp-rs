@@ -31,6 +31,7 @@ pub mod bot {
     pub mod spawn;
 }
 pub mod mcp {
+    pub mod common;
     pub mod render;
     pub mod server;
     pub mod tools_act;

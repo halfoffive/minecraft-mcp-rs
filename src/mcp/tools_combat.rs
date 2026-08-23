@@ -46,11 +46,7 @@ pub async fn handle_attack_entity(
         )));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // Verify the entity exists in the current snapshot
     {
@@ -64,11 +60,7 @@ pub async fn handle_attack_entity(
     }
 
     let cmd = BotCommand::AttackEntity(input.entity_id);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── shield_block ────────────────────────────────────────────────────────────
@@ -91,11 +83,7 @@ pub async fn handle_shield_block(
     sender: &BotCommandSender,
     input: ShieldBlockInput,
 ) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::ShieldBlock(input.blocking);
     match sender.send_command(cmd).await {

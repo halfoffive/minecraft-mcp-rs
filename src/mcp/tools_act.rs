@@ -65,18 +65,10 @@ pub async fn handle_act(
         )));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::Act(input.action, input.perception_radius);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

@@ -73,16 +73,10 @@ pub async fn handle_send_chat(
         ));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::SendChat(message);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 /// Execute a Minecraft command.
@@ -110,9 +104,7 @@ pub async fn handle_execute_command(
         ));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // Auto-prepend `/` if the user omitted it.
     let cmd_str = if trimmed.starts_with('/') {
@@ -122,11 +114,7 @@ pub async fn handle_execute_command(
     };
 
     let cmd = BotCommand::ExecuteCommand(cmd_str);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 /// Set the bot's game mode.
@@ -153,16 +141,10 @@ pub async fn handle_set_game_mode(
         }
     };
 
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::SetGameMode(game_mode);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ---------------------------------------------------------------------------
@@ -174,9 +156,7 @@ pub async fn handle_set_game_mode(
 /// Each entry is an object `{"sender":"...","message":"..."}`. Returns an
 /// error when the bot is not connected to a server.
 pub fn get_chat_history(state: &Arc<SharedState>) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline("Bot is offline".to_string()));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let messages = state.get_chat_messages();
     let entries: Vec<_> = messages

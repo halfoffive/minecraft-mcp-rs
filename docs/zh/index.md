@@ -3,27 +3,26 @@ layout: home
 
 hero:
   name: minecraft-mcp-rs
-  text: "通过模型上下文协议（MCP）控制的 Minecraft 机器人。"
-  tagline: "将 LLM 客户端连接到实时的 Minecraft 世界。"
+  text: "由 LLM 驱动的 Minecraft 机器人。"
+  tagline: "41 个 MCP 工具，把 Claude Desktop、Cursor 或任何 MCP 宿主接入实时的 Minecraft 1.21.11 世界。零 Rust 工具链 —— 一条 npx 命令即可运行。"
   actions:
     - theme: brand
-      text: 快速开始
+      text: npx 快速运行
       link: /zh/guide/getting-started
+    - theme: alt
+      text: npm 安装
+      link: /zh/npm
     - theme: alt
       text: GitHub
       link: https://github.com/halfoffive/minecraft-mcp-rs
 
 features:
-  - title: "30+ MCP 工具"
-    details: "机器人能力被组织为 8 个领域——查询、移动、方块、物品、容器、战斗、聊天与设置——外加统一的 `act` 工具。通过 stdio 或远程 HTTP 暴露。"
-  - title: "实时世界状态"
-    details: "机器人定期将其周围环境快照到线程安全的 `SharedState` 中，所有工具均可读取。两次轮询之间仅重新计算发生变化的方块/区块。"
-  - title: "远程 HTTP 服务器"
-    details: "仅限本地回环（`127.0.0.1`）的 MCP HTTP 服务器，可选 Bearer Token 鉴权（默认关闭）。传输模式可在 UI 中切换；并为 Claude Desktop / Cursor 生成可复制的 JSON 配置。"
-  - title: "AI 视觉"
-    details: "`get_world_view` 工具渲染附近方块的俯视 PNG 图并以 base64 返回，让多模态模型能够从视觉上理解世界。"
-  - title: "智能移动与飞行"
-    details: "`smart_move` 会自动跳过 1 格间隙并在更大的障碍前停下；`fly_to` 在创造模式下飞向目标。复合操作由基本命令组合而成。"
-  - title: "桌面 UI"
-    details: "基于 egui/eframe 的桌面应用，包含实时状态面板、可完整编辑的设置以及 MCP 配置面板——并带有指数退避的自动重连。"
+  - title: "41 个 MCP 工具"
+    details: "机器人能力被组织为 8 个领域——查询、移动、方块、物品、容器、战斗、聊天与设置——外加统一的 `act` 工具。stdio 或本地回环 HTTP 皆可。"
+  - title: "实时世界感知"
+    details: "脏区域快照让线程安全的世界视图保持新鲜；两次轮询之间只重读发生变化的方块与区块。"
+  - title: "多模态视觉"
+    details: "`get_world_view` 渲染带朝向箭头的俯视 PNG，并附带 JSON 标注一起返回 —— 模型看到的就是 bot 看到的。"
+  - title: "诚实的错误"
+    details: "每个失败都携带机器可读的 reason 与 retryable 提示；放置操作会对照世界验证 —— 绝不假报成功。"
 ---
