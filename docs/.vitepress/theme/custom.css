@@ -1,0 +1,165 @@
+/* minecraft-mcp-rs docs — "industrial block manual" styling.
+ *
+ * Design notes:
+ * - Colors are NEVER redefined. Every rule consumes VitePress default CSS
+ *   variables (--vp-c-brand-*, --vp-c-bg, --vp-c-text-*, gray scales), so
+ *   light/dark themes and any future brand tweaks keep working untouched.
+ * - The aesthetic is precision-instrument minimal: square corners, a faint
+ *   blueprint grid behind the hero, pixel-block accents built from plain
+ *   box-shadows, and one staggered reveal on page load.
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+
+:root {
+  /* Typography only — no color overrides. Distinctive square industrial
+   * display face for headings, refined workhorse faces for body and code,
+   * all falling back to system stacks when Google Fonts is unreachable. */
+  --vp-font-family-base: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'PingFang SC',
+    'Microsoft YaHei', sans-serif;
+  --vp-font-family-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular,
+    Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+/* ── Headings: the display face carries the identity ─────────────────── */
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.VPHomeHero .name,
+.VPHomeHero .text {
+  font-family: 'Chakra Petch', var(--vp-font-family-base);
+  letter-spacing: 0.01em;
+}
+
+/* ── Hero: blueprint grid + block accents ────────────────────────────── */
+/* A low-contrast grid drawn with currentColor at ~5% opacity gives the
+ * hero a technical-drawing feel in both light and dark mode without
+ * hardcoding any color. */
+.VPHero {
+  position: relative;
+  overflow: hidden;
+}
+
+.VPHero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(currentColor 1px, transparent 1px),
+    linear-gradient(90deg, currentColor 1px, transparent 1px);
+  background-size: 32px 32px;
+  opacity: 0.05;
+  mask-image: radial-gradient(ellipse 90% 80% at 50% 40%, black 30%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse 90% 80% at 50% 40%, black 30%, transparent 75%);
+}
+
+/* A small cluster of "blocks" floating right of the hero text, built from
+ * box-shadows so each cube is a single element. Brand color comes from the
+ * default variable; companions use default grays via color-mix on currentColor. */
+.VPHomeHero .image::after,
+.VPHero.has-image .image-container::after {
+  content: '';
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  top: 18%;
+  left: 34%;
+  background: var(--vp-c-brand-1);
+  box-shadow:
+    28px 10px 0 color-mix(in srgb, currentColor 22%, transparent),
+    -20px 44px 0 color-mix(in srgb, currentColor 12%, transparent),
+    52px 58px 0 color-mix(in srgb, var(--vp-c-brand-1) 45%, transparent),
+    6px 84px 0 color-mix(in srgb, currentColor 8%, transparent);
+}
+
+/* Staggered load reveal — one orchestrated moment, CSS-only. */
+.VPHero .name,
+.VPHero .text,
+.VPHero .tagline,
+.VPHero .actions,
+.VPFeature {
+  animation: mcrs-rise 0.55s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+.VPHero .name     { animation-delay: 0.00s; }
+.VPHero .text     { animation-delay: 0.06s; }
+.VPHero .tagline  { animation-delay: 0.12s; }
+.VPHero .actions  { animation-delay: 0.20s; }
+.VPFeature:nth-child(1) { animation-delay: 0.26s; }
+.VPFeature:nth-child(2) { animation-delay: 0.32s; }
+.VPFeature:nth-child(3) { animation-delay: 0.38s; }
+.VPFeature:nth-child(4) { animation-delay: 0.44s; }
+
+@keyframes mcrs-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .VPHero .name,
+  .VPHero .text,
+  .VPHero .tagline,
+  .VPHero .actions,
+  .VPFeature {
+    animation: none;
+  }
+}
+
+/* ── Feature cards: squared geometry, crisp hover ────────────────────── */
+.VPFeature {
+  border-radius: 4px;
+  transition: transform 0.18s ease, border-color 0.18s ease;
+}
+.VPFeature:hover {
+  transform: translateY(-2px);
+  border-color: var(--vp-c-brand-1);
+}
+.VPFeature .title {
+  font-family: 'Chakra Petch', var(--vp-font-family-base);
+}
+
+/* ── Buttons & custom blocks: keep the square language consistent ───── */
+.VPButton {
+  border-radius: 4px;
+  font-family: 'Chakra Petch', var(--vp-font-family-base);
+  letter-spacing: 0.02em;
+}
+
+.vp-doc div[class*='language-'] {
+  border-radius: 4px;
+}
+.vp-doc div[class*='language-'] code {
+  font-family: var(--vp-font-family-mono);
+}
+
+/* Custom containers (tip/warning/danger/details): square corners, left rail. */
+.vp-doc .custom-block {
+  border-radius: 4px;
+  border-left: 3px solid var(--vp-custom-block-details-border);
+}
+.vp-doc .custom-block.tip {
+  border-left-color: var(--vp-c-brand-1);
+}
+
+/* Tables: hairline grid reads more "datasheet" than the default rounded look. */
+.vp-doc table {
+  border-collapse: collapse;
+}
+.vp-doc th {
+  font-family: 'Chakra Petch', var(--vp-font-family-base);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+/* ── Navbar wordmark ─────────────────────────────────────────────────── */
+.VPNavBarTitle .title {
+  font-family: 'Chakra Petch', var(--vp-font-family-base);
+  letter-spacing: 0.02em;
+}

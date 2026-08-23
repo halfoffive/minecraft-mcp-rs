@@ -40,9 +40,9 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 
 ## Features
 
-- **30+ MCP tools** organized into 8 domains, plus a unified `act` tool
+- **41 MCP tools** organized into 8 domains, plus a unified `act` tool
 
-  提供 **30 余个 MCP 工具**，分为 8 个领域，外加统一的 `act` 工具。
+  提供 **41 个 MCP 工具**，分为 8 个领域，外加统一的 `act` 工具。
 
 - **Bilingual UI (English / 简体中文)** — switch languages at runtime in the
   Settings panel; CJK system fonts are auto-detected so Chinese renders
@@ -204,22 +204,22 @@ WenQuanYi) so Chinese text renders correctly without manual font setup.
 ## Install via npm / 通过 npm 安装
 
 No Rust toolchain needed — prebuilt binaries are published to npm for Windows
-x64/arm64, macOS arm64, and Linux x64/arm64. Install globally:
+x64/arm64, macOS arm64, and Linux x64/arm64. Run it directly (each platform's
+binary is downloaded on demand and cached):
 
-无需 Rust 工具链——预编译二进制已发布到 npm，支持 Windows x64/arm64、macOS arm64 和 Linux x64/arm64。全局安装：
-
-```bash
-npm install -g minecraft-mcp-rs
-```
-
-or run it directly without installing (each platform's binary is downloaded on
-demand):
-
-或无需安装直接运行（各平台的二进制按需下载）：
+无需 Rust 工具链——预编译二进制已发布到 npm，支持 Windows x64/arm64、macOS arm64 和 Linux x64/arm64。直接运行（各平台的二进制按需下载并缓存）：
 
 ```bash
 npx -y minecraft-mcp-rs@1.3.1 --headless --stdio
 bunx minecraft-mcp-rs@1.3.1 --headless --stdio
+```
+
+or install globally:
+
+或全局安装：
+
+```bash
+npm install -g minecraft-mcp-rs
 ```
 
 Ready-to-paste Claude Desktop / Cursor config (stdio implies the bot runs

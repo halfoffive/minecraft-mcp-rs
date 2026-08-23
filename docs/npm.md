@@ -1,23 +1,26 @@
 # Install via npm
 
-The npm distribution lets you run the MCP server with **zero Rust toolchain** —
-prebuilt binaries ship in platform packages selected automatically at install
-time.
+The npm distribution lets you run the MCP server with **zero Rust
+toolchain** — prebuilt binaries ship in platform packages selected
+automatically at install time.
 
-## Install
+## Quick run (recommended)
 
-Install globally:
-
-```bash
-npm install -g minecraft-mcp-rs
-```
-
-or run it on demand (downloads the matching platform binary the first time):
+Run on demand — `npx` downloads the matching platform binary the first time
+and caches it for later runs:
 
 ```bash
 npx -y minecraft-mcp-rs@1.3.1 --headless --stdio
+```
+
+Using [Bun](https://bun.sh)? `bunx` does the same without the `-y` prompt:
+
+```bash
 bunx minecraft-mcp-rs@1.3.1 --headless --stdio
 ```
+
+`--headless` runs without the desktop window and exits the process when the
+MCP transport closes; `--stdio` forces the stdio transport.
 
 ## Claude Desktop / Cursor config
 
@@ -34,8 +37,7 @@ Add this to your MCP client config:
 }
 ```
 
-Using Bun instead? Swap the command to `bunx` and drop the `-y` flag (bunx
-installs and runs packages without prompting):
+Bun users: swap `"command"` to `bunx` and drop `-y`:
 
 ```json
 {
@@ -48,8 +50,32 @@ installs and runs packages without prompting):
 }
 ```
 
-`--headless` runs without the desktop window and exits the process when the
-MCP transport closes; `--stdio` forces the stdio transport.
+## Global install
+
+If you prefer a permanent install:
+
+```bash
+npm install -g minecraft-mcp-rs
+minecraft-mcp-rs --headless --stdio
+```
+
+## Configuration
+
+There is **no config file** — settings come exclusively from
+`MINECRAFT_MCP_*` environment variables (12-factor style). The ones you are
+most likely to need:
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MINECRAFT_MCP_MC_ADDRESS` | Minecraft server address | `127.0.0.1` |
+| `MINECRAFT_MCP_MC_PORT` | Minecraft server port | `25565` |
+| `MINECRAFT_MCP_AI_USERNAME` | Bot in-game username | `AI_Bot` |
+| `MINECRAFT_MCP_TOKEN` | Pin the HTTP bearer token | random UUID per start |
+| `MINECRAFT_MCP_AUTH_ENABLED` | Require bearer auth over HTTP | `false` |
+
+The full table lives on the [Configuration](./config) page. Runtime
+changes (`update_settings`, the UI panel) apply to the running process
+only; restart with the environment variables to persist them.
 
 ## Version compatibility
 
@@ -82,17 +108,10 @@ ships in one of five platform packages listed in `optionalDependencies`:
 
 - **"platform package is missing"** — you installed with `--omit=optional`,
   which skips the platform packages. Reinstall with
-  `npm install --force`, or install the matching platform package explicitly
-  (e.g. `npm install minecraft-mcp-rs-linux-x64`).
+  `npm install --force`, or install the matching platform package explicitly.
 - **Unsupported platform** — the launcher lists the supported
   platform/arch combinations and exits 1.
-- **Offline installs** — platform packages are regular npm tarballs; after the
-  first successful install they can be reused from the npm cache without a
-  network connection.
-
-## Config file
-
-The binary reads/writes `config.json` in the OS config dir
-(`%APPDATA%\minecraft-mcp-rs\` on Windows, `~/.config/minecraft-mcp-rs/` on
-Linux, `~/Library/Application Support/minecraft-mcp-rs/` on macOS). Point it
-elsewhere with `--config <path>`.
+- **Offline installs** — platform packages are regular npm tarballs; after
+  the first successful run they can be reused from the npm cache without a
+  network connection. On POSIX systems the launcher self-heals a lost
+  executable bit (`EACCES`) by re-applying it once before failing.

@@ -10,6 +10,7 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> = {
       { text: 'Tools', link: '/tools', activeMatch: '/tools' },
       { text: 'Config', link: '/config', activeMatch: '/config' },
       { text: 'npm', link: '/npm', activeMatch: '/npm' },
+      { text: 'Development', link: '/dev/building', activeMatch: '/dev/' },
       { text: 'GitHub', link: 'https://github.com/halfoffive/minecraft-mcp-rs' }
     ],
 
@@ -39,6 +40,15 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> = {
         {
           text: 'npm',
           items: [{ text: 'Install via npm', link: '/npm' }]
+        }
+      ],
+      '/dev/': [
+        {
+          text: 'Development',
+          items: [
+            { text: 'Building from Source', link: '/dev/building' },
+            { text: 'Architecture', link: '/guide/architecture' }
+          ]
         }
       ]
     },
