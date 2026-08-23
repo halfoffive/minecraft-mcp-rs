@@ -2,14 +2,14 @@ import type { DefaultTheme, LocaleSpecificConfig } from 'vitepress'
 
 export const en: LocaleSpecificConfig<DefaultTheme.Config> = {
   lang: 'en',
-  title: 'minecraft-mcp-rs',
+  title: 'Minecraft-MCP-RS',
   description: 'A Minecraft bot controlled via the Model Context Protocol (MCP).',
   themeConfig: {
     nav: [
+      { text: 'Home', link: '/', activeMatch: '^/$' },
       { text: 'Guide', link: '/guide/getting-started', activeMatch: '/guide/' },
       { text: 'Tools', link: '/tools', activeMatch: '/tools' },
       { text: 'Config', link: '/config', activeMatch: '/config' },
-      { text: 'npm', link: '/npm', activeMatch: '/npm' },
       { text: 'Development', link: '/dev/building', activeMatch: '/dev/' },
       { text: 'GitHub', link: 'https://github.com/halfoffive/minecraft-mcp-rs' }
     ],
@@ -54,13 +54,14 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> = {
     },
 
     editLink: {
-      pattern: 'https://github.com/halfoffive/minecraft-mcp-rs/edit/main/docs/:path',
+      pattern: 'https://github.com/halfoffive/minecraft-mcp-rs/edit/develop/docs/:path',
       text: 'Edit this page on GitHub'
     },
 
     footer: {
-      message: 'Released under the MIT License.',
-      copyright: 'Copyright © 2024-present minecraft-mcp-rs contributors'
+      message:
+        'Released under the MIT License. Not an official Minecraft product, not approved by or associated with Mojang or Microsoft.',
+      copyright: 'Copyright © 2024-present Minecraft-MCP-RS contributors'
     },
 
     docFooter: {
