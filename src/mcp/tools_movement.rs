@@ -59,18 +59,10 @@ pub async fn handle_move_to(
         return Err(BotError::InvalidParams(e));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::MoveTo(BlockPos::new(input.x, input.y, input.z));
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── walk_direction ──────────────────────────────────────────────────────────
@@ -129,11 +121,7 @@ pub async fn handle_walk_direction(
         )));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::WalkDirection(direction, input.distance);
     match sender.send_command(cmd).await {
@@ -164,18 +152,10 @@ pub async fn handle_jump(
     sender: &BotCommandSender,
     _input: JumpInput,
 ) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::Jump;
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── teleport ────────────────────────────────────────────────────────────────
@@ -205,11 +185,7 @@ pub async fn handle_teleport(
         return Err(BotError::InvalidParams(e));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // Teleport routes through the server-authoritative `/tp` command, which
     // requires operator permissions (creative mode alone is not enough on a
@@ -224,11 +200,7 @@ pub async fn handle_teleport(
     }
 
     let cmd = BotCommand::Teleport(BlockPos::new(input.x, input.y, input.z));
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── smart_move ──────────────────────────────────────────────────────────────
@@ -259,18 +231,10 @@ pub async fn handle_smart_move(
         return Err(BotError::InvalidParams(e));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     let cmd = BotCommand::SmartMove(BlockPos::new(input.x, input.y, input.z));
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── fly_to ──────────────────────────────────────────────────────────────────
@@ -300,11 +264,7 @@ pub async fn handle_fly_to(
         return Err(BotError::InvalidParams(e));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     // Fly requires Creative mode
     {
@@ -317,11 +277,7 @@ pub async fn handle_fly_to(
     }
 
     let cmd = BotCommand::FlyTo(BlockPos::new(input.x, input.y, input.z));
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

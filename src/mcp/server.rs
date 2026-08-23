@@ -225,7 +225,7 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Update configuration fields (partial update — only provided fields change). Persisted to the config file. Changing mc_address/mc_port/ai_username triggers a bot reconnect when connected. Changes to mcp_transport/mcp_address/mcp_port take effect on process restart.",
+        description = "Update configuration fields (partial update — only provided fields change). Applied in memory for the running process only; persist settings via MINECRAFT_MCP_* environment variables. Changing mc_address/mc_port/ai_username triggers a bot reconnect when connected. Changes to mcp_transport/mcp_address/mcp_port take effect on process restart.",
         annotations(destructive_hint = true)
     )]
     async fn update_settings(

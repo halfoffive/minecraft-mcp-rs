@@ -1,6 +1,6 @@
 # Tools
 
-`minecraft-mcp-rs` exposes **30+ MCP tools** organized into 8 domains, plus a
+`minecraft-mcp-rs` exposes **41 MCP tools** organized into 8 domains, plus a
 unified `act` tool. Each tool module (`mcp/tools_*.rs`) exposes a builder
 function, and tool parameters are annotated with
 `#[derive(schemars::JsonSchema)]` so clients get accurate JSON schemas.

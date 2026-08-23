@@ -62,20 +62,12 @@ pub async fn handle_open_container(
         return Err(BotError::InvalidParams(e));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     check_container_not_open(state)?;
 
     let cmd = BotCommand::OpenContainer(BlockPos::new(input.x, input.y, input.z));
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── take_from_container ─────────────────────────────────────────────────────
@@ -119,20 +111,12 @@ pub async fn handle_take_from_container(
         )));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     check_container_open(state)?;
 
     let cmd = BotCommand::TakeFromContainer(input.slot, count);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── put_into_container ──────────────────────────────────────────────────────
@@ -174,20 +158,12 @@ pub async fn handle_put_into_container(
         )));
     }
 
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     check_container_open(state)?;
 
     let cmd = BotCommand::PutIntoContainer(input.slot, count);
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── close_container ─────────────────────────────────────────────────────────
@@ -205,20 +181,12 @@ pub async fn handle_close_container(
     sender: &BotCommandSender,
     _input: CloseContainerInput,
 ) -> Result<String, BotError> {
-    if !state.is_online() {
-        return Err(BotError::Offline(
-            "Bot is not connected to a server".to_string(),
-        ));
-    }
+    crate::mcp::common::require_online(state)?;
 
     check_container_open(state)?;
 
     let cmd = BotCommand::CloseContainer;
-    match sender.send_command(cmd).await {
-        Ok(result) => serde_json::to_string(&result)
-            .map_err(|e| BotError::Internal(format!("Serialization error: {e}"))),
-        Err(e) => Err(e),
-    }
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 # 工具
 
-`minecraft-mcp-rs` 暴露了 **30+ MCP 工具**，组织为 8 个领域，外加一个统一的
+`minecraft-mcp-rs` 暴露了 **41 个 MCP 工具**，组织为 8 个领域，外加一个统一的
 `act` 工具。每个工具模块（`mcp/tools_*.rs`）暴露一个构建函数，工具参数使用
 `#[derive(schemars::JsonSchema)]` 标注，以便客户端获得准确的 JSON schema。
 
