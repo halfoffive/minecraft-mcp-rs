@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   impact (host triple == build target), but any future cross-compilation
   target would have failed. Both workflows now pass the singular `target`
   input.
+- **CI: the release-branch publish gate moved into the `mode` job.** The
+  guard refusing a suffix-less version on a `release`-branch push used to
+  live inside the `release` job, which `npm-publish` does not `need` —
+  pushing the finalized `1.4.0` to `release` tripped the guard yet still
+  published all six packages under npm `next`, burning the stable name
+  before the tag run and leaving `latest` stale. The `mode` job now checks
+  out the tree and rejects such pushes up front (~20 s instead of a full
+  matrix); `build` needs `mode` so nothing builds either, and the
+  in-`release` guard remains as defense-in-depth.
+- **CI: the already-published dist-tag fallback is auth-aware.** PR #38's
+  `npm dist-tag add` re-tag cannot be authorized by Trusted-Publishing
+  OIDC (which covers `npm publish` only), so the first already-published
+  package hard-failed the whole loop with E401. Without an `NPM_TOKEN`
+  secret the fallback now emits a `::warning::` carrying the exact local
+  remediation (`npm dist-tag add <pkg>@<ver> <latest|next>`) and keeps
+  going; with a token configured it still hard-fails on genuine errors.
+- **CI: `HOMEBREW_NO_REQUIRE_TAP_TRUST=1` set in both workflows.** GitHub's
+  macOS runner images ship third-party taps (`aws/tap`) that newer Homebrew
+  flags as untrusted; image maintenance scripts surface trust errors in job
+  logs that read like build failures (macos-aarch64, 2026-08-24 — the build
+  itself was green in every run).
 
 ### Added
 
