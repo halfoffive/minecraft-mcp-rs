@@ -5,6 +5,9 @@ hero:
   name: Minecraft-MCP-RS
   text: "A Minecraft bot, driven by your LLM."
   tagline: "41 MCP tools bridging Claude Desktop, Cursor or any MCP host to a live Minecraft 1.21.11 world. Zero Rust toolchain — one npx command."
+  image:
+    src: /logo.png
+    alt: Minecraft-MCP-RS
   actions:
     - theme: brand
       text: Quick Run with npx
