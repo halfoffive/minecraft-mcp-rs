@@ -7,18 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.4.0] - 2026-08-24
-
 ### Fixed
 
-- **CI: `setup-rust-toolchain` input renamed `targets` → `target`.** The
-  action's current v1 input list no longer accepts the plural `targets`;
-  every matrix job (build.yml) and release job (release.yml) logged
-  `Unexpected input(s) 'targets'` annotations and silently skipped the
-  explicit `rustup target add`. Native-arch runners masked the functional
-  impact (host triple == build target), but any future cross-compilation
-  target would have failed. Both workflows now pass the singular `target`
-  input.
 - **CI: the release-branch publish gate moved into the `mode` job.** The
   guard refusing a suffix-less version on a `release`-branch push used to
   live inside the `release` job, which `npm-publish` does not `need` —
@@ -40,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flags as untrusted; image maintenance scripts surface trust errors in job
   logs that read like build failures (macos-aarch64, 2026-08-24 — the build
   itself was green in every run).
+
+## [1.4.0] - 2026-08-24
+
+### Fixed
+
+- **CI: `setup-rust-toolchain` input renamed `targets` → `target`.** The
+  action's current v1 input list no longer accepts the plural `targets`;
+  every matrix job (build.yml) and release job (release.yml) logged
+  `Unexpected input(s) 'targets'` annotations and silently skipped the
+  explicit `rustup target add`. Native-arch runners masked the functional
+  impact (host triple == build target), but any future cross-compilation
+  target would have failed. Both workflows now pass the singular `target`
+  input.
 
 ### Added
 
