@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1-rc.1] - 2026-08-24
+
 ### Fixed
 
 - **CI: the release-branch publish gate moved into the `mode` job.** The
