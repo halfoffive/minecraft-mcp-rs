@@ -2,14 +2,18 @@ import type { DefaultTheme, LocaleSpecificConfig } from 'vitepress'
 
 export const zh: LocaleSpecificConfig<DefaultTheme.Config> = {
   lang: 'zh-CN',
-  title: 'minecraft-mcp-rs',
+  title: 'Minecraft-MCP-RS',
   description: '通过模型上下文协议（MCP）控制的 Minecraft 机器人。',
   themeConfig: {
+    // Rendered via VPImage's withBase(), so a root-absolute path is correct
+    // even when the site is deployed under /minecraft-mcp-rs/.
+    logo: '/logo.png',
+
     nav: [
+      { text: '首页', link: '/zh/', activeMatch: '^/zh/$' },
       { text: '指南', link: '/zh/guide/getting-started', activeMatch: '/zh/guide/' },
       { text: '工具', link: '/zh/tools', activeMatch: '/zh/tools' },
       { text: '配置', link: '/zh/config', activeMatch: '/zh/config' },
-      { text: 'npm', link: '/zh/npm', activeMatch: '/zh/npm' },
       { text: '开发', link: '/zh/dev/building', activeMatch: '/zh/dev/' },
       { text: 'GitHub', link: 'https://github.com/halfoffive/minecraft-mcp-rs' }
     ],
@@ -54,12 +58,12 @@ export const zh: LocaleSpecificConfig<DefaultTheme.Config> = {
     },
 
     editLink: {
-      pattern: 'https://github.com/halfoffive/minecraft-mcp-rs/edit/main/docs/:path',
+      pattern: 'https://github.com/halfoffive/minecraft-mcp-rs/edit/develop/docs/:path',
       text: '在 GitHub 上编辑此页'
     },
 
     footer: {
-      message: '基于 MIT 许可发布。',
+      message: '基于 MIT 许可发布。非官方 Minecraft 产品，未经 Mojang 或 Microsoft 批准或与之关联。',
       copyright: '版权所有 © 2024-至今 minecraft-mcp-rs 贡献者'
     },
 
