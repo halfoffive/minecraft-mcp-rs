@@ -5,6 +5,10 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> = {
   title: 'Minecraft-MCP-RS',
   description: 'A Minecraft bot controlled via the Model Context Protocol (MCP).',
   themeConfig: {
+    // Rendered via VPImage's withBase(), so a root-absolute path is correct
+    // even when the site is deployed under /minecraft-mcp-rs/.
+    logo: '/logo.png',
+
     nav: [
       { text: 'Home', link: '/', activeMatch: '^/$' },
       { text: 'Guide', link: '/guide/getting-started', activeMatch: '/guide/' },

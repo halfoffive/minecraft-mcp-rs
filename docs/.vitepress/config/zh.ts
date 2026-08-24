@@ -5,6 +5,10 @@ export const zh: LocaleSpecificConfig<DefaultTheme.Config> = {
   title: 'Minecraft-MCP-RS',
   description: '通过模型上下文协议（MCP）控制的 Minecraft 机器人。',
   themeConfig: {
+    // Rendered via VPImage's withBase(), so a root-absolute path is correct
+    // even when the site is deployed under /minecraft-mcp-rs/.
+    logo: '/logo.png',
+
     nav: [
       { text: '首页', link: '/zh/', activeMatch: '^/zh/$' },
       { text: '指南', link: '/zh/guide/getting-started', activeMatch: '/zh/guide/' },

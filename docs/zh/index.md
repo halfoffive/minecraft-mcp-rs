@@ -5,6 +5,9 @@ hero:
   name: Minecraft-MCP-RS
   text: "由 LLM 驱动的 Minecraft 机器人。"
   tagline: "41 个 MCP 工具，把 Claude Desktop、Cursor 或任何 MCP 宿主接入实时的 Minecraft 1.21.11 世界。零 Rust 工具链 —— 一条 npx 命令即可运行。"
+  image:
+    src: /logo.png
+    alt: Minecraft-MCP-RS
   actions:
     - theme: brand
       text: npx 快速运行
