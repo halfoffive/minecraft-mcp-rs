@@ -1,12 +1,17 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/status-alpha-orange?style=flat-square">
-  <img alt="status: alpha" src="https://img.shields.io/badge/status-alpha-orange?style=flat-square">
-</picture>
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/rust-nightly-blue?style=flat-square">
-  <img alt="rust: nightly" src="https://img.shields.io/badge/rust-nightly-blue?style=flat-square">
-</picture>
-<br>
+<p align="center">
+  <img src="assets/icon.png" alt="Minecraft-MCP-RS" width="120">
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/status-alpha-orange?style=flat-square">
+    <img alt="status: alpha" src="https://img.shields.io/badge/status-alpha-orange?style=flat-square">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/rust-nightly-blue?style=flat-square">
+    <img alt="rust: nightly" src="https://img.shields.io/badge/rust-nightly-blue?style=flat-square">
+  </picture>
+</p>
 
 # minecraft-mcp-rs
 
