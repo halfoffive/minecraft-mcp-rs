@@ -27,7 +27,20 @@ features:
     details: "每个失败都携带机器可读的 reason 与 retryable 提示；放置操作会对照世界验证 —— 绝不假报成功。"
 ---
 
-<McpQuickSetup />
+## 一键接入主流 Agent
+
+无需 Rust 工具链 —— 把下面的配置加入你的 MCP 客户端配置文件(Claude Desktop、Cursor、Cline、Codex 等任何 MCP 宿主)即可:
+
+```json
+{
+  "mcpServers": {
+    "minecraft-mcp-rs": {
+      "command": "npx",
+      "args": ["-y", "minecraft-mcp-rs@latest", "--headless", "--stdio"]
+    }
+  }
+}
+```
 
 ## 免责声明
 

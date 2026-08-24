@@ -45,6 +45,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Runner-image hardening — see the matching entry in release.yml: newer
+  # Homebrew on GitHub macOS images distrusts third-party taps (aws/tap)
+  # that image maintenance scripts touch; silence the trust errors.
+  HOMEBREW_NO_REQUIRE_TAP_TRUST: '1'
 
 jobs:
   build:
