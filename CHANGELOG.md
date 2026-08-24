@@ -31,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logs that read like build failures (macos-aarch64, 2026-08-24 — the build
   itself was green in every run).
 
+### Changed
+
+- **Docs home "quick setup" reduced to a plain JSON config block.** The
+  `McpQuickSetup.vue` component (Cursor deeplink button, Claude Code / VS Code
+  copy-command buttons, collapsible manual-config block) was removed together
+  with its `theme/index.ts` registration. Both home pages now render a static
+  `## 一键接入主流 Agent` / `## One-click setup for mainstream AI agents`
+  heading followed by a single json code fence holding the same
+  `minecraft-mcp-rs@latest --headless --stdio` server config; VitePress's
+  built-in code-block copy button covers copying.
+
 ## [1.4.0] - 2026-08-24
 
 ### Fixed

@@ -27,7 +27,20 @@ features:
     details: "Every failure carries a machine-readable reason and retryable hint; placements are verified against the world — never fake successes."
 ---
 
-<McpQuickSetup />
+## One-click setup for mainstream AI agents
+
+No Rust toolchain required — add the server below to your MCP client's configuration file (Claude Desktop, Cursor, Cline, Codex, or any other MCP host):
+
+```json
+{
+  "mcpServers": {
+    "minecraft-mcp-rs": {
+      "command": "npx",
+      "args": ["-y", "minecraft-mcp-rs@latest", "--headless", "--stdio"]
+    }
+  }
+}
+```
 
 ## Disclaimer
 
