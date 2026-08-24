@@ -9,9 +9,9 @@ No toolchain needed — `npx` (or `bunx`) downloads the prebuilt binary for
 your platform on first use:
 
 ```bash
-npx -y minecraft-mcp-rs@1.4.0 --headless --stdio
+npx -y minecraft-mcp-rs@1.4.1 --headless --stdio
 # or
-bunx minecraft-mcp-rs@1.4.0 --headless --stdio
+bunx minecraft-mcp-rs@1.4.1 --headless --stdio
 ```
 
 Point your MCP client at it (Claude Desktop / Cursor):
@@ -21,7 +21,7 @@ Point your MCP client at it (Claude Desktop / Cursor):
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs@1.4.0", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@1.4.1", "--headless", "--stdio"]
     }
   }
 }
@@ -47,7 +47,7 @@ environment variables — e.g. point the bot at your server before starting:
 ```bash
 MINECRAFT_MCP_MC_ADDRESS=mc.example.com \
 MINECRAFT_MCP_AI_USERNAME=AI_Bot \
-npx -y minecraft-mcp-rs@1.4.0 --headless --stdio
+npx -y minecraft-mcp-rs@1.4.1 --headless --stdio
 ```
 
 Every variable is listed on the [Configuration](../config) page. Settings

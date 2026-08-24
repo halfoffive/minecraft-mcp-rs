@@ -1,6 +1,6 @@
 [package]
 name = "minecraft-mcp-rs"
-version = "1.4.1-rc.1"
+version = "1.4.1"
 edition = "2024"
 description = "MCP server that controls a Minecraft bot (azalea-backed) — move, mine, build, fight and chat via LLM tools"
 license = "MIT"

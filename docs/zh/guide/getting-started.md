@@ -9,9 +9,9 @@
 二进制：
 
 ```bash
-npx -y minecraft-mcp-rs@1.4.0 --headless --stdio
+npx -y minecraft-mcp-rs@1.4.1 --headless --stdio
 # 或者
-bunx minecraft-mcp-rs@1.4.0 --headless --stdio
+bunx minecraft-mcp-rs@1.4.1 --headless --stdio
 ```
 
 在 MCP 客户端中接入（Claude Desktop / Cursor）：
@@ -21,7 +21,7 @@ bunx minecraft-mcp-rs@1.4.0 --headless --stdio
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs@1.4.0", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@1.4.1", "--headless", "--stdio"]
     }
   }
 }
@@ -46,7 +46,7 @@ Bun 用户：把 `"command": "npx"` 换成 `"command": "bunx"`，并去掉 `-y`�
 ```bash
 MINECRAFT_MCP_MC_ADDRESS=mc.example.com \
 MINECRAFT_MCP_AI_USERNAME=AI_Bot \
-npx -y minecraft-mcp-rs@1.4.0 --headless --stdio
+npx -y minecraft-mcp-rs@1.4.1 --headless --stdio
 ```
 
 全部变量见[配置](../config)页。运行期修改的设置（`update_settings`
