@@ -7,8 +7,10 @@
 #   - push to the `release` branch → PRE-RELEASE: GitHub Release marked
 #     prerelease (never "Latest") + npm dist-tag `next`. The tag name is
 #     derived from Cargo.toml (`v` + version, which must carry a pre-release
-#     suffix like `1.3.0-rc.1` — a guard step refuses suffix-less versions
-#     on branch pushes so the stable name is never blocked). Re-pushing an
+#     suffix like `1.3.0-rc.1`). The `mode` job REFUSES suffix-less versions
+#     on branch pushes BEFORE anything builds or publishes — every other
+#     job depends on `mode`, so the stable version name can never be burned
+#     by a stray branch push. Re-pushing an
 #     unchanged version is idempotent (an existing release and
 #     already-published npm versions are skipped).
 #   - push a `v*` tag (normally on `master`) → STABLE: GitHub "Latest
@@ -43,6 +45,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Runner-image hardening: GitHub's macOS images ship third-party taps
+  # (e.g. aws/tap) that newer Homebrew refuses to use without explicit
+  # trust. No workflow step invokes brew, but image maintenance scripts
+  # do; without this escape hatch they emit trust errors that look like
+  # build failures in the log (observed on macos-aarch64, 2026-08-24).
+  HOMEBREW_NO_REQUIRE_TAP_TRUST: '1'
 
 jobs:
   # Determines the release channel (pre-release vs stable) once, so the
@@ -57,6 +65,9 @@ jobs:
       prerelease: ${{ steps.mode.outputs.prerelease }}
       npm_tag: ${{ steps.mode.outputs.npm_tag }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
       - name: Decide
         id: mode
         shell: bash
@@ -74,8 +85,33 @@ jobs:
             echo "npm_tag=latest" >> "$GITHUB_OUTPUT"
           fi
 
+      # THE publishing gate. A plain push to the `release` branch whose
+      # Cargo.toml version lacks a pre-release suffix must fail HERE:
+      # `build` needs `mode`, and `release` / `npm-publish` need
+      # `[build, mode]`, so nothing builds or publishes when this fires.
+      # The guard used to live inside the `release` job, which
+      # `npm-publish` does not `need` — a suffix-less push slipped past it,
+      # published the stable version name under npm `next` and then broke
+      # the later stable tag run (observed live on 1.4.0, 2026-08-24).
+      # workflow_dispatch keeps its documented manual-prerelease escape
+      # hatch: only push events to the branch are gated.
+      - name: Guard release branch carries a pre-release suffix
+        if: github.event_name == 'push' && github.ref_type == 'branch'
+        shell: bash
+        run: |
+          ver=$(grep '^version' Cargo.toml | head -1 | sed -E 's/version = "([^"]+)"/\1/')
+          case "$ver" in
+            *-*) ;;
+            *)
+              echo "::error::push to the release branch requires a pre-release suffix in Cargo.toml (got ${ver}); stable versions may only publish via a vX.Y.Z tag on master"
+              exit 1 ;;
+          esac
+
   build:
     name: ${{ matrix.label }}
+    # Gated on `mode` so an invalid push (e.g. a suffix-less version on the
+    # release branch) fails in seconds instead of burning the whole matrix.
+    needs: [mode]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -185,6 +221,8 @@ jobs:
       # pre-release suffix. Publishing a suffix-less version (e.g. `v1.3.2`)
       # as a prerelease would create a GitHub Release and npm version under
       # that stable name, permanently blocking the later stable release.
+      # Defense-in-depth only — the `mode` job enforces the same contract
+      # before anything builds (see the gate there for the failure story).
       - name: Guard release branch carries a pre-release suffix
         if: github.ref_type == 'branch'
         shell: bash
@@ -392,7 +430,21 @@ jobs:
               # push raced the stable tag and landed `next` first). Without
               # this re-tag, an already-published version would never move
               # to `latest` (or back) and the channel would stay stale.
-              npm dist-tag add "$name@$ver" "${{ needs.mode.outputs.npm_tag }}"
+              #
+              # BUT `npm dist-tag add` requires real credentials — the OIDC
+              # token from Trusted Publishing authorizes `npm publish` only,
+              # so without an NPM_TOKEN secret this call always fails with
+              # E401 and killed the rest of the loop (observed live on the
+              # 1.4.0 stable run, 2026-08-24). With the mode-level publish
+              # gate the cross-channel race can no longer happen, so this
+              # fallback is a manual-recovery path: warn with the exact
+              # local remediation instead of failing the job when no token
+              # exists; still hard-fail on a genuine error when it does.
+              if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+                npm dist-tag add "$name@$ver" "${{ needs.mode.outputs.npm_tag }}"
+              else
+                echo "::warning::NPM_TOKEN secret not set — OIDC cannot authorize 'npm dist-tag add'. If ${name}@${ver} is on the wrong dist-tag, run locally: npm dist-tag add ${name}@${ver} <latest|next>"
+              fi
             else
               (cd "$dir" && npm publish --provenance --access public --tag "${{ needs.mode.outputs.npm_tag }}")
             fi
