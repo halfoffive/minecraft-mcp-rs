@@ -215,8 +215,8 @@ binary is downloaded on demand and cached):
 无需 Rust 工具链——预编译二进制已发布到 npm，支持 Windows x64/arm64、macOS arm64 和 Linux x64/arm64。直接运行（各平台的二进制按需下载并缓存）：
 
 ```bash
-npx -y minecraft-mcp-rs@1.4.0 --headless --stdio
-bunx minecraft-mcp-rs@1.4.0 --headless --stdio
+npx -y minecraft-mcp-rs@1.4.1 --headless --stdio
+bunx minecraft-mcp-rs@1.4.1 --headless --stdio
 ```
 
 or install globally:
@@ -237,7 +237,7 @@ headless and exits when the MCP client disconnects):
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs@1.4.0", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@1.4.1", "--headless", "--stdio"]
     }
   }
 }

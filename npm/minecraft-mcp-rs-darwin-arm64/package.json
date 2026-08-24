@@ -1,6 +1,6 @@
 {
   "name": "@minecraft-mcp-rs/minecraft-mcp-rs-darwin-arm64",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "macOS arm64 binary for minecraft-mcp-rs",
   "license": "MIT",
   "repository": {
