@@ -18,6 +18,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target would have failed. Both workflows now pass the singular `target`
   input.
 
+### Added
+
+- **Application icon (window + Windows executable).** The Minecraft-themed
+  block/gear artwork now ships as `assets/icon.png` (512×512 RGBA) and
+  `assets/icon.ico`. The egui window icon is set at startup via the new
+  `ui::icon::load_app_icon()` (`include_bytes!` + `eframe::icon_data::
+  from_png_bytes`, warning + platform-default fallback on decode failure).
+  A new `build.rs` embeds the `.ico` plus version info into the PE resource
+  section via `winresource` (build-dependency), gated on
+  `CARGO_CFG_TARGET_OS == "windows"` so non-Windows builds are unaffected;
+  `[package]` gained the `description` / `license = "MIT"` metadata the
+  version-info sheet displays. `build.yml` path filters now include
+  `assets/**` and `build.rs`.
+- **Documentation-site branding:** `docs/public/logo.png` serves as the
+  favicon (wired through the new `head` entry in `config/index.ts`), the
+  navbar logo (`themeConfig.logo` in both `en.ts` and `zh.ts`), and the home
+  hero image (EN + ZH). Note: VitePress does **not** auto-prefix `head`
+  URLs with `base`, so the favicon href concatenates the configured base
+  explicitly; `themeConfig.logo` and hero images go through `withBase()`
+  and stay root-absolute.
+
+### Changed
+
+- **README header:** centered project logo (120 px, from
+  `assets/icon.png`) above the status/nightly badges.
+
 ## [1.3.2] - 2026-08-23
 
 ### Fixed
