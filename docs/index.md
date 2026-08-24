@@ -2,16 +2,16 @@
 layout: home
 
 hero:
-  name: minecraft-mcp-rs
+  name: Minecraft-MCP-RS
   text: "A Minecraft bot, driven by your LLM."
   tagline: "41 MCP tools bridging Claude Desktop, Cursor or any MCP host to a live Minecraft 1.21.11 world. Zero Rust toolchain — one npx command."
+  image:
+    src: /logo.png
+    alt: Minecraft-MCP-RS
   actions:
     - theme: brand
       text: Quick Run with npx
       link: /guide/getting-started
-    - theme: alt
-      text: Install via npm
-      link: /npm
     - theme: alt
       text: GitHub
       link: https://github.com/halfoffive/minecraft-mcp-rs
@@ -26,3 +26,9 @@ features:
   - title: "Honest Errors"
     details: "Every failure carries a machine-readable reason and retryable hint; placements are verified against the world — never fake successes."
 ---
+
+<McpQuickSetup />
+
+## Disclaimer
+
+Minecraft-MCP-RS is an **unofficial** third-party tool and is **not affiliated with, endorsed by, or sponsored by Mojang Studios or Microsoft**. "Minecraft" is a trademark of Mojang Synergies AB; this project merely enables programmatic access to a Minecraft server you own and operate. Use of the bot must comply with the rules of any server you connect it to, including anti-cheat and automation policies — unauthorized automation on servers you do not control (e.g. public servers prohibiting bots) may violate those servers' terms and result in sanctions against your account. This software is provided under the MIT License, without warranty of any kind.

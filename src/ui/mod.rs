@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod fonts;
+pub mod icon;
 pub mod mcp_config;
 pub mod preview;
 pub mod settings;
