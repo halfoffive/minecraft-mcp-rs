@@ -241,8 +241,14 @@ fn main() {
     // Run the egui UI on the main thread.  This call blocks until the
     // window is closed, at which point the process exits.
     // ══════════════════════════════════════════════════════════════════
+    // Window icon: decode the embedded PNG once; on failure fall back to
+    // the platform default instead of failing startup (see ui::icon).
+    let mut viewport = egui::ViewportBuilder::default().with_inner_size([780.0, 560.0]);
+    if let Some(icon) = minecraft_mcp_rs::ui::icon::load_app_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([780.0, 560.0]),
+        viewport,
         ..Default::default()
     };
 
