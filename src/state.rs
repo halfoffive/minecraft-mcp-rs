@@ -994,6 +994,12 @@ impl SharedState {
         self.clear_bot_ecs();
         self.set_executor_busy(false);
         self.set_commands_probe(None);
+        // Regression (2026-08-25 review): a container left open at
+        // disconnect must not survive into the next session — the stale
+        // handle made OpenContainer fail with ContainerAlreadyOpen and let
+        // TakeFromContainer/PutIntoContainer shift-click a dead session's
+        // menu while reporting success.
+        self.set_container_handle(None);
     }
 
     /// Return a clone of the bot's ECS handle, if any.
@@ -1935,6 +1941,12 @@ mod tests {
         assert!(!state.executor_busy());
         assert_eq!(state.get_commands_probe(), None);
         assert!(state.bot_ecs().is_none());
+        // Regression (2026-08-25 review): the open-container handle must be
+        // torn down too, or it survives into the next session (stale
+        // shift-clicks reporting success). A populated handle cannot be
+        // fabricated here (`ContainerHandle` is an azalea type with private
+        // fields), so this pins the post-teardown invariant.
+        assert!(state.get_container_handle().is_none());
 
         // Idempotent: a second call must not panic or flip anything back.
         state.clear_session_state();
