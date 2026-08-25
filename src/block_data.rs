@@ -496,7 +496,9 @@ pub static TOOL_NAMES: LazyLock<HashMap<(ToolType, MaterialTier), Vec<&'static s
 
 /// Hardness values for common Minecraft blocks.
 ///
-/// Values are in seconds of mining time with fist (no tool).
+/// These are vanilla *hardness* (`strength`) values, NOT fist-mining
+/// seconds — [`calculate_mine_time`](crate::mining_calc::calculate_mine_time)
+/// converts them into break times (e.g. stone at 1.5 takes 7.5 s by hand).
 /// A value of `-1.0` indicates an unbreakable block (bedrock).
 pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(|| {
     let mut m = HashMap::new();
