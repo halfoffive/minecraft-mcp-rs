@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Mining verification no longer races the idle snapshot relaxation.**
+  `execute_mine_block` computed its Step-10 verification budget from the
+  *configured* snapshot interval, but the updater relaxes to ≥5 s once no
+  command has been dispatched for 3 s — and a slow-but-legal mine (hand-
+  mining oak_log is exactly 3.0 s) sleeps through that whole window without
+  dispatching anything. Successful breaks were reported as
+  `MiningInterrupted("block still present after mining time")`. The state
+  machine now re-stamps command activity after the mine sleep (decision via
+  the new `SharedState::snapshot_cadence_idle` / shared
+  `SharedState::within_activity_window` helpers), putting the updater back
+  on the fast cadence before verification polls.
+- **The open-container handle is torn down on disconnect.**
+  `clear_session_state` missed `container_handle`, so a chest left open at
+  disconnect survived into the next session: `open_container` failed with
+  `ContainerAlreadyOpen` and `take/put_from_container` shift-clicked the
+  dead session's menu while reporting success.
+- **`give_item` reports an honest message when the swap-click fallback
+  fails.** The `/item replace`-rejected fallback used to answer
+  "moved into hotbar slot N via swap-click" even when `success:false`, and
+  discarded the executor's failure reason; it now says
+  "swap-click hotbar move failed: <reason>".
+- **The Settings and MCP Config panels track agent-driven config changes.**
+  The UI edit buffer was initialised once and never refreshed, so
+  `update_settings` tool calls were invisible to both panels (the MCP Config
+  panel could hand out a stale token). Untouched fields now re-sync from the
+  live config every frame (`EditConfig::sync_untouched_from`); locally dirty
+  fields keep their in-progress values until the user clicks Connect.
+- **The Creative-mode hint is part of the registered tool descriptions.**
+  The hint text existed only in dead `tools_block.rs` constants asserted by
+  a self-referential test; clients never saw it. `break_block` /
+  `place_block` descriptions now carry it, asserted against the live tool
+  registry in `server.rs::tests`.
+- **`get_nearby_blocks(top_only)` drops air entries itself** instead of
+  relying solely on the updater's air-entry invariant, using the same
+  predicate as the renderer (`air`/`cave_air`/`void_air`).
+
 ## [1.4.1] - 2026-08-24
 
 ### Fixed
