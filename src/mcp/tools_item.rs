@@ -440,10 +440,18 @@ pub async fn handle_give_item(
                 let swap = BotCommand::MoveItemToHotbar(hotbar_slot, bare_id, count);
                 match sender.send_command(swap).await {
                     Ok(swap_result) => {
+                        // Honest-failure discipline (M-7): the message must
+                        // not claim a hotbar move that `swap_result.success`
+                        // denies — surface the executor's own reason instead.
+                        let move_detail = if swap_result.success {
+                            format!("moved into hotbar slot {hotbar_slot} via swap-click")
+                        } else {
+                            format!("swap-click hotbar move failed: {}", swap_result.message)
+                        };
                         return serde_json::to_string(&crate::types::BotResult {
                             success: swap_result.success,
                             message: format!(
-                                "Gave {count}x {namespaced} to {username}; /item replace rejected, moved into hotbar slot {hotbar_slot} via swap-click"
+                                "Gave {count}x {namespaced} to {username}; /item replace rejected, {move_detail}"
                             ),
                             data: Some(serde_json::json!({
                                 "item_id": input.item_id,
@@ -1211,6 +1219,71 @@ mod tests {
         let result = handle_give_item(&state, &sender, input).await.unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["data"]["method"], "swap_click");
+        responder.await.expect("responder finished");
+    }
+
+    /// RED (2026-08-25 review): when the swap-click fallback itself fails,
+    /// the message must not claim the item was "moved into hotbar slot N" —
+    /// the old wording fabricated a success the `success:false` flag denied
+    /// and discarded the executor's failure reason. The failure message and
+    /// the honest success flag must both reach the client.
+    #[tokio::test]
+    async fn test_give_item_failed_swap_click_reports_failure_honestly() {
+        let state = make_give_state();
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            consume_probe(&mut receiver).await;
+            let first = receiver.recv().await.expect("give");
+            first
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .unwrap();
+            let second = receiver.recv().await.expect("replace");
+            second
+                .respond_to
+                .send(Err(BotError::CommandRejected {
+                    command: "/item replace ...".into(),
+                    feedback: "Unknown command".into(),
+                }))
+                .unwrap();
+            let third = receiver.recv().await.expect("swap fallback");
+            third
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: false,
+                    message: "item not found in inventory".into(),
+                    data: None,
+                }))
+                .unwrap();
+        });
+
+        let input = GiveItemInput {
+            item_id: "water_bucket".into(),
+            count: None,
+            target: Some("hotbar".into()),
+            hotbar_slot: Some(3),
+        };
+        let result = handle_give_item(&state, &sender, input).await.unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["success"], false);
+        let message = parsed["message"].as_str().unwrap();
+        assert!(
+            message.contains("swap-click hotbar move failed"),
+            "message must name the failed move, got: {message}"
+        );
+        assert!(
+            message.contains("item not found in inventory"),
+            "message must carry the executor's reason, got: {message}"
+        );
+        assert!(
+            !message.contains("moved into hotbar slot"),
+            "message must NOT claim a move that did not happen, got: {message}"
+        );
         responder.await.expect("responder finished");
     }
 

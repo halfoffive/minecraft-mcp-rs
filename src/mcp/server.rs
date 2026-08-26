@@ -304,7 +304,7 @@ impl McpBotServer {
     // ── Block tools (destructive) ────────────────────────────
 
     #[tool(
-        description = "Break a block at the given position. By default runs the full compound mine flow: approaches the block, picks the best tool (errors with a clear reason when the right tool is missing, e.g. a shovel for grass), mines, and verifies the break. Returns the action result plus the bot's final position. Set use_best_tool=false for the raw single-packet break.",
+        description = "Break a block at the given position. By default runs the full compound mine flow: approaches the block, picks the best tool (errors with a clear reason when the right tool is missing, e.g. a shovel for grass), mines, and verifies the break. Returns the action result plus the bot's final position. Set use_best_tool=false for the raw single-packet break. In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.",
         annotations(destructive_hint = true)
     )]
     async fn break_block(
@@ -315,7 +315,7 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Place a block at the given position; the placed block occupies exactly (x, y, z). Placement is verified against the world after the click — success is reported only when the block was observed at the target. y must be in -63..=320; y=-64 is rejected because the clicked block would be at y=-65, outside the world.",
+        description = "Place a block at the given position; the placed block occupies exactly (x, y, z). Placement is verified against the world after the click — success is reported only when the block was observed at the target. y must be in -63..=320; y=-64 is rejected because the clicked block would be at y=-65, outside the world. In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.",
         annotations(destructive_hint = true)
     )]
     async fn place_block(
@@ -1064,6 +1064,31 @@ mod tests {
             Some(true),
             "destructive annotation must be preserved"
         );
+    }
+
+    /// 2026-08-25 review: the Creative-mode hint must be part of the
+    /// REGISTERED tool descriptions clients actually see. The hint used to
+    /// live in `tools_block.rs` constants that no registered description
+    /// referenced — a test asserted the constants contained it while the
+    /// wire contract never carried it.
+    #[test]
+    fn test_creative_hint_present_in_registered_block_tool_descriptions() {
+        const CREATIVE_MODE_HINT: &str = "In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
+        let tools = McpBotServer::tool_router().list_all();
+        for name in ["break_block", "place_block"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("missing tool: {name}"));
+            let description = tool
+                .description
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} must carry a description"));
+            assert!(
+                description.contains(CREATIVE_MODE_HINT),
+                "{name} registered description must contain the Creative-mode hint, got: {description}"
+            );
+        }
     }
 
     /// F-3(b): drive `tools/call` through the real JSON-RPC transport —

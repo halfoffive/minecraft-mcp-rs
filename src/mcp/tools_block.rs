@@ -14,22 +14,13 @@ use crate::error::BotError;
 use crate::state::SharedState;
 use crate::types::{ActAction, BlockPos, BotCommand};
 
-// ── Tool descriptions (with Creative-mode hint) ───────────────────────────
-
-/// Hint appended to block-tool descriptions recommending Creative-mode
-/// alternatives for bulk building.
-pub const CREATIVE_MODE_HINT: &str =
-    "In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
-
-/// Full description for the `break_block` MCP tool.
-pub const BREAK_BLOCK_DESCRIPTION: &str = "Break a block at the given position. By default (use_best_tool=true) runs the full compound mine flow (tool selection, movement, mining, verification) equivalent to act(Mine). In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
-
-/// Full description for the `place_block` MCP tool.
-///
-/// The placed block occupies exactly `(x, y, z)`. `y` must be in
-/// `-63..=320` — `y=-64` is rejected because the block is placed by
-/// right-clicking the cell below (`y-1`), which would be outside the world.
-pub const PLACE_BLOCK_DESCRIPTION: &str = "Place a block at the given position; the placed block occupies exactly (x, y, z), and y must be in -63..=320 (y=-64 is rejected — the clicked block would be at y=-65, outside the world). In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
+// ── Tool descriptions ─────────────────────────────────────────────────────
+//
+// The break_block / place_block descriptions registered in `server.rs`
+// carry the Creative-mode hint ("prefer execute_command with /fill …");
+// `server.rs::tests` asserts it against the live tool registry. (The hint
+// used to live in constants here that no registered description referenced
+// — dead-code drift caught by the 2026-08-25 review.)
 
 // ── break_block ────────────────────────────────────────────────────────────
 
@@ -854,18 +845,10 @@ mod tests {
     }
 
     // ── Creative-mode hint in descriptions ─────────────────────────
-
-    #[test]
-    fn test_creative_hint_in_descriptions() {
-        assert!(
-            BREAK_BLOCK_DESCRIPTION.contains(CREATIVE_MODE_HINT),
-            "break_block description must contain the Creative-mode hint"
-        );
-        assert!(
-            PLACE_BLOCK_DESCRIPTION.contains(CREATIVE_MODE_HINT),
-            "place_block description must contain the Creative-mode hint"
-        );
-    }
+    //
+    // The hint assertion moved to `server.rs::tests` (against the live
+    // tool registry) when the dead description constants were removed
+    // (2026-08-25 review).
 
     // ── use_item_on_block: face handling ─────────────────────────
 
