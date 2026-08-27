@@ -44,6 +44,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`get_nearby_blocks(top_only)` drops air entries itself** instead of
   relying solely on the updater's air-entry invariant, using the same
   predicate as the renderer (`air`/`cave_air`/`void_air`).
+- **OS Ctrl+C handlers are registered in headless mode only** (2026-08-26
+  review round). Both `serve_stdio` and the HTTP path's `shutdown_signal`
+  raced a Ctrl+C signal unconditionally; registering the handler replaces
+  the OS default process-wide, so in UI mode a terminal Ctrl+C silently
+  stopped just the MCP transport while the egui window lived on as a
+  zombie. The ctrl_c arms are now gated behind `headless` like the stdio
+  idle watchdog (`serve_http`/`shutdown_signal` take the run mode through);
+  in UI mode Ctrl+C falls back to OS default — terminating the process.
+- **Forced snapshot refresh resolves only after a successful build.**
+  The build task used to signal the force-request oneshot regardless of
+  build success, releasing `force=true` callers early with a pre-refresh
+  snapshot. On failure the sender is now returned to the single slot
+  (only while empty — newer requests win) so the updater's 250 ms
+  failure-retry rebuild completes it; the caller's own 3 s timeout stays
+  the backstop.
+- **Non-finite yaw readings no longer reach annotations.** A NaN/±∞ look
+  angle would propagate through `normalize_yaw` verbatim into
+  `SelfPlayer::yaw`; the single write point now uses
+  `normalize_yaw_checked`, folding non-finite input to `None`
+  ("yaw unknown" — the renderer skips the heading arrow).
+- **TLS warnings agree with validation on loopback.** The Settings and
+  MCP Config panels hard-coded `"127.0.0.1" | "::1" | "localhost"` as the
+  safe list while `validate()` accepts the whole loopback range, so a bind
+  to e.g. `127.0.0.2` validated fine but was shown in red. Both panels now
+  call config.rs's `is_loopback_bind_address`.
+
+### Changed
+
+- **Position-bound rejection wording unified.** `validate_position` now
+  delegates to `validate_coordinates` (single source of truth for the world
+  border / build-height bounds), so dispatch-gate rejects read
+  "x coordinate ... out of range (...)" instead of "X coordinate ... out of
+  bounds (...)". The CollectItems radius check is likewise shared by the
+  `BotCommand::CollectItems` arm and `validate_act_action` (message
+  unchanged). Wire-visible only in error message casing.
+- **`equip_tool` routes through `send_and_serialize`**, matching the
+  "single sanctioned form" contract every other uncompensated tool follows.
+- **Documentation corrections:** the HARVEST_LEVEL header documents the
+  `u8::MAX` bedrock sentinel (no tool satisfies it; alternatives
+  intentionally empty), and the npx/bunx launcher JSON comments describe
+  their LazyLock once-per-process build instead of calling them
+  compile-time constants.
+
+### Tests
+
+- **Exhaustive envelope-class guard for `timeout_for`.** The envelope
+  classifier uses `matches!` rather than a match, so a new `BotCommand` /
+  `ActAction` variant would silently take the plain command envelope. A
+  test-side exhaustive match over all 28 variants (nested over all six
+  `ActAction`s) now makes that a compile error and asserts the actual
+  timeout class per variant.
 
 ## [1.4.1] - 2026-08-24
 
