@@ -165,11 +165,14 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig, cache: &mut McpConfigCac
 
     // ── Security warning for non-loopback HTTP binds ───────────
     // HTTP transport sends the Bearer token in cleartext (no TLS).
-    // Only `127.0.0.1`, `::1`, and `localhost` are safe to bind
-    // without TLS — anything else (including `0.0.0.0`, which binds
-    // all interfaces) exposes the token to anyone on the network.
+    // Only loopback addresses are safe to bind without TLS — anything
+    // else (including `0.0.0.0`, which binds all interfaces) exposes
+    // the token to anyone on the network. The predicate is config.rs's
+    // loopback check — the same rule validate() applies, so any
+    // loopback spelling (e.g. 127.0.0.2) agrees on both sides
+    // (2026-08-26 review).
     if edit.mcp_transport == McpTransport::Http {
-        let is_safe = matches!(edit.mcp_address.as_str(), "127.0.0.1" | "::1" | "localhost");
+        let is_safe = crate::config::is_loopback_bind_address(&edit.mcp_address);
         if !is_safe {
             ui.label(
                 egui::RichText::new(i18n::tr(TextKey::TlsWarning))
