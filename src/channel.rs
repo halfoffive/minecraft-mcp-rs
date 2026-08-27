@@ -325,7 +325,7 @@ impl Drop for ReceiverLease {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
-    use crate::types::BlockPos;
+    use crate::types::{BlockPos, Direction, GameMode, MaterialTier, ToolType};
 
     // ── Helpers ─────────────────────────────────────────────
 
@@ -603,6 +603,145 @@ mod tests {
             sender.timeout_for(&BotCommand::BreakBlock(BlockPos::new(1, 2, 3))),
             Duration::from_secs(10)
         );
+    }
+
+    /// Exhaustive-envelope guard (2026-08-26 review): `timeout_for` classifies
+    /// with `matches!` rather than a `match`, so a newly added `BotCommand`
+    /// (or `ActAction`) variant would silently take the plain command
+    /// envelope. This test-side exhaustive match forces a compile error when
+    /// a variant is added without an explicit classification here, and then
+    /// asserts the actual `timeout_for` output against it for every variant.
+    ///
+    /// Long envelope: FlyTo, Act(Fly), plus the compound ops Mine and
+    /// CollectItems (F-1). Everything else — including the single-leg
+    /// Act(Move/SmartMove/Attack) variants — keeps the base envelope.
+    #[test]
+    fn test_timeout_envelope_class_is_exhaustive_per_variant() {
+        fn expected_long_envelope(cmd: &BotCommand) -> bool {
+            match cmd {
+                BotCommand::FlyTo(_) => true,
+                BotCommand::Act(action, _) => match action {
+                    ActAction::Move { .. }
+                    | ActAction::SmartMove { .. }
+                    | ActAction::Attack { .. } => false,
+                    ActAction::Fly { .. }
+                    | ActAction::Mine { .. }
+                    | ActAction::CollectItems { .. } => true,
+                },
+                BotCommand::MoveTo(_)
+                | BotCommand::WalkDirection(_, _)
+                | BotCommand::Jump
+                | BotCommand::Teleport(_)
+                | BotCommand::BreakBlock(_)
+                | BotCommand::PlaceBlock(_, _)
+                | BotCommand::UseItemOnBlock(_, _, _)
+                | BotCommand::SwitchHotbarSlot(_)
+                | BotCommand::DropItem(_, _)
+                | BotCommand::MoveItemToHotbar(_, _, _)
+                | BotCommand::UseItem
+                | BotCommand::UseItemWithSlot(_)
+                | BotCommand::EquipTool(_)
+                | BotCommand::EquipToolWithMaterial(_, _)
+                | BotCommand::OpenContainer(_)
+                | BotCommand::TakeFromContainer(_, _)
+                | BotCommand::PutIntoContainer(_, _)
+                | BotCommand::CloseContainer
+                | BotCommand::AttackEntity(_)
+                | BotCommand::ShieldBlock(_)
+                | BotCommand::SendChat(_)
+                | BotCommand::ExecuteCommand(_)
+                | BotCommand::SetGameMode(_)
+                | BotCommand::QueryInventory
+                | BotCommand::SmartMove(_)
+                | BotCommand::CollectItems(_) => false,
+            }
+        }
+
+        let commands: Vec<BotCommand> = vec![
+            BotCommand::MoveTo(BlockPos::new(0, 0, 0)),
+            BotCommand::WalkDirection(Direction::North, 1),
+            BotCommand::Jump,
+            BotCommand::Teleport(BlockPos::new(0, 0, 0)),
+            BotCommand::BreakBlock(BlockPos::new(0, 0, 0)),
+            BotCommand::PlaceBlock(BlockPos::new(0, 0, 0), "stone".into()),
+            BotCommand::UseItemOnBlock(BlockPos::new(0, 0, 0), None, None),
+            BotCommand::SwitchHotbarSlot(0),
+            BotCommand::DropItem(0, 1),
+            BotCommand::MoveItemToHotbar(0, "dirt".into(), 1),
+            BotCommand::UseItem,
+            BotCommand::UseItemWithSlot(0),
+            BotCommand::EquipTool(ToolType::Pickaxe),
+            BotCommand::EquipToolWithMaterial(ToolType::Pickaxe, MaterialTier::Diamond),
+            BotCommand::OpenContainer(BlockPos::new(0, 0, 0)),
+            BotCommand::TakeFromContainer(0, 1),
+            BotCommand::PutIntoContainer(0, 1),
+            BotCommand::CloseContainer,
+            BotCommand::AttackEntity(0),
+            BotCommand::ShieldBlock(true),
+            BotCommand::SendChat(String::new()),
+            BotCommand::ExecuteCommand(String::new()),
+            BotCommand::SetGameMode(GameMode::Survival),
+            BotCommand::QueryInventory,
+            BotCommand::SmartMove(BlockPos::new(0, 0, 0)),
+            BotCommand::FlyTo(BlockPos::new(0, 0, 0)),
+            BotCommand::CollectItems(8),
+            // One construction per ActAction sub-variant so every nested arm
+            // of `expected_long_envelope` is exercised at runtime too.
+            BotCommand::Act(
+                ActAction::Move {
+                    target: BlockPos::new(0, 0, 0),
+                },
+                None,
+            ),
+            BotCommand::Act(
+                ActAction::SmartMove {
+                    target: BlockPos::new(0, 0, 0),
+                },
+                None,
+            ),
+            BotCommand::Act(
+                ActAction::Fly {
+                    target: BlockPos::new(0, 0, 0),
+                },
+                None,
+            ),
+            BotCommand::Act(
+                ActAction::Mine {
+                    block_pos: BlockPos::new(0, 0, 0),
+                },
+                None,
+            ),
+            BotCommand::Act(ActAction::Attack { entity_id: 0 }, None),
+            BotCommand::Act(ActAction::CollectItems { radius: 8 }, None),
+        ];
+
+        let state = make_state();
+        state.update_config(|cfg| {
+            // Distinct non-default values so neither timeout can accidentally
+            // satisfy the other class.
+            cfg.command_timeout_secs = 7;
+            cfg.fly_timeout_secs = 99;
+        });
+        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
+
+        assert_eq!(
+            commands.len(),
+            33,
+            "28 BotCommand variants + 5 extra per-ActAction constructions; keep \
+             this in lock-step with types.rs's 28-variant count"
+        );
+        for cmd in &commands {
+            let want = if expected_long_envelope(cmd) {
+                Duration::from_secs(99)
+            } else {
+                Duration::from_secs(7)
+            };
+            assert_eq!(
+                sender.timeout_for(cmd),
+                want,
+                "envelope mismatch for {cmd:?}"
+            );
+        }
     }
 
     // ── Offline ─────────────────────────────────────────────
