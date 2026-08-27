@@ -899,7 +899,7 @@ async fn shutdown_signal(token: CancellationToken, headless: bool) {
 /// process exits or the axum server encounters an unrecoverable error.
 ///
 /// `headless` gates the Ctrl+C arm of the graceful-shutdown race (see
-/// [`shutdown_signal`]): UI mode must not register an OS Ctrl+C handler, or
+/// `shutdown_signal`): UI mode must not register an OS Ctrl+C handler, or
 /// terminal interrupts would stop only the MCP transport while the window
 /// lived on. `main.rs` passes the resolved run mode through.
 ///

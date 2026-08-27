@@ -32,12 +32,14 @@ static EXE_PATH: LazyLock<String> = LazyLock::new(|| {
         .unwrap_or_else(|| "minecraft-mcp-rs".to_owned())
 });
 
-/// The npx launcher JSON — a compile-time constant (pinned to
-/// `CARGO_PKG_VERSION`), never rebuilt (L-19).
+/// The npx launcher JSON — built once on first use and pinned to
+/// `CARGO_PKG_VERSION` for the process lifetime (L-19). It is a
+/// [`LazyLock`], not a compile-time constant.
 static NPX_JSON: LazyLock<String> = LazyLock::new(build_npx_config_json);
 
-/// The bunx launcher JSON — a compile-time constant (pinned to
-/// `CARGO_PKG_VERSION`), never rebuilt (L-19).
+/// The bunx launcher JSON — built once on first use and pinned to
+/// `CARGO_PKG_VERSION` for the process lifetime (L-19). See
+/// [`NPX_JSON`].
 static BUNX_JSON: LazyLock<String> = LazyLock::new(build_bunx_config_json);
 
 /// Cache for the MCP Config panel's pretty-printed JSON (L-19).
