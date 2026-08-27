@@ -938,6 +938,11 @@ pub fn minimum_material_for_harvest_level(level: u8) -> Option<MaterialTier> {
 /// Defaults to 0 for unknown blocks — any tool will do. The values here
 /// mirror the vanilla Minecraft 1.21 harvest rules for the blocks the bot
 /// knows about. Blocks not in this table are assumed to be hand-mineable.
+///
+/// `u8::MAX` is the documented "unbreakable" sentinel (bedrock): no tool
+/// can ever satisfy it, so tool selection yields no candidates and
+/// [`build_tool_alternatives`](crate::tool_select::build_tool_alternatives)
+/// intentionally returns an empty alternatives list for it.
 pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(|| {
     let mut m = HashMap::new();
 

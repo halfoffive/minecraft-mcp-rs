@@ -249,9 +249,7 @@ pub async fn handle_equip_tool(
         Some(m) => BotCommand::EquipToolWithMaterial(tool, m),
         None => BotCommand::EquipTool(tool),
     };
-    let result = sender.send_command(cmd).await?;
-    serde_json::to_string(&result)
-        .map_err(|e| BotError::Internal(format!("Serialization error: {e}")))
+    crate::mcp::common::send_and_serialize(sender, cmd).await
 }
 
 // ── collect_items ──────────────────────────────────────────────────────────

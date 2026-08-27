@@ -529,7 +529,13 @@ fn valid_bind_address(address: &str) -> bool {
 }
 
 /// Is `address` a loopback-only bind address?
-fn is_loopback_bind_address(address: &str) -> bool {
+///
+/// `pub(crate)` so the UI panels (Settings TLS warning, MCP Config JSON
+/// warning) apply the same predicate as [`AppConfig::validate`] — the two
+/// sides previously disagreed on any loopback spelling beyond the exact
+/// strings `127.0.0.1` / `::1` / `localhost` (e.g. `127.0.0.2` validated
+/// fine but was flagged red in the UI; 2026-08-26 review).
+pub(crate) fn is_loopback_bind_address(address: &str) -> bool {
     address == "localhost"
         || address
             .parse::<std::net::IpAddr>()
@@ -997,6 +1003,39 @@ mod tests {
         config.mcp_transport = McpTransport::Stdio;
         config.mcp_auth_enabled = false;
         assert!(config.validate().is_ok());
+    }
+
+    /// 2026-08-26 review: the UI TLS warnings now reuse this predicate, so
+    /// pin its exact loopback range — every 127.x.x.x / ::1 spelling is
+    /// safe (they validated fine before, but the UI flagged them red),
+    /// while bind-all and hostnames are not.
+    #[test]
+    fn test_is_loopback_bind_address_range() {
+        for safe in [
+            "127.0.0.1",
+            "127.0.0.2",
+            "127.255.255.254",
+            "::1",
+            "localhost",
+        ] {
+            assert!(
+                is_loopback_bind_address(safe),
+                "{safe} must count as loopback"
+            );
+        }
+        for unsafe_addr in [
+            "0.0.0.0",
+            "192.168.1.10",
+            "::",
+            "example.com",
+            "",
+            "not an address",
+        ] {
+            assert!(
+                !is_loopback_bind_address(unsafe_addr),
+                "{unsafe_addr} must NOT count as loopback"
+            );
+        }
     }
 
     // -- Validation: ports -------------------------------------------------
