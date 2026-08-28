@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2-rc.1] - 2026-08-28
+
 ### Fixed
 
 - **Mining verification no longer races the idle snapshot relaxation.**
