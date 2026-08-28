@@ -394,7 +394,10 @@ fn draw_yaw_arrow(img: &mut RgbaImage, cx: u32, cy: u32, yaw: f32, scale: u8) {
 /// and paint transparent pixels, breaking the all-pixels-alpha=255
 /// invariant (the production snapshot never carries them, so this is a
 /// latent-consistency fix, not a runtime bug).
-fn is_air_block(block_type: &str) -> bool {
+///
+/// Also shared by `get_nearby_blocks`' `top_only` filter, which makes the
+/// same "highest NON-AIR block per column" promise.
+pub(crate) fn is_air_block(block_type: &str) -> bool {
     matches!(block_type, "air" | "cave_air" | "void_air")
 }
 

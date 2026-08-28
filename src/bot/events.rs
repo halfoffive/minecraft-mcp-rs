@@ -406,40 +406,22 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
 /// The snapshot rebuild interval to use right now.
 ///
 /// The configured interval applies while the bot processed a command within
-/// the last [`within_activity_window`] window — an active agent wants fresh
-/// world state. Otherwise the bot is idle (no MCP tools being called), so
-/// the interval relaxes to at least `IDLE_INTERVAL_MS`, cutting the snapshot
-/// cost of a parked bot by an order of magnitude. Force-refresh requests
-/// bypass the throttle gate entirely and are unaffected.
+/// the last [`SharedState::within_activity_window`] window — an active agent
+/// wants fresh world state. Otherwise the bot is idle (no MCP tools being
+/// called), so the interval relaxes to at least
+/// [`SharedState::IDLE_SNAPSHOT_INTERVAL_MS`], cutting the snapshot cost of
+/// a parked bot by an order of magnitude. Force-refresh requests bypass the
+/// throttle gate entirely and are unaffected.
 ///
 /// The activity probe is monotonic (L-23): the decision uses elapsed
 /// monotonic time since the last command, never wall-clock epoch values,
 /// so an NTP jump can neither keep the fast interval forever nor relax it
 /// early.
 fn effective_snapshot_interval_ms(state: &SharedState, configured: u64) -> u64 {
-    /// Relaxed interval once the bot has been idle for a while.
-    const IDLE_INTERVAL_MS: u64 = 5_000;
-
-    if within_activity_window(state.last_command_at(), Instant::now()) {
+    if SharedState::within_activity_window(state.last_command_at(), Instant::now()) {
         return configured;
     }
-    configured.max(IDLE_INTERVAL_MS)
-}
-
-/// Pure activity-window check: is `now` within the R-13 activity window of
-/// the last activity stamp?
-///
-/// `None` (no activity ever) is never "within". Extracted as a pure helper
-/// so the relaxation decision is unit-testable with injected instants
-/// instead of sleeping past the window.
-fn within_activity_window(last_activity: Option<Instant>, now: Instant) -> bool {
-    /// Commands within this window keep the fast configured interval.
-    const ACTIVITY_WINDOW: Duration = Duration::from_millis(3_000);
-
-    match last_activity {
-        Some(t) => now.saturating_duration_since(t) <= ACTIVITY_WINDOW,
-        None => false,
-    }
+    configured.max(SharedState::IDLE_SNAPSHOT_INTERVAL_MS)
 }
 
 async fn handle_tick(bot: Client, state: BotState) {
@@ -463,7 +445,9 @@ async fn handle_tick(bot: Client, state: BotState) {
     // A pending snapshot-force request (from `get_self_info(force=true)` /
     // `get_inventory(force=true)` / `get_server_info`) must skip the throttle
     // gate so the next build happens immediately. The sender is moved into
-    // the build task, which signals the waiter after the store.
+    // the build task, which signals the waiter only after a successful
+    // store; a failed build returns the sender to the slot so the updater's
+    // 250 ms failure-retry rebuild can still resolve it.
     let force_requester = state.shared_state.take_snapshot_force_requester();
 
     // Throttle check BEFORE spawning the build task: azalea fires ~20 ticks
@@ -483,17 +467,30 @@ async fn handle_tick(bot: Client, state: BotState) {
         }
     }
 
+    let shared_for_force = Arc::clone(&state.shared_state);
+
     tick_tasks.spawn_local(async move {
-        if updater.build_and_store(&bot).await
-            && let Some(ctx) = &egui_ctx
-        {
+        let built = updater.build_and_store(&bot).await;
+        if built && let Some(ctx) = &egui_ctx {
             ctx.request_repaint();
         }
-        // Resolve any pending force-refresh waiter regardless of whether the
-        // build succeeded — the waiter falls back to reading the current
-        // snapshot when its own timeout fires, so signalling early is safe.
-        if let Some(tx) = force_requester {
-            let _ = tx.send(());
+        // Force-refresh waiters resolve only on a SUCCESSFUL build
+        // (2026-08-26 review): the previous code signalled the receiver
+        // unconditionally, so a transient build failure released
+        // `force=true` callers early and they read the pre-refresh snapshot
+        // as if fresh. On failure the sender goes back into the single slot
+        // — accepted only while it is empty, so a request that arrived in
+        // the meantime cannot be clobbered — and the failed-build retry
+        // (already scheduled by the updater) carries it forward. The
+        // waiter's own 3 s timeout remains the final backstop.
+        match force_requester {
+            Some(tx) if built => {
+                let _ = tx.send(());
+            }
+            Some(tx) => {
+                shared_for_force.restore_snapshot_force_requester(tx);
+            }
+            None => {}
         }
     });
 }
@@ -672,15 +669,15 @@ mod tests {
         // keeping the fast interval forever).
         let now = Instant::now();
         assert!(
-            within_activity_window(Some(now - Duration::from_millis(500)), now),
+            SharedState::within_activity_window(Some(now - Duration::from_millis(500)), now),
             "recent activity → fast interval"
         );
         assert!(
-            !within_activity_window(Some(now - Duration::from_secs(4)), now),
+            !SharedState::within_activity_window(Some(now - Duration::from_secs(4)), now),
             "stale activity → relax interval"
         );
         assert!(
-            !within_activity_window(None, now),
+            !SharedState::within_activity_window(None, now),
             "no activity ever → relax interval"
         );
     }

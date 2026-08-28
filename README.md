@@ -37,7 +37,7 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 >
 > | Minecraft server version / MC 服务器版本 | minecraft-mcp-rs version / 工具版本 |
 > |---|---|
-> | 1.21.11 | 1.4.0 |
+> | 1.21.11 | 1.4.2 |
 >
 > Pick the minecraft-mcp-rs version that matches your Minecraft server, and re-check this table before every upgrade. / 请选择与你的 Minecraft 服务器版本匹配的 minecraft-mcp-rs 版本，并在每次升级前重新核对此表。
 
@@ -215,8 +215,8 @@ binary is downloaded on demand and cached):
 无需 Rust 工具链——预编译二进制已发布到 npm，支持 Windows x64/arm64、macOS arm64 和 Linux x64/arm64。直接运行（各平台的二进制按需下载并缓存）：
 
 ```bash
-npx -y minecraft-mcp-rs@1.4.1 --headless --stdio
-bunx minecraft-mcp-rs@1.4.1 --headless --stdio
+npx -y minecraft-mcp-rs@1.4.2 --headless --stdio
+bunx minecraft-mcp-rs@1.4.2 --headless --stdio
 ```
 
 or install globally:
@@ -237,7 +237,7 @@ headless and exits when the MCP client disconnects):
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs@1.4.1", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@1.4.2", "--headless", "--stdio"]
     }
   }
 }

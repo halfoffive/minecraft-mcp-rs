@@ -183,6 +183,7 @@ fn main() {
                             sender_for_mcp,
                             receiver_for_mcp,
                             addr,
+                            headless,
                         )
                         .await;
                     }

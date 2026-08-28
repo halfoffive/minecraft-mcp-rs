@@ -610,6 +610,21 @@ impl CompoundOpExecutor {
                         }
                     }
 
+                    // R-13 interplay: the snapshot updater relaxes to ≥5 s
+                    // once no command has been dispatched for 3 s, and a
+                    // slow-but-legal mine (hand-mining oak_log is exactly
+                    // 3.0 s) sleeps through that whole window without
+                    // dispatching anything. Without a re-stamp, the
+                    // verification below polls against a 5 s-cadence snapshot
+                    // with a configured-interval+250 ms budget and reports a
+                    // successful break as MiningInterrupted. Re-stamping puts
+                    // the updater back on the fast cadence, so the next tick
+                    // (~50 ms) carries the broken state and the budget only
+                    // has to cover one fast interval.
+                    if executor.state.snapshot_cadence_idle(Instant::now()) {
+                        executor.state.mark_command_activity();
+                    }
+
                     // Step 10: Verify block broken — F6-4: poll the
                     // snapshot with a bounded budget instead of deciding
                     // from a single possibly-stale read (the broken state

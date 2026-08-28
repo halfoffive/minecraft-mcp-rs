@@ -245,6 +245,68 @@ impl EditConfig {
         self.dirty = EditConfigDirty::default();
         Ok(())
     }
+
+    /// Re-syncs every field the user has NOT locally edited (dirty flag
+    /// clear) from the live config.
+    ///
+    /// The buffer used to be initialised once and never refreshed, so
+    /// agent-driven changes made through the `update_settings` MCP tool were
+    /// invisible to both the Settings panel and the MCP Config panel — the
+    /// latter generates client JSON from these fields, so a user could copy
+    /// a config carrying an outdated token. Dirty fields keep their local
+    /// values: committing them stays the user's explicit Connect click
+    /// (M-8), and conversely un-applied local edits must not be clobbered
+    /// mid-typing.
+    pub(crate) fn sync_untouched_from(&mut self, cfg: &AppConfig) {
+        if !self.dirty.mc_address {
+            self.mc_address = cfg.mc_address.clone();
+        }
+        if !self.dirty.mc_port {
+            self.mc_port = cfg.mc_port;
+        }
+        if !self.dirty.ai_username {
+            self.ai_username = cfg.ai_username.clone();
+        }
+        if !self.dirty.mcp_address {
+            self.mcp_address = cfg.mcp_address.clone();
+        }
+        if !self.dirty.mcp_port {
+            self.mcp_port = cfg.mcp_port;
+        }
+        if !self.dirty.task_name {
+            self.task_name = cfg.task_name.clone();
+        }
+        if !self.dirty.chunk_scan_radius {
+            self.chunk_scan_radius = cfg.chunk_scan_radius;
+        }
+        if !self.dirty.block_perception_radius {
+            self.block_perception_radius = cfg.block_perception_radius;
+        }
+        if !self.dirty.snapshot_interval_ms {
+            self.snapshot_interval_ms = cfg.snapshot_interval_ms;
+        }
+        if !self.dirty.reconnect_initial_delay_ms {
+            self.reconnect_initial_delay_ms = cfg.reconnect_initial_delay_ms;
+        }
+        if !self.dirty.reconnect_max_delay_ms {
+            self.reconnect_max_delay_ms = cfg.reconnect_max_delay_ms;
+        }
+        if !self.dirty.command_timeout_secs {
+            self.command_timeout_secs = cfg.command_timeout_secs;
+        }
+        if !self.dirty.fly_timeout_secs {
+            self.fly_timeout_secs = cfg.fly_timeout_secs;
+        }
+        if !self.dirty.mcp_token {
+            self.mcp_token = cfg.mcp_token.clone();
+        }
+        if !self.dirty.mcp_auth_enabled {
+            self.mcp_auth_enabled = cfg.mcp_auth_enabled;
+        }
+        if !self.dirty.mcp_transport {
+            self.mcp_transport = cfg.mcp_transport;
+        }
+    }
 }
 
 /// Single writer for `i18n::current()` on the UI path (M-9).
@@ -396,10 +458,16 @@ impl App for MinecraftApp {
         // `ctx.request_repaint()` from the event handler) cover the rest.
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
-        // Lazy-init the edit buffers from current config.
-        if self.edit_config.is_none() {
-            let cfg = self.state.read_config();
-            self.edit_config = Some(EditConfig::from(&*cfg));
+        // Lazy-init the edit buffers from current config, then keep every
+        // untouched field tracking the live config so agent-side
+        // `update_settings` changes are visible in the Settings and MCP
+        // Config panels (2026-08-25 review). Locally dirty fields are
+        // never overwritten — committing them stays the user's explicit
+        // Connect click.
+        let cfg = self.state.read_config();
+        match self.edit_config.as_mut() {
+            Some(edit) => edit.sync_untouched_from(&cfg),
+            None => self.edit_config = Some(EditConfig::from(&*cfg)),
         }
     }
 
@@ -513,6 +581,48 @@ mod tests {
         assert_eq!(cfg.command_timeout_secs, 42);
         // Dirty flags are cleared after a successful apply.
         assert_eq!(edit.dirty, EditConfigDirty::default());
+    }
+
+    /// 2026-08-25 review: `sync_untouched_from` must pull every clean field
+    /// from the live config — so agent-side `update_settings` changes show
+    /// up in the Settings / MCP Config panels — while locally dirty fields
+    /// keep their in-progress values (committing them is the user's explicit
+    /// Connect click, M-8).
+    #[test]
+    fn test_edit_config_sync_untouched_follows_live_config() {
+        let state = SharedState::new(AppConfig::default());
+        let mut edit = EditConfig::from(&state.read_config().clone());
+
+        // Agent-side change (as `update_settings` would commit it).
+        state.update_config(|cfg| {
+            cfg.mc_port = 25599;
+            cfg.mcp_token = "agent-token".into();
+            cfg.mcp_auth_enabled = true;
+            cfg.snapshot_interval_ms = 1500;
+        });
+
+        // User typed into two fields but has not clicked Connect.
+        edit.mcp_port = 9100;
+        edit.dirty.mcp_port = true;
+        edit.snapshot_interval_ms = 777;
+        edit.dirty.snapshot_interval_ms = true;
+
+        edit.sync_untouched_from(&state.read_config().clone());
+
+        // Clean fields follow the live config.
+        assert_eq!(edit.mc_port, 25599);
+        assert_eq!(edit.mcp_token, "agent-token");
+        assert!(edit.mcp_auth_enabled);
+        // Dirty fields keep the user's in-progress edits.
+        assert_eq!(edit.mcp_port, 9100);
+        assert_eq!(edit.snapshot_interval_ms, 777);
+
+        // After a successful apply the flags clear and the next sync pulls
+        // the committed values back in.
+        edit.apply(&state).expect("valid edit should apply");
+        edit.sync_untouched_from(&state.read_config().clone());
+        assert_eq!(edit.mcp_port, 9100);
+        assert_eq!(edit.snapshot_interval_ms, 777);
     }
 
     /// F-5: every edit-buffer field (one case per field) must survive the

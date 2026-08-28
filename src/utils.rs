@@ -74,6 +74,12 @@ pub fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
 /// annotation is meaningless to LLM clients. `rem_euclid(360)` maps any
 /// value into `[0, 360)`, then values ≥ 180 are folded back into
 /// `[-180, 180)` (so `270° → -90°`).
+///
+/// Non-finite input is out of contract here: NaN fails both comparisons and
+/// propagates verbatim. Production callers must go through
+/// [`normalize_yaw_checked`], which maps non-finite angles to `None`; this
+/// function keeps the total-`f32 -> f32` shape so tests can pin the exact
+/// fold arithmetic.
 pub fn normalize_yaw(yaw: f32) -> f32 {
     let degrees = yaw.to_degrees().rem_euclid(360.0);
     if degrees >= 180.0 {
@@ -81,6 +87,18 @@ pub fn normalize_yaw(yaw: f32) -> f32 {
     } else {
         degrees
     }
+}
+
+/// [`normalize_yaw`] with a non-finite guard: `NaN`/±∞ have no meaningful
+/// direction, so they fold to `None` and the caller stores "yaw unknown"
+/// (`SelfPlayer::yaw == None`, no renderer heading arrow) instead of a
+/// value that would poison annotations (2026-08-26 review).
+///
+/// The snapshot updater's population of `SelfPlayer::yaw` is the single
+/// production caller — one write point, like the unbounded-turn fix before
+/// it.
+pub fn normalize_yaw_checked(yaw: f32) -> Option<f32> {
+    yaw.is_finite().then(|| normalize_yaw(yaw))
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -212,5 +230,22 @@ mod tests {
         assert_yaw_eq(normalize_yaw(270.0_f32.to_radians()), -90.0);
         assert_yaw_eq(normalize_yaw((-270.0_f32).to_radians()), 90.0);
         assert_yaw_eq(normalize_yaw(720.0_f32.to_radians()), 0.0);
+    }
+
+    #[test]
+    fn test_normalize_yaw_checked_rejects_non_finite() {
+        // NaN/±∞ carry no direction: the checked wrapper folds them to None
+        // so SelfPlayer::yaw stays "unknown" instead of poisoning
+        // annotations (2026-08-26 review). Finite values pass through
+        // unchanged.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(
+                normalize_yaw_checked(bad).is_none(),
+                "non-finite {bad} must fold to None"
+            );
+        }
+        let yaw = normalize_yaw_checked((-767.1_f32).to_radians()).expect("finite → Some");
+        assert_yaw_eq(yaw, -47.1);
+        assert!(normalize_yaw_checked(0.0).is_some());
     }
 }

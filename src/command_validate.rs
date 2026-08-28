@@ -19,6 +19,23 @@ const MIN_Y: i32 = -64;
 /// Maximum build height (Y level).
 const MAX_Y: i32 = 320;
 
+/// Item-pickup radius cap shared by [`BotCommand::CollectItems`] and
+/// [`ActAction::CollectItems`]. Both arms route through
+/// [`validate_collect_radius`] so the two encodings cannot drift.
+const MAX_COLLECT_RADIUS: u32 = 64;
+
+/// Validate an item-pickup radius: positive and capped at
+/// [`MAX_COLLECT_RADIUS`] (keeps any `as i32` filter inside the handler
+/// safe via [`clamp_to_i32`]).
+fn validate_collect_radius(radius: u32) -> Result<(), BotError> {
+    if radius == 0 || radius > MAX_COLLECT_RADIUS {
+        return Err(BotError::InvalidParams(format!(
+            "CollectItems radius must be between 1 and {MAX_COLLECT_RADIUS}, got {radius}"
+        )));
+    }
+    Ok(())
+}
+
 // ── Public validation API ─────────────────────────────────────────────────
 
 /// Saturating cast from `u32` to `i32`, capping at `i32::MAX`.
@@ -238,14 +255,7 @@ pub fn validate_command(cmd: &BotCommand) -> Result<(), BotError> {
         BotCommand::SmartMove(pos) | BotCommand::FlyTo(pos) => validate_position(pos),
 
         // Item pickup radius must be positive and capped at 64 blocks.
-        BotCommand::CollectItems(radius) => {
-            if *radius == 0 || *radius > 64 {
-                return Err(BotError::InvalidParams(format!(
-                    "CollectItems radius must be between 1 and 64, got {radius}"
-                )));
-            }
-            Ok(())
-        }
+        BotCommand::CollectItems(radius) => validate_collect_radius(*radius),
 
         // Unified Act tool — delegate to the inner action's validation and
         // bound the per-call perception radius (0..=32) that trims the
@@ -297,14 +307,7 @@ pub fn validate_act_action(action: &ActAction) -> Result<(), BotError> {
             }
             Ok(())
         }
-        ActAction::CollectItems { radius } => {
-            if *radius == 0 || *radius > 64 {
-                return Err(BotError::InvalidParams(format!(
-                    "CollectItems radius must be between 1 and 64, got {radius}"
-                )));
-            }
-            Ok(())
-        }
+        ActAction::CollectItems { radius } => validate_collect_radius(*radius),
     }
 }
 
@@ -352,26 +355,14 @@ pub fn validate_block_pos(pos: &BlockPos) -> Result<(), String> {
 /// World bounds:
 /// - X / Z: ±30,000,000 (world border)
 /// - Y: -64 to +320 (build height limits)
+///
+/// Delegates to [`validate_coordinates`] — the single source of truth for
+/// the bound values and their axis message — and only adapts its `String`
+/// error into [`BotError::InvalidParams`]. Previously this encoded the same
+/// bounds a second time, so changing one limit meant touching two places
+/// (2026-08-26 review).
 fn validate_position(pos: &BlockPos) -> Result<(), BotError> {
-    if pos.x < -WORLD_BORDER || pos.x > WORLD_BORDER {
-        return Err(BotError::InvalidParams(format!(
-            "X coordinate {} out of bounds (must be between {} and {})",
-            pos.x, -WORLD_BORDER, WORLD_BORDER
-        )));
-    }
-    if pos.y < MIN_Y || pos.y > MAX_Y {
-        return Err(BotError::InvalidParams(format!(
-            "Y coordinate {} out of bounds (must be between {MIN_Y} and {MAX_Y})",
-            pos.y,
-        )));
-    }
-    if pos.z < -WORLD_BORDER || pos.z > WORLD_BORDER {
-        return Err(BotError::InvalidParams(format!(
-            "Z coordinate {} out of bounds (must be between {} and {})",
-            pos.z, -WORLD_BORDER, WORLD_BORDER
-        )));
-    }
-    Ok(())
+    validate_coordinates(pos.x, pos.y, pos.z).map_err(BotError::InvalidParams)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

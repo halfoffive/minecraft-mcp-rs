@@ -1,6 +1,6 @@
 {
   "name": "@minecraft-mcp-rs/minecraft-mcp-rs-linux-x64",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Linux x64 binary for minecraft-mcp-rs",
   "license": "MIT",
   "repository": {
