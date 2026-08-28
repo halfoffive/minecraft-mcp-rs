@@ -69,11 +69,13 @@ pub fn settings_panel(ui: &mut Ui, state: &SharedState, edit: &mut EditConfig) -
     });
     // Warn when the HTTP bind address is not loopback: the Bearer
     // token travels in cleartext (no TLS), so binding to anything
-    // other than `127.0.0.1` / `::1` / `localhost` (including
-    // `0.0.0.0`, which binds all interfaces) exposes it to the
-    // network. Only relevant for HTTP transport.
+    // outside the loopback range (including `0.0.0.0`, which binds
+    // all interfaces) exposes it to the network. Only relevant for
+    // HTTP transport. The predicate is config.rs's loopback check —
+    // the same rule validate() applies, so any loopback spelling
+    // (e.g. 127.0.0.2) agrees on both sides (2026-08-26 review).
     if edit.mcp_transport == McpTransport::Http {
-        let is_safe = matches!(edit.mcp_address.as_str(), "127.0.0.1" | "::1" | "localhost");
+        let is_safe = crate::config::is_loopback_bind_address(&edit.mcp_address);
         if !is_safe && !edit.mcp_address.is_empty() {
             ui.label(
                 egui::RichText::new(i18n::tr(TextKey::TlsWarning))

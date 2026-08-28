@@ -280,6 +280,12 @@ pub fn get_nearby_blocks(
 
     if top_only {
         // Group by (x, z) and keep the entry with the greatest y.
+        // Air entries are dropped first: the contract promises the highest
+        // NON-AIR block per column, and that promise must not rest solely
+        // on the updater's air-entry invariant (L-4) — test fixtures or a
+        // future updater change could reintroduce them. The renderer
+        // applies the same predicate for the same latent-hazard reason.
+        matched.retain(|b| !crate::mcp::render::is_air_block(&b.block_type));
         // `dedup_by` keeps the FIRST of each run, so sort with the highest
         // y first (Reverse) — the survivor of each column is its top block.
         matched.sort_by(|a, b| {
@@ -646,11 +652,13 @@ pub struct GetWorldViewInput {
 ///
 /// Before re-rendering, the function checks
 /// [`SharedState::get_world_view_cache`]. If the cached entry's
-/// `snapshot_timestamp`, `radius`, and `scale` all match the current
-/// request, the cached PNG + annotation are returned without invoking
+/// `snapshot_seq`, `radius`, and `scale` all match the current request, the
+/// cached PNG + annotation are returned without invoking
 /// [`render_topdown_enhanced`](crate::mcp::render::render_topdown_enhanced)
 /// again. This makes repeated `get_world_view` calls between snapshot
-/// ticks effectively free.
+/// ticks effectively free. (The key uses the monotonic `snapshot_seq`, not
+/// the seconds-granularity timestamp — two consecutive builds can share a
+/// timestamp, which previously served a stale PNG.)
 ///
 /// Validates `radius` is in `1..=32` and the bot is online; on error
 /// returns a [`BotError`] so rmcp converts it to a standard MCP error
@@ -1025,6 +1033,54 @@ mod tests {
         let b = &blocks[0];
         assert_eq!(b["block_type"], json!("dirt"));
         assert!(b["position"]["y"] == json!(65));
+    }
+
+    #[test]
+    fn test_get_nearby_blocks_top_only_drops_air_entries() {
+        // 2026-08-25 review: the "highest NON-AIR block" promise must not
+        // rest solely on the updater's air-entry invariant (L-4). With an
+        // `air` entry above a real block, the air entry must be dropped and
+        // the stone below reported as the column top (the renderer applies
+        // the same predicate for its column-best competition).
+        let state = SharedState::new(AppConfig::default());
+        state.set_online(true);
+        let snap = WorldSnapshot {
+            blocks: vec![
+                BlockEntry {
+                    position: BlockPos::new(0, 64, 0),
+                    block_type: "stone".into(),
+                    block_state: None,
+                },
+                BlockEntry {
+                    position: BlockPos::new(0, 65, 0),
+                    block_type: "air".into(),
+                    block_state: None,
+                },
+            ],
+            self_player: SelfPlayer {
+                uuid: "player-uuid".into(),
+                username: "TestBot".into(),
+                position: BlockPos::new(0, 64, 0),
+                health: 20.0,
+                hunger: 20,
+                gamemode: GameMode::Survival,
+                held_item_slot: 0,
+                inventory: vec![],
+                position_precise: None,
+                yaw: None,
+            },
+            timestamp: 42,
+            ..Default::default()
+        };
+        state.update_snapshot(snap);
+        let state = Arc::new(state);
+
+        let result = get_nearby_blocks(&state, 8, None, true, 500).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let blocks = v["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1, "air must not win the column: {result}");
+        assert_eq!(blocks[0]["block_type"], json!("stone"));
+        assert!(blocks[0]["position"]["y"] == json!(64));
     }
 
     #[test]

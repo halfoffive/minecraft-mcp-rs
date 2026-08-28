@@ -496,7 +496,9 @@ pub static TOOL_NAMES: LazyLock<HashMap<(ToolType, MaterialTier), Vec<&'static s
 
 /// Hardness values for common Minecraft blocks.
 ///
-/// Values are in seconds of mining time with fist (no tool).
+/// These are vanilla *hardness* (`strength`) values, NOT fist-mining
+/// seconds — [`calculate_mine_time`](crate::mining_calc::calculate_mine_time)
+/// converts them into break times (e.g. stone at 1.5 takes 7.5 s by hand).
 /// A value of `-1.0` indicates an unbreakable block (bedrock).
 pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(|| {
     let mut m = HashMap::new();
@@ -936,6 +938,11 @@ pub fn minimum_material_for_harvest_level(level: u8) -> Option<MaterialTier> {
 /// Defaults to 0 for unknown blocks — any tool will do. The values here
 /// mirror the vanilla Minecraft 1.21 harvest rules for the blocks the bot
 /// knows about. Blocks not in this table are assumed to be hand-mineable.
+///
+/// `u8::MAX` is the documented "unbreakable" sentinel (bedrock): no tool
+/// can ever satisfy it, so tool selection yields no candidates and
+/// [`build_tool_alternatives`](crate::tool_select::build_tool_alternatives)
+/// intentionally returns an empty alternatives list for it.
 pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(|| {
     let mut m = HashMap::new();
 

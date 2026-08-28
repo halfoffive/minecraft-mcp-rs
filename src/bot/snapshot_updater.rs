@@ -239,9 +239,12 @@ async fn build_snapshot_inner(
     // Minecraft's `[-180, 180)` degree range here — the single write point
     // for `SelfPlayer::yaw` — so `get_bot_status` and the `get_world_view`
     // annotation never expose unbounded accumulated turns (e.g. -767.1°).
+    // The checked wrapper also folds non-finite angles (NaN/±∞ have no
+    // direction) to `None` — "yaw unknown" beats a poisoned annotation
+    // (2026-08-26 review).
     let yaw: Option<f32> = bot
         .get_component::<azalea::entity::LookDirection>()
-        .map(|look| crate::utils::normalize_yaw(look.y_rot()));
+        .and_then(|look| crate::utils::normalize_yaw_checked(look.y_rot()));
 
     let inventory = read_inventory(bot);
 

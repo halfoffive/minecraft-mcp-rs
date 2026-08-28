@@ -756,12 +756,15 @@ impl SharedState {
     // ── Snapshot force-refresh (get_self_info/get_inventory force=true) ──
 
     /// Request an immediate snapshot rebuild and return a receiver that
-    /// resolves once the next snapshot build completes.
+    /// resolves once the next successful snapshot build completes.
     ///
     /// Overwrites any previous pending request (only the latest caller is
     /// answered). The receiver resolves when the bot event loop finishes the
     /// next forced build; if the bot is offline or no build ever happens, the
-    /// receiver stays pending and the caller's own timeout decides.
+    /// receiver stays pending and the caller's own timeout decides. A failed
+    /// build does NOT resolve it either: `handle_tick` returns the sender via
+    /// [`Self::restore_snapshot_force_requester`] so the updater's 250 ms
+    /// failure-retry rebuild can still complete the request.
     pub fn request_snapshot_refresh(&self) -> tokio::sync::oneshot::Receiver<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut guard = self
@@ -781,6 +784,28 @@ impl SharedState {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         guard.take()
+    }
+
+    /// Return an unresolved force-request sender to the slot after a failed
+    /// snapshot build, so the updater's retry build can still signal the
+    /// waiter.
+    ///
+    /// Insertion happens ONLY when the slot is empty — a request that arrived
+    /// while the failed build was running must not be clobbered by the stale
+    /// sender (it would resolve the wrong waiter). Returns whether the sender
+    /// was restored; when it was not, the caller should simply drop it, which
+    /// releases that waiter into its own timeout fallback.
+    pub fn restore_snapshot_force_requester(&self, tx: tokio::sync::oneshot::Sender<()>) -> bool {
+        let mut guard = self
+            .snapshot_force
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = Some(tx);
+            true
+        } else {
+            false
+        }
     }
 
     // ── Command probe (get_server_info /seed round-trip) ──
@@ -819,6 +844,43 @@ impl SharedState {
     /// Read the command-executor busy flag.
     pub fn executor_busy(&self) -> bool {
         self.executor_busy.load(Ordering::Relaxed)
+    }
+
+    /// Window during which recent command activity keeps the snapshot
+    /// updater on its fast configured cadence (R-13). After this long
+    /// without a dispatch the updater relaxes to
+    /// [`Self::IDLE_SNAPSHOT_INTERVAL_MS`].
+    pub(crate) const ACTIVITY_WINDOW: Duration = Duration::from_millis(3_000);
+
+    /// Relaxed snapshot rebuild interval (ms) once the bot idles past
+    /// [`Self::ACTIVITY_WINDOW`].
+    pub(crate) const IDLE_SNAPSHOT_INTERVAL_MS: u64 = 5_000;
+
+    /// Pure activity-window check shared by the snapshot throttle gate
+    /// (`events::effective_snapshot_interval_ms`) and the mining-verification
+    /// restamp (`bot::ops`): is `now` within [`Self::ACTIVITY_WINDOW`] of the
+    /// last activity stamp?
+    ///
+    /// `None` (no activity ever) is never "within". Kept as a pure associated
+    /// function so relaxation decisions stay unit-testable with synthetic
+    /// instants instead of sleeping past the window.
+    pub(crate) fn within_activity_window(last_activity: Option<Instant>, now: Instant) -> bool {
+        match last_activity {
+            Some(t) => now.saturating_duration_since(t) <= Self::ACTIVITY_WINDOW,
+            None => false,
+        }
+    }
+
+    /// Whether the snapshot updater is on its relaxed idle cadence at `now`.
+    ///
+    /// True when no command has been dispatched within
+    /// [`Self::ACTIVITY_WINDOW`] — including the never-dispatched case.
+    /// Compound operations that sleep between their last dispatch and a
+    /// snapshot-dependent verification step (mining) use this to detect that
+    /// they must re-stamp activity before polling, or the relaxed cadence
+    /// would outlast the verification budget.
+    pub(crate) fn snapshot_cadence_idle(&self, now: Instant) -> bool {
+        !Self::within_activity_window(self.last_command_at(), now)
     }
 
     /// Record that a bot command was dispatched right now (monotonic).
@@ -957,6 +1019,12 @@ impl SharedState {
         self.clear_bot_ecs();
         self.set_executor_busy(false);
         self.set_commands_probe(None);
+        // Regression (2026-08-25 review): a container left open at
+        // disconnect must not survive into the next session — the stale
+        // handle made OpenContainer fail with ContainerAlreadyOpen and let
+        // TakeFromContainer/PutIntoContainer shift-click a dead session's
+        // menu while reporting success.
+        self.set_container_handle(None);
     }
 
     /// Return a clone of the bot's ECS handle, if any.
@@ -1609,6 +1677,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_snapshot_cadence_idle_tracks_activity() {
+        // Regression (2026-08-25 review): execute_mine_block re-stamps
+        // command activity after a long mine sleep so the relaxed idle
+        // snapshot cadence cannot outlast the mining verification budget.
+        // This pins the predicate that decides whether the restamp fires.
+        let state = SharedState::new(AppConfig::default());
+
+        // Never dispatched → updater is on the relaxed cadence.
+        assert!(
+            state.snapshot_cadence_idle(Instant::now()),
+            "no command ever → idle cadence"
+        );
+
+        // A fresh dispatch puts the updater back on the fast cadence.
+        state.mark_command_activity();
+        assert!(
+            !state.snapshot_cadence_idle(Instant::now()),
+            "just-dispatched → fast cadence"
+        );
+
+        // The pure window check agrees with the accessor-based view for
+        // synthetic instants on both sides of ACTIVITY_WINDOW.
+        let now = Instant::now();
+        assert!(SharedState::within_activity_window(
+            Some(now - SharedState::ACTIVITY_WINDOW),
+            now
+        ));
+        assert!(!SharedState::within_activity_window(
+            Some(now - SharedState::ACTIVITY_WINDOW - Duration::from_millis(1)),
+            now
+        ));
+    }
+
     // -- last_error -----------------------------------------------------------
 
     #[test]
@@ -1834,6 +1936,56 @@ mod tests {
         assert!(!state.executor_busy());
     }
 
+    #[tokio::test]
+    async fn test_restore_snapshot_force_requester_into_empty_slot() {
+        // 2026-08-26 review: a failed forced build must hand its sender back
+        // so the updater's 250 ms failure-retry rebuild can still resolve
+        // the waiter. An empty slot accepts the restore; taking and firing
+        // the restored sender resolves the original receiver.
+        let state = SharedState::new(AppConfig::default());
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        assert!(
+            state.restore_snapshot_force_requester(tx),
+            "empty slot → restore succeeds"
+        );
+
+        let restored = state
+            .take_snapshot_force_requester()
+            .expect("restored request must be pending");
+        restored.send(()).expect("receiver should be alive");
+        rx.await.expect("restored sender must resolve its own rx");
+
+        // The slot is consumed again after the take.
+        assert!(state.take_snapshot_force_requester().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_restore_snapshot_force_requester_never_clobbers_newer_request() {
+        // A newer request arriving while a failed build ran must keep its
+        // place in the single slot: restoring a stale sender fails, leaves
+        // the original untouched, and dropping the stale sender releases
+        // only ITS OWN receiver (the wrong-waiter resolution hazard).
+        let state = SharedState::new(AppConfig::default());
+
+        let original_rx = state.request_snapshot_refresh();
+        let (stale_tx, stale_rx) = tokio::sync::oneshot::channel::<()>();
+        assert!(
+            !state.restore_snapshot_force_requester(stale_tx),
+            "occupied slot → restore rejected"
+        );
+        drop(stale_rx);
+
+        // The original request is still the one in the slot.
+        let tx = state
+            .take_snapshot_force_requester()
+            .expect("original request must survive the failed restore");
+        tx.send(()).expect("original receiver should be alive");
+        original_rx
+            .await
+            .expect("original waiter must be the one resolved");
+    }
+
     #[test]
     fn test_commands_probe_round_trip() {
         let state = SharedState::new(AppConfig::default());
@@ -1864,6 +2016,12 @@ mod tests {
         assert!(!state.executor_busy());
         assert_eq!(state.get_commands_probe(), None);
         assert!(state.bot_ecs().is_none());
+        // Regression (2026-08-25 review): the open-container handle must be
+        // torn down too, or it survives into the next session (stale
+        // shift-clicks reporting success). A populated handle cannot be
+        // fabricated here (`ContainerHandle` is an azalea type with private
+        // fields), so this pins the post-teardown invariant.
+        assert!(state.get_container_handle().is_none());
 
         // Idempotent: a second call must not panic or flip anything back.
         state.clear_session_state();

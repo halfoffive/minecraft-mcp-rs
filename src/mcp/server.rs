@@ -304,7 +304,7 @@ impl McpBotServer {
     // ── Block tools (destructive) ────────────────────────────
 
     #[tool(
-        description = "Break a block at the given position. By default runs the full compound mine flow: approaches the block, picks the best tool (errors with a clear reason when the right tool is missing, e.g. a shovel for grass), mines, and verifies the break. Returns the action result plus the bot's final position. Set use_best_tool=false for the raw single-packet break.",
+        description = "Break a block at the given position. By default runs the full compound mine flow: approaches the block, picks the best tool (errors with a clear reason when the right tool is missing, e.g. a shovel for grass), mines, and verifies the break. Returns the action result plus the bot's final position. Set use_best_tool=false for the raw single-packet break. In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.",
         annotations(destructive_hint = true)
     )]
     async fn break_block(
@@ -315,7 +315,7 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Place a block at the given position; the placed block occupies exactly (x, y, z). Placement is verified against the world after the click — success is reported only when the block was observed at the target. y must be in -63..=320; y=-64 is rejected because the clicked block would be at y=-65, outside the world.",
+        description = "Place a block at the given position; the placed block occupies exactly (x, y, z). Placement is verified against the world after the click — success is reported only when the block was observed at the target. y must be in -63..=320; y=-64 is rejected because the clicked block would be at y=-65, outside the world. In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.",
         annotations(destructive_hint = true)
     )]
     async fn place_block(
@@ -649,11 +649,19 @@ pub async fn serve_stdio(
         Ok(running) => {
             info!("MCP server initialized, waiting for transport to close or shutdown");
             // Race the transport-close future against the shutdown token,
-            // an OS Ctrl+C, and (headless only) the idle watchdog — so the
+            // an OS Ctrl+C (headless only), and the idle watchdog — so the
             // process exits cleanly instead of hanging on stdin EOF, which
             // on Windows may never arrive (inherited console handles have no
             // EOF; a pipe EOF needs every write end closed, and the client
             // host keeps them open).
+            //
+            // The Ctrl+C arm is headless-gated like the watchdog: registering
+            // the handler replaces the OS default process-wide, so in UI mode
+            // it would silently stop just the MCP transport while the egui
+            // window lived on as a zombie (2026-08-26 review). With no
+            // listener, terminal Ctrl+C in UI mode falls back to the OS
+            // default — terminating the whole process, which is what a
+            // terminal interrupt means.
             tokio::select! {
                 _ = running.waiting() => {
                     info!("MCP server transport closed cleanly");
@@ -661,7 +669,7 @@ pub async fn serve_stdio(
                 _ = shutdown_token.cancelled() => {
                     info!("MCP server shutting down (shutdown token triggered)");
                 }
-                _ = tokio::signal::ctrl_c() => {
+                _ = tokio::signal::ctrl_c(), if headless => {
                     info!("Ctrl+C received — shutting down MCP stdio server");
                 }
                 _ = headless_idle_watchdog(Arc::clone(&state_for_status), started_at), if headless => {
@@ -860,19 +868,24 @@ async fn bearer_auth_middleware(
     }
 }
 
-/// Wait for either the shutdown token or a Ctrl+C signal.
+/// Wait for either the shutdown token or — in headless mode only — an OS
+/// Ctrl+C signal.
 ///
 /// `serve_http`'s graceful shutdown races the shutdown token (triggered by
 /// window close, `disconnect_bot`, or the headless stdio client exiting)
 /// against an OS Ctrl+C, so the process can be terminated cleanly from a
-/// terminal even in headless mode where nothing else triggers the token.
-/// Returning from this future makes axum drain in-flight requests and exit
-/// `serve_http`; `main.rs` then triggers the shutdown token (headless) or
-/// the window's `Drop` handles it (UI mode).
-async fn shutdown_signal(token: CancellationToken) {
+/// terminal in headless mode where nothing else triggers the token.
+///
+/// `headless` gates the Ctrl+C arm exactly like `serve_stdio`'s: registering
+/// the handler replaces the OS default process-wide, so in UI mode it would
+/// silently stop just the MCP transport while the window lived on as a
+/// zombie (2026-08-26 review). Returning from this future makes axum drain
+/// in-flight requests and exit `serve_http`; `main.rs` then triggers the
+/// shutdown token (headless) or the window's `Drop` handles it (UI mode).
+async fn shutdown_signal(token: CancellationToken, headless: bool) {
     tokio::select! {
         _ = token.cancelled() => {}
-        _ = tokio::signal::ctrl_c() => {
+        _ = tokio::signal::ctrl_c(), if headless => {
             info!("Ctrl+C received — shutting down MCP HTTP server");
         }
     }
@@ -885,6 +898,11 @@ async fn shutdown_signal(token: CancellationToken) {
 /// authentication read live from [`SharedState::read_config`]. Runs until the
 /// process exits or the axum server encounters an unrecoverable error.
 ///
+/// `headless` gates the Ctrl+C arm of the graceful-shutdown race (see
+/// `shutdown_signal`): UI mode must not register an OS Ctrl+C handler, or
+/// terminal interrupts would stop only the MCP transport while the window
+/// lived on. `main.rs` passes the resolved run mode through.
+///
 /// The `receiver` slot is handed to the server so the `connect_bot` tool can
 /// spawn a bot connection using the same receiver the UI path uses.
 pub async fn serve_http(
@@ -892,6 +910,7 @@ pub async fn serve_http(
     sender: BotCommandSender,
     receiver: ReceiverSlot,
     addr: SocketAddr,
+    headless: bool,
 ) {
     // Keep a clone for status updates after `state` is moved into the router.
     let state_for_status = Arc::clone(&state);
@@ -941,7 +960,7 @@ pub async fn serve_http(
 
     if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            shutdown_signal(shutdown_token).await;
+            shutdown_signal(shutdown_token, headless).await;
         })
         .await
     {
@@ -1066,6 +1085,31 @@ mod tests {
         );
     }
 
+    /// 2026-08-25 review: the Creative-mode hint must be part of the
+    /// REGISTERED tool descriptions clients actually see. The hint used to
+    /// live in `tools_block.rs` constants that no registered description
+    /// referenced — a test asserted the constants contained it while the
+    /// wire contract never carried it.
+    #[test]
+    fn test_creative_hint_present_in_registered_block_tool_descriptions() {
+        const CREATIVE_MODE_HINT: &str = "In Creative mode, prefer `execute_command` with `/fill` or `/setblock` for bulk building.";
+        let tools = McpBotServer::tool_router().list_all();
+        for name in ["break_block", "place_block"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("missing tool: {name}"));
+            let description = tool
+                .description
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} must carry a description"));
+            assert!(
+                description.contains(CREATIVE_MODE_HINT),
+                "{name} registered description must contain the Creative-mode hint, got: {description}"
+            );
+        }
+    }
+
     /// F-3(b): drive `tools/call` through the real JSON-RPC transport —
     /// happy path and an unknown-tool -32602.
     #[tokio::test]
@@ -1183,17 +1227,21 @@ mod tests {
     /// `shutdown_signal` resolves when the shutdown token is cancelled —
     /// this is the path the UI (window close) and headless stdio client exit
     /// rely on. The Ctrl+C branch cannot be exercised in CI (no terminal
-    /// signal injection), so only the token branch is covered here.
+    /// signal injection), so only the token branch is covered here, for
+    /// both gate values (the `headless=false` arm must still resolve on the
+    /// token alone).
     #[tokio::test]
     async fn test_shutdown_signal_returns_on_token_cancel() {
-        let token = CancellationToken::new();
-        let token_for_test = token.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            token_for_test.cancel();
-        });
-        // Must resolve (not hang) once the token fires.
-        shutdown_signal(token).await;
+        for headless in [true, false] {
+            let token = CancellationToken::new();
+            let token_for_test = token.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                token_for_test.cancel();
+            });
+            // Must resolve (not hang) once the token fires.
+            shutdown_signal(token, headless).await;
+        }
     }
 
     /// The headless idle watchdog must NOT fire while the session is younger
