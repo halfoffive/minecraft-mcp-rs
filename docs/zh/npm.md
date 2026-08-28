@@ -7,13 +7,13 @@ npm 发行版让你**无需 Rust 工具链**即可运行 MCP 服务器——预�
 按需运行——`npx` 首次运行时自动下载匹配平台的二进制并缓存，供后续运行复用：
 
 ```bash
-npx -y minecraft-mcp-rs@1.4.1 --headless --stdio
+npx -y minecraft-mcp-rs@1.4.2 --headless --stdio
 ```
 
 使用 [Bun](https://bun.sh)？`bunx` 无需 `-y` 参数即可完成同样的事：
 
 ```bash
-bunx minecraft-mcp-rs@1.4.1 --headless --stdio
+bunx minecraft-mcp-rs@1.4.2 --headless --stdio
 ```
 
 `--headless` 表示无桌面窗口运行，并在 MCP 传输关闭时退出进程；`--stdio` 强制使用 stdio 传输。
@@ -27,7 +27,7 @@ bunx minecraft-mcp-rs@1.4.1 --headless --stdio
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs@1.4.1", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@1.4.2", "--headless", "--stdio"]
     }
   }
 }
@@ -40,7 +40,7 @@ Bun 用户：把 `"command"` 换成 `bunx`，去掉 `-y`：
   "mcpServers": {
     "minecraft": {
       "command": "bunx",
-      "args": ["minecraft-mcp-rs@1.4.1", "--headless", "--stdio"]
+      "args": ["minecraft-mcp-rs@1.4.2", "--headless", "--stdio"]
     }
   }
 }
@@ -77,9 +77,9 @@ minecraft-mcp-rs **仅支持 Minecraft Java Edition 1.21.11**，其他 Minecraft
 
 | Minecraft 服务器版本 | minecraft-mcp-rs 版本 |
 |----------------------|-----------------------|
-| 1.21.11              | 1.4.0                 |
+| 1.21.11              | 1.4.2                 |
 
-上文代码片段中的 `@1.4.1` 固定是刻意的：不同工具版本可能面向不同 Minecraft 版本。请始终安装与服务器完全匹配的发行版，并在每次升级前核对本表。
+上文代码片段中的 `@1.4.2` 固定是刻意的：不同工具版本可能面向不同 Minecraft 版本。请始终安装与服务器完全匹配的发行版，并在每次升级前核对本表。
 
 ## 平台包
 
