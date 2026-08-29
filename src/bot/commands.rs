@@ -2092,9 +2092,23 @@ impl<B: BotActions> CommandExecutor<B> {
         // attempt. Retry exactly once before declaring an obstacle; a
         // TimedOut already spent the full movement window, so it is never
         // retried (retrying would double the latency for no benefit).
+        //
+        // 2026-08-29 review: the retry used to run a FULL fresh
+        // goto_with_margin window (command_timeout − 1 s), so a first
+        // attempt that failed after >0.7 s pushed the total wall time past
+        // send_command's command_timeout envelope — the channel layer then
+        // answered a bare CommandTimeout and the structured
+        // {reached, obstacle, retried} result was dropped (the same failure
+        // M-5/F-1 fixed for collect_items and mining). The retry now gets
+        // only the REMAINING movement window (first-attempt wall time +
+        // retry delay subtracted), keeping the total inside the envelope,
+        // and is skipped when less than 2 s of window is left — too small
+        // to hold a meaningful pathfinding attempt plus the reply margin.
+        let started = Instant::now();
         let mut retried = false;
+        let mut last = self.goto_with_margin(target).await;
         loop {
-            match self.goto_with_margin(target).await {
+            match last {
                 GotoOutcome::TimedOut {
                     start,
                     current,
@@ -2134,10 +2148,30 @@ impl<B: BotActions> CommandExecutor<B> {
                     if !reached && !retried {
                         // First attempt stopped short (Ok-but-unreached or a
                         // pathfinder error). Give the world a beat and retry
-                        // once before declaring an obstacle.
-                        retried = true;
-                        tokio::time::sleep(SMART_MOVE_RETRY_DELAY).await;
-                        continue;
+                        // once — bounded by the REMAINING movement window so
+                        // the total never exceeds the command envelope. With
+                        // no budget left, skip the retry and report the first
+                        // attempt honestly (the `Completed` outcome proves
+                        // the first attempt finished inside its window, so
+                        // `started.elapsed()` is strictly below it).
+                        let window = Duration::from_secs(
+                            self.state.read_config().command_timeout_secs,
+                        )
+                        .saturating_sub(MOVEMENT_REPLY_MARGIN);
+                        let remaining = window
+                            .saturating_sub(started.elapsed())
+                            .saturating_sub(SMART_MOVE_RETRY_DELAY);
+                        if remaining >= 2 * MOVEMENT_REPLY_MARGIN {
+                            retried = true;
+                            tokio::time::sleep(SMART_MOVE_RETRY_DELAY).await;
+                            last = self
+                                .goto_with_margin_with_timeout(
+                                    target,
+                                    Some(remaining.as_secs()),
+                                )
+                                .await;
+                            continue;
+                        }
                     }
 
                     let reason = if reached { "reached" } else { "obstacle" };
@@ -5650,6 +5684,47 @@ mod tests {
         drop(sender);
         handle.await.expect("executor should finish");
         assert_eq!(log.goto_calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_smart_move_retry_skipped_when_budget_exhausted() {
+        // 2026-08-29 review: with command_timeout_secs=1 the movement window
+        // is 1s − 1s margin = 0, so after the first attempt fails there is
+        // no budget left for a meaningful retry. The old code retried with
+        // a full fresh window anyway, pushing the total past the command
+        // envelope until the channel answered a bare CommandTimeout and the
+        // structured result was dropped. Now the retry is skipped: the
+        // honest obstacle report comes back within the envelope and only
+        // ONE goto call is made.
+        let (executor, sender, state, log) = make_executor();
+        state.update_config(|cfg| cfg.command_timeout_secs = 1);
+        log.goto_failures_remaining.store(1, Ordering::SeqCst);
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(5, 64, 5);
+        let result = send_and_await(&sender, BotCommand::SmartMove(target)).await;
+        let br = result.expect("expected Ok(BotResult), not a channel CommandTimeout");
+        assert!(!br.success, "expected success == false: {br:?}");
+        let data = br.data.expect("data present");
+        assert_eq!(data.get("reached"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            data.get("retried"),
+            Some(&serde_json::json!(false)),
+            "no second attempt was affordable"
+        );
+        assert_eq!(
+            data.get("reason"),
+            Some(&serde_json::json!("obstacle")),
+            "first attempt failure reported honestly"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+        assert_eq!(
+            log.goto_calls.lock().unwrap().len(),
+            1,
+            "retry must be skipped when the movement window is exhausted"
+        );
     }
 
     #[tokio::test]
