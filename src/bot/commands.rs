@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use azalea::pathfinder::goals::BlockPosGoal;
 use azalea::prelude::*;
@@ -1217,6 +1217,21 @@ impl<B: BotActions> CommandExecutor<B> {
 
         // Server-side confirmation: poll the snapshot until a block appears
         // at `pos`. A timeout is an honest failure — never a fake success.
+        //
+        // The auto-approach above dispatches nothing, so a walk longer than
+        // the 3 s ACTIVITY_WINDOW lets the snapshot cadence relax to the
+        // 5 s idle interval — and the budget below (configured interval +
+        // 250 ms) would then poll a snapshot that only refreshes every 5 s,
+        // reporting an accepted placement as "did not appear". Re-stamp
+        // command activity when idle (same fix as `execute_mine_block`'s
+        // Step-10 verification) so the next tick (~50 ms) is on the fast
+        // cadence and the budget only has to cover one fast interval. The
+        // flow itself is not unit-tested (tokio paused-time cannot advance
+        // the std `Instant` stamps); the predicate is pinned by
+        // `test_snapshot_cadence_idle_tracks_activity` in state.rs.
+        if self.state.snapshot_cadence_idle(Instant::now()) {
+            self.state.mark_command_activity();
+        }
         let budget = Duration::from_millis(self.state.read_config().snapshot_interval_ms + 250);
         if wait_for_block_present(&self.state, pos, budget).await {
             return Ok(BotResult {
@@ -1377,6 +1392,18 @@ impl<B: BotActions> CommandExecutor<B> {
         if let Some(effect) = effect_pos
             && is_placement
         {
+            // The auto-approach above dispatches nothing, so a walk longer
+            // than the 3 s ACTIVITY_WINDOW lets the snapshot cadence relax
+            // to the 5 s idle interval — the verification budget below
+            // would then poll a 5 s-cadence snapshot and report an accepted
+            // interaction as "no effect observed". Re-stamp command
+            // activity when idle (same fix as `execute_mine_block`'s
+            // Step-10 verification) to put the updater back on the fast
+            // cadence. Predicate pinned by
+            // `test_snapshot_cadence_idle_tracks_activity` in state.rs.
+            if self.state.snapshot_cadence_idle(Instant::now()) {
+                self.state.mark_command_activity();
+            }
             let budget = Duration::from_millis(self.state.read_config().snapshot_interval_ms + 250);
             if wait_for_block_present(&self.state, effect, budget).await {
                 return Ok(BotResult {
