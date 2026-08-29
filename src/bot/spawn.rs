@@ -182,12 +182,16 @@ pub fn spawn_bot_connection(
 ///
 /// Ordering matters:
 /// 1. A cancelled shutdown token wins — the process is exiting.
-/// 2. A pending config restart is consumed next (the flag is taken so a
+/// 2. A live bot thread short-circuits to `WaitMore` (2026-08-30 review):
+///    its connect loop owns the config-restart flag (M-10) and the
+///    connecting/online flags are already held, so neither a flag
+///    consumption nor a second spawn may happen.
+/// 3. A pending config restart is consumed next (the flag is taken so a
 ///    second call in the same decision round cannot double-consume it).
-/// 3. Otherwise spawn a connection when the bot is idle (offline, not
+/// 4. Otherwise spawn a connection when the bot is idle (offline, not
 ///    connecting, and no explicit disconnect was requested — `disconnect_bot`
 ///    must not be undone by an automatic respawn).
-/// 4. Everything else is `WaitMore`.
+/// 5. Everything else is `WaitMore`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadlessAction {
     /// Spawn the bot connection (bot idle, no pending restart or shutdown).
@@ -205,6 +209,18 @@ pub enum HeadlessAction {
 pub fn headless_next_action(state: &SharedState) -> HeadlessAction {
     if state.shutdown_token().is_cancelled() {
         return HeadlessAction::Shutdown;
+    }
+    // 2026-08-30 review (P3): a thread can appear between the quiet-wait's
+    // `ThreadAppeared` step and this call (agent calls `connect_bot` while
+    // the supervisor loop is turning around) — re-check BEFORE consuming
+    // the restart flag. While a thread lives its connect loop owns the
+    // flag (M-10 single ownership); consuming it here silently kills an
+    // online `update_settings` restart and leaves the bot offline. A live
+    // thread also implies the connecting/online flags are held, so
+    // `WaitMore` routes the supervisor to the handle-polling wait without
+    // a second spawn.
+    if state.bot_thread_running() {
+        return HeadlessAction::WaitMore;
     }
     if state.take_config_restart() {
         state.clear_disconnect_request();
@@ -681,6 +697,49 @@ mod tests {
         let state = SharedState::new(AppConfig::default());
         state.set_online(true);
         assert_eq!(headless_next_action(&state), HeadlessAction::WaitMore);
+    }
+
+    /// 2026-08-30 review (P3): a thread appearing between the quiet-wait's
+    /// `ThreadAppeared` step and the next `headless_next_action` call must
+    /// NOT lose the config-restart flag to the supervisor — the fresh
+    /// thread's connect loop owns it (M-10 single ownership). The old code
+    /// consumed the flag unconditionally: the agent got
+    /// `reconnect_triggered: true` from `update_settings`, but the bot
+    /// stayed offline because the connect loop never saw the flag.
+    #[test]
+    fn test_next_action_thread_appeared_keeps_restart_flag() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let state = SharedState::new(AppConfig::default());
+
+        // A live, non-finished bot thread handle, stored the way
+        // `spawn_bot_connection` does.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !stop_clone.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        state.store_bot_thread_handle(handle);
+
+        // Agent changed connection settings while the (new) bot was online.
+        state.request_config_restart();
+
+        assert_eq!(
+            headless_next_action(&state),
+            HeadlessAction::WaitMore,
+            "a live thread short-circuits to WaitMore"
+        );
+        assert!(
+            state.take_config_restart(),
+            "restart flag must stay set for the connect loop (M-10)"
+        );
+
+        // Cleanup: stop the helper thread so the test process exits cleanly.
+        stop.store(true, Ordering::Relaxed);
+        let handle = state.take_bot_thread_handle().expect("handle stored");
+        let _ = join_with_timeout(handle, Duration::from_secs(2));
     }
 
     // ── M-10 regression: single ownership of the restart flag ───────────
