@@ -4,8 +4,8 @@
 //! randomly-generated inputs.
 
 use minecraft_mcp_rs::block_data::{
-    ItemStack, MATERIAL_PRIORITY, MATERIAL_TIER_SPEED, best_tool_for_block,
-    harvest_level_of, material_from_item_name,
+    ItemStack, MATERIAL_PRIORITY, MATERIAL_TIER_SPEED, best_tool_for_block, harvest_level_of,
+    material_from_item_name,
 };
 use minecraft_mcp_rs::command_validate::validate_coordinates;
 use minecraft_mcp_rs::compound_ops::find_standable_neighbor;

@@ -328,7 +328,10 @@ impl ReceiverLease {
     pub(crate) fn drain_stale(&mut self, reason: &str) -> usize {
         let mut drained = 0;
         while let Ok(wrapped) = self.receiver_mut().try_recv() {
-            let BotCommandWithResponder { command, respond_to } = wrapped;
+            let BotCommandWithResponder {
+                command,
+                respond_to,
+            } = wrapped;
             tracing::debug!(command = ?command, "discarding stale cross-session command");
             let _ = respond_to.send(Err(BotError::Offline(format!(
                 "{reason}; reconnect and retry"
@@ -1109,9 +1112,7 @@ mod tests {
         // the original sender reaches the new executor (drop(tx) below
         // would close a foreign channel instead).
         let mut lease = lease;
-        let probe = tokio::spawn(async move {
-            tx.send_command(BotCommand::Jump).await
-        });
+        let probe = tokio::spawn(async move { tx.send_command(BotCommand::Jump).await });
         let wrapped = lease
             .receiver_mut()
             .recv()

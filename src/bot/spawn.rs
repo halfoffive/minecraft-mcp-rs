@@ -814,10 +814,7 @@ mod tests {
     #[test]
     fn test_quiet_wait_step_no_thread_no_flag_keeps_waiting() {
         let state = SharedState::new(AppConfig::default());
-        assert_eq!(
-            quiet_wait_step(&state),
-            QuietWaitOutcome::KeepWaiting
-        );
+        assert_eq!(quiet_wait_step(&state), QuietWaitOutcome::KeepWaiting);
         assert!(
             !state.take_config_restart(),
             "KeepWaiting must not consume the restart flag"
@@ -838,7 +835,10 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let state = SharedState::new(AppConfig::default());
-        assert!(!state.bot_thread_running(), "no handle stored → not running");
+        assert!(
+            !state.bot_thread_running(),
+            "no handle stored → not running"
+        );
 
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = Arc::clone(&stop);
@@ -862,10 +862,7 @@ mod tests {
         // The take() above removed the handle, so store it back to probe
         // the finished state through the accessor.
         state.store_bot_thread_handle(handle);
-        assert!(
-            !state.bot_thread_running(),
-            "finished handle → not running"
-        );
+        assert!(!state.bot_thread_running(), "finished handle → not running");
         let _ = state.take_bot_thread_handle();
     }
 }

@@ -1115,8 +1115,8 @@ impl<B: BotActions> CommandExecutor<B> {
             // block is gone (BlockNotFound); outside that radius the world
             // was genuinely never observed that far (ChunkNotLoaded).
             let player = snapshot.self_player.position;
-            let retention = (self.state.read_config().chunk_scan_radius as i32)
-                .max(RETENTION_CHUNK_FLOOR);
+            let retention =
+                (self.state.read_config().chunk_scan_radius as i32).max(RETENTION_CHUNK_FLOOR);
             if block_within_chunk_radius(pos, (player.x >> 4, player.z >> 4), retention) {
                 return Err(BotError::BlockNotFound(pos));
             }
@@ -2192,10 +2192,9 @@ impl<B: BotActions> CommandExecutor<B> {
                         // attempt honestly (the `Completed` outcome proves
                         // the first attempt finished inside its window, so
                         // `started.elapsed()` is strictly below it).
-                        let window = Duration::from_secs(
-                            self.state.read_config().command_timeout_secs,
-                        )
-                        .saturating_sub(MOVEMENT_REPLY_MARGIN);
+                        let window =
+                            Duration::from_secs(self.state.read_config().command_timeout_secs)
+                                .saturating_sub(MOVEMENT_REPLY_MARGIN);
                         let remaining = window
                             .saturating_sub(started.elapsed())
                             .saturating_sub(SMART_MOVE_RETRY_DELAY);
@@ -2203,10 +2202,7 @@ impl<B: BotActions> CommandExecutor<B> {
                             retried = true;
                             tokio::time::sleep(SMART_MOVE_RETRY_DELAY).await;
                             last = self
-                                .goto_with_margin_with_timeout(
-                                    target,
-                                    Some(remaining.as_secs()),
-                                )
+                                .goto_with_margin_with_timeout(target, Some(remaining.as_secs()))
                                 .await;
                             continue;
                         }

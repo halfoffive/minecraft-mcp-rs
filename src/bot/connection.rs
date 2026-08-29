@@ -180,7 +180,12 @@ impl ConnectionManager {
             // clears them all to None on disconnect — without this, a
             // reconnect would fall back to a throwaway SharedState and the
             // is_online() flag would never flip on the real state.
-            Self::inject_dependencies(&self.state, &command_receiver, egui_ctx.as_ref(), &command_sender);
+            Self::inject_dependencies(
+                &self.state,
+                &command_receiver,
+                egui_ctx.as_ref(),
+                &command_sender,
+            );
 
             let account = Account::offline(&ai_username);
             let address = format!("{mc_address}:{mc_port}");
