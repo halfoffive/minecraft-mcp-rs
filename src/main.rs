@@ -260,9 +260,10 @@ fn main() {
             // are Latin-only).  Falls back to the default with a warning
             // if no CJK font is installed on the host.
             minecraft_mcp_rs::ui::fonts::install_system_cjk_fonts(&cc.egui_ctx);
-            // Re-sync the i18n language from the persisted config in case
-            // anything changed between the early `set()` call above and
-            // the egui closure firing.
+            // Re-sync the i18n language from the in-memory config (env
+            // vars are the only persistence — S-8) in case anything
+            // changed between the early `set()` call above and the egui
+            // closure firing.
             let lang = state_for_egui.read_config().language;
             minecraft_mcp_rs::i18n::set(lang);
             Ok(Box::new(MinecraftApp::new(

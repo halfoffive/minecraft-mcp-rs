@@ -109,12 +109,12 @@ pub fn find_tool_in_inventory(
 /// 6. If found in main inventory, marks `needs_move_to_hotbar = true`.
 /// 7. If no tool is found, returns [`ToolType::Hand`].
 pub fn select_tool_for_block(block_type: &str, inventory: &[Option<ItemStack>]) -> ToolSelection {
-    let required_tool = BLOCK_TO_TOOL_TYPE
+    let primary_tool = BLOCK_TO_TOOL_TYPE
         .get(block_type)
         .copied()
         .unwrap_or(ToolType::Hand);
 
-    if required_tool == ToolType::Hand {
+    if primary_tool == ToolType::Hand {
         return ToolSelection::hand();
     }
 
@@ -122,47 +122,59 @@ pub fn select_tool_for_block(block_type: &str, inventory: &[Option<ItemStack>]) 
     // rejected. None for unknown blocks (no entry) means "no harvest check".
     let required_harvest_level = crate::block_data::HARVEST_LEVEL.get(block_type).copied();
 
-    // Search hotbar first (slots 0-8)
-    let hotbar_slice = &inventory[..inventory.len().min(9)];
-    if let Some((material, slot)) =
-        find_tool_in_inventory(&required_tool, hotbar_slice, required_harvest_level)
-    {
-        let item_id = hotbar_slice
-            .get(slot as usize)
-            .and_then(|opt| opt.as_ref())
-            .map(|stack| stack.item_id.clone());
-        return ToolSelection {
-            tool_type: required_tool,
-            material: Some(material),
-            hotbar_slot: Some(slot),
-            needs_move_to_hotbar: false,
-            required_harvest_level,
-            item_id,
-        };
-    }
-
-    // Search main inventory (slots 9-35).
-    // A tool found here can't be switched to directly — SwitchHotbarSlot only
-    // accepts hotbar indices (0-8) — so we surface the tool type/material but
-    // leave `hotbar_slot` as None, and mark `needs_move_to_hotbar` so the
-    // compound-op executor issues a `MoveItemToHotbar` before mining (H-1).
-    if inventory.len() > 9 {
-        let main_slice = &inventory[9..inventory.len().min(36)];
+    // Search hotbar first (slots 0-8), then the main inventory (slots 9-35).
+    // A tool found in the main inventory can't be switched to directly —
+    // SwitchHotbarSlot only accepts hotbar indices (0-8) — so we surface the
+    // tool type/material but leave `hotbar_slot` as None, and mark
+    // `needs_move_to_hotbar` so the compound-op executor issues a
+    // `MoveItemToHotbar` before mining (H-1).
+    //
+    // Candidates are tried in priority order: the block's primary tool,
+    // then an alternative tool when one exists (2026-08-30 review — cobweb
+    // accepts shears alongside the sword primary, since vanilla gives both
+    // the same break speed; a shears-only bot must not be refused).
+    let candidates = std::iter::once(primary_tool).chain(
+        crate::block_data::ALT_TOOL_FOR_BLOCK
+            .get(block_type)
+            .copied(),
+    );
+    for required_tool in candidates {
+        let hotbar_slice = &inventory[..inventory.len().min(9)];
         if let Some((material, slot)) =
-            find_tool_in_inventory(&required_tool, main_slice, required_harvest_level)
+            find_tool_in_inventory(&required_tool, hotbar_slice, required_harvest_level)
         {
-            let item_id = main_slice
+            let item_id = hotbar_slice
                 .get(slot as usize)
                 .and_then(|opt| opt.as_ref())
                 .map(|stack| stack.item_id.clone());
             return ToolSelection {
                 tool_type: required_tool,
                 material: Some(material),
-                hotbar_slot: None,
-                needs_move_to_hotbar: true,
+                hotbar_slot: Some(slot),
+                needs_move_to_hotbar: false,
                 required_harvest_level,
                 item_id,
             };
+        }
+
+        if inventory.len() > 9 {
+            let main_slice = &inventory[9..inventory.len().min(36)];
+            if let Some((material, slot)) =
+                find_tool_in_inventory(&required_tool, main_slice, required_harvest_level)
+            {
+                let item_id = main_slice
+                    .get(slot as usize)
+                    .and_then(|opt| opt.as_ref())
+                    .map(|stack| stack.item_id.clone());
+                return ToolSelection {
+                    tool_type: required_tool,
+                    material: Some(material),
+                    hotbar_slot: None,
+                    needs_move_to_hotbar: true,
+                    required_harvest_level,
+                    item_id,
+                };
+            }
         }
     }
 
@@ -214,6 +226,41 @@ mod tests {
     use super::*;
     use crate::block_data::ItemStack;
     use crate::types::{MaterialTier, ToolType};
+
+    #[test]
+    fn test_select_tool_for_block_uses_alt_when_primary_missing() {
+        // 2026-08-30 review: cobweb's primary is Sword, but a shears-only
+        // inventory must select the shears (same vanilla break speed)
+        // instead of falling through to Hand and being refused.
+        let inventory = vec![Some(ItemStack {
+            item_id: "shears".into(),
+            count: 1,
+        })];
+        let selection = select_tool_for_block("cobweb", &inventory);
+        assert_eq!(selection.tool_type, ToolType::Shears);
+        assert_eq!(selection.hotbar_slot, Some(0));
+        assert!(!selection.needs_move_to_hotbar);
+
+        // Primary still wins when both are present.
+        let both = vec![
+            Some(ItemStack {
+                item_id: "shears".into(),
+                count: 1,
+            }),
+            Some(ItemStack {
+                item_id: "iron_sword".into(),
+                count: 1,
+            }),
+        ];
+        let selection = select_tool_for_block("cobweb", &both);
+        assert_eq!(selection.tool_type, ToolType::Sword);
+        assert_eq!(selection.hotbar_slot, Some(1));
+
+        // Neither present → hand fallback (the caller decides refusal).
+        let empty = vec![None, None];
+        let selection = select_tool_for_block("cobweb", &empty);
+        assert_eq!(selection.tool_type, ToolType::Hand);
+    }
 
     // ── ToolSelection struct ──────────────────────────────────
 

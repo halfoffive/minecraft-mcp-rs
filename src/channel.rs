@@ -160,26 +160,31 @@ impl BotCommandSender {
 
         trace!(command = ?cmd, "sending bot command");
 
-        if self.tx.send(wrapped).await.is_err() {
-            error!("bot command channel closed — receiver dropped");
-            return Err(BotError::Offline("bot command channel closed".into()));
-        }
-
-        // The caller-supplied envelope is used verbatim (L-18-prep); the
-        // `Duration` (not a raw u64) supports sub-second timeouts like
-        // 200ms without truncation.
+        // The envelope covers the SEND leg too (2026-08-30 review): with a
+        // bounded queue and a wedged (or absent) receiver, `tx.send().await`
+        // blocks on back-pressure indefinitely OUTSIDE the timeout — the
+        // caller hung past its envelope with no CommandTimeout ever firing.
+        // The exchange future wraps send → response so the whole round-trip
+        // is bounded. On a send-leg timeout the command was never queued
+        // (unlike a recv-leg timeout, which is not cancellation — see the
+        // F-10 note on `send_command`).
         let timeout_secs = timeout_dur.as_secs();
-        match timeout(timeout_dur, rx).await {
+        let exchange = async {
+            if self.tx.send(wrapped).await.is_err() {
+                error!("bot command channel closed — receiver dropped");
+                return Err(BotError::Offline("bot command channel closed".into()));
+            }
+            rx.await.map_err(|_| {
+                warn!(command = ?cmd, "bot command responder dropped without reply");
+                BotError::Offline("bot command responder dropped without reply".into())
+            })
+        };
+        match timeout(timeout_dur, exchange).await {
             Ok(Ok(result)) => {
                 debug!(command = ?cmd, ?result, "bot command completed");
                 result
             }
-            Ok(Err(_)) => {
-                warn!(command = ?cmd, "bot command responder dropped without reply");
-                Err(BotError::Offline(
-                    "bot command responder dropped without reply".into(),
-                ))
-            }
+            Ok(Err(err)) => Err(err),
             Err(_) => {
                 error!(command = ?cmd, timeout_secs, "bot command timed out");
                 Err(BotError::CommandTimeout {
@@ -494,6 +499,59 @@ mod tests {
         }
 
         responder.await.expect("responder task should complete");
+    }
+
+    /// 2026-08-30 review: the timeout envelope must cover the SEND leg. A
+    /// bounded queue with NO receiver polling blocks `tx.send().await` on
+    /// back-pressure — the old code placed the send OUTSIDE the
+    /// `tokio::time::timeout`, so the caller hung indefinitely instead of
+    /// getting CommandTimeout. Fill a capacity-1 queue (nothing ever
+    /// receives) and watch a 200 ms envelope fire.
+    #[tokio::test]
+    async fn test_send_leg_is_inside_the_timeout_envelope() {
+        let state = make_state();
+        let (sender, mut receiver) = create_command_channel(1, Arc::clone(&state));
+
+        // The receiver stays owned here but is NEVER polled: the queue
+        // parks full. A cloned sender (spawned tasks need 'static) fills
+        // the queue's single slot with a long-envelope send.
+        let filler_sender = sender.clone();
+        let filler = tokio::spawn(async move {
+            filler_sender
+                .send_command_with_timeout(BotCommand::Jump, Duration::from_secs(30))
+                .await
+        });
+
+        // Give the filler a moment to occupy the queue slot, then the next
+        // send must block on back-pressure and hit its envelope.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let started = std::time::Instant::now();
+        let result = sender
+            .send_command_with_timeout(BotCommand::Jump, Duration::from_millis(200))
+            .await;
+        let elapsed = started.elapsed();
+
+        match result {
+            Err(BotError::CommandTimeout { timeout_secs, .. }) => {
+                assert_eq!(timeout_secs, 0, "200 ms envelope rounds to 0 secs");
+            }
+            other => panic!("expected CommandTimeout from a full queue, got: {other:?}"),
+        }
+        assert!(
+            elapsed >= Duration::from_millis(180),
+            "timeout must not fire early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the send leg must be bounded by the envelope, not hang: {elapsed:?}"
+        );
+
+        // Unblock the filler: drain the parked command and drop it
+        // IMMEDIATELY (its responder dies with it, so the filler observes
+        // Offline instead of hanging on its own 30 s envelope).
+        drop(receiver.recv().await.expect("parked command"));
+        let _ = filler.await.expect("filler task should complete");
     }
 
     // ── CommandTimeout — responder alive but slow ─────────────

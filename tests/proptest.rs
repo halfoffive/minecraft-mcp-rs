@@ -424,12 +424,64 @@ proptest! {
 // Property: material_from_item_name roundtrip
 // ═══════════════════════════════════════════════════════════════
 
+/// Every item name `material_from_item_name` accepts: the single-word
+/// `shears` plus material×tool pairs (the parser accepts only the
+/// "golden_" prefix for Gold — vanilla item naming).
+///
+/// 2026-08-30 review: the round-trip property used to generate from
+/// `"[a-z_]{1,30}"`, which practically never produces any of these exact
+/// names (31 accepted strings out of 27^30 candidates) — the round-trip
+/// assertion inside `if let Some(..)` never executed and the property was
+/// a tautology, exactly like the F-16 one.
+fn accepted_item_names() -> Vec<String> {
+    let materials = ["wooden", "stone", "iron", "golden", "diamond", "netherite"];
+    let tools = ["pickaxe", "axe", "shovel", "sword", "hoe"];
+    let mut names: Vec<String> = materials
+        .iter()
+        .flat_map(|&m| tools.iter().map(move |&t| format!("{m}_{t}")))
+        .collect();
+    names.push("shears".to_string());
+    names
+}
+
+/// The round-trip oracle shared by the property and the exhaustive test:
+/// the name a parsed `(tool, material)` pair must reconstruct.
+fn expected_name(tool: ToolType, material: MaterialTier) -> String {
+    let tool_part = format!("{tool:?}").to_lowercase();
+    // The parser accepts vanilla item prefixes, which differ from the
+    // Debug-derived names for TWO tiers: "golden" (not "gold") and
+    // "wooden" (not "wood"). The "golden_" half was fixed in the
+    // 2026-08-29 review; "wooden_" only surfaced once the 2026-08-30
+    // round made the round-trip assertion actually run (the old
+    // free-form generator never hit any accepted name).
+    let material_part = match material {
+        MaterialTier::Gold => "golden".to_string(),
+        MaterialTier::Wood => "wooden".to_string(),
+        other => format!("{other:?}").to_lowercase(),
+    };
+    if tool == ToolType::Shears {
+        "shears".to_string()
+    } else {
+        format!("{material_part}_{tool_part}")
+    }
+}
+
+/// 3:1 bias toward real names so the round-trip branch actually runs
+/// (the old free-form-only generator made it dead code).
+fn any_item_name_strategy() -> impl Strategy<Value = String> {
+    prop_oneof![
+        3 => prop::sample::select(accepted_item_names()),
+        1 => "[a-z_]{1,30}",
+    ]
+}
+
 proptest! {
     /// Property: For any item name, `material_from_item_name` returns
-    /// `None` or a valid `(ToolType, MaterialTier)` pair.
+    /// `None` or a valid `(ToolType, MaterialTier)` pair whose round-trip
+    /// reconstruction equals the input.
     #[test]
     fn prop_material_from_item_name_valid(
-        name in "[a-z_]{1,30}",
+        name in any_item_name_strategy(),
     ) {
         let result = material_from_item_name(&name);
 
@@ -438,24 +490,43 @@ proptest! {
             // IS `(ToolType, MaterialTier)`). Assert the real contract: a
             // parsed item name must be built from the parser's accepted
             // material/tool name parts.
-            let tool_part = format!("{tool:?}").to_lowercase();
-            // 2026-08-29 review: the parser only accepts the "golden_" prefix
-            // for Gold (vanilla item naming), not "gold_" — the Debug-derived
-            // "gold" made the oracle wrong for every gold_* expectation.
-            let material_part = match material {
-                MaterialTier::Gold => "golden".to_string(),
-                other => format!("{other:?}").to_lowercase(),
-            };
-            let expected = if tool == ToolType::Shears {
-                "shears".to_string()
-            } else {
-                format!("{material_part}_{tool_part}")
-            };
+            let expected = expected_name(tool, material);
             let roundtrip_msg = format!(
                 "parsed ({tool:?}, {material:?}) must round-trip to the input name"
             );
             prop_assert_eq!(name, expected, "{}", roundtrip_msg);
         }
+    }
+}
+
+/// Deterministic pin (2026-08-30 review): EVERY accepted name round-trips
+/// exactly and near-misses stay rejected. Unlike the property above this
+/// cannot silently stop running — the property's assertion only fires when
+/// the generator happens to produce an accepted name.
+#[test]
+fn all_accepted_item_names_round_trip() {
+    for name in accepted_item_names() {
+        let (tool, material) = material_from_item_name(&name)
+            .unwrap_or_else(|| panic!("{name} must be accepted by material_from_item_name"));
+        let expected = expected_name(tool, material);
+        assert_eq!(name, expected, "{name} must round-trip");
+    }
+
+    // Near-misses must stay rejected (wrong prefix order, wrong Gold
+    // spelling, plural/extra parts, empty).
+    for reject in [
+        "gold_pickaxe",
+        "pickaxe_iron",
+        "shear",
+        "shears_sword",
+        "iron_pickaxes",
+        "iron_pickaxe_x",
+        "",
+    ] {
+        assert!(
+            material_from_item_name(reject).is_none(),
+            "{reject:?} must be rejected"
+        );
     }
 }
 

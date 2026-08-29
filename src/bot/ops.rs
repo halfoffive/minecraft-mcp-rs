@@ -621,7 +621,17 @@ impl CompoundOpExecutor {
                     // the updater back on the fast cadence, so the next tick
                     // (~50 ms) carries the broken state and the budget only
                     // has to cover one fast interval.
-                    if executor.state.snapshot_cadence_idle(Instant::now()) {
+                    //
+                    // 2026-08-30 review P2: the decision is
+                    // `age + budget >= ACTIVITY_WINDOW`, not "already idle" —
+                    // a 2.5 s hand-mine ends its sleep INSIDE the window, but
+                    // the budget would then run it out mid-poll. Predicate
+                    // pinned by `test_verification_needs_activity_restamp_`
+                    // `covers_near_window` in state.rs.
+                    if executor
+                        .state
+                        .verification_needs_activity_restamp(Instant::now(), verification_budget)
+                    {
                         executor.state.mark_command_activity();
                     }
 
@@ -1197,7 +1207,15 @@ mod tests {
             });
         }
 
-        fn drop_item(&self, _slot: u8, _count: u8) {}
+        fn drop_item(&self, _slot: u8, _count: u8) -> Result<(), BotError> {
+            Ok(())
+        }
+
+        fn selected_hotbar_slot(&self) -> u8 {
+            // Mirror the snapshot's held slot so ops-level flows that read
+            // the live slot stay consistent with the simulated world.
+            self.state.read_snapshot().self_player.held_item_slot
+        }
 
         fn start_use_item(&self) {}
 
@@ -1232,13 +1250,17 @@ mod tests {
                 }
             };
             let best = best_tool_for_block(&block_type);
+            // 2026-08-30 review: cobweb-class blocks accept the alternative
+            // tool (shears alongside the sword primary) at the same vanilla
+            // speed, so the mock must let them mine too.
+            let alt = crate::block_data::alt_tool_for_block(&block_type);
             let held_parses_to_best = {
                 let held_slot = self.state.read_snapshot().self_player.held_item_slot;
                 let inv = self.mock.inventory.lock().unwrap();
                 inv.get(held_slot as usize)
                     .and_then(|opt| opt.as_ref())
                     .and_then(|stack| material_from_item_name(&stack.item_id))
-                    .map(|(t, _)| t == best)
+                    .map(|(t, _)| t == best || Some(t) == alt)
                     .unwrap_or(false)
             };
             if best != ToolType::Hand && !held_parses_to_best {
@@ -2403,7 +2425,7 @@ mod tests {
         // revert). If it ever drops below 8, an arm was reverted to `?`.
         assert!(
             occurrences >= 8,
-            "expected at least 7 occurrences of the dispatch-err \
+            "expected at least 8 occurrences of the dispatch-err \
              `state.advance(Failed(e))` pattern (one per dispatch arm \
              across `execute_mine_block`, `execute_place_block`, and \
              `execute_open_container`), found {occurrences}. A future \

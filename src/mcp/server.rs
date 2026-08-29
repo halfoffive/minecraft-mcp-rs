@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use axum::{
     Router,
     extract::{Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{Next, from_fn_with_state},
     response::{IntoResponse, Response},
 };
@@ -762,8 +762,12 @@ async fn headless_idle_watchdog(state: Arc<SharedState>, started_at: Instant) {
 
 /// Extract the Bearer token from an `Authorization` header value.
 ///
-/// Returns `Some(token)` only when the header starts with `Bearer ` (case-sensitive
-/// per RFC 6750). The returned token is trimmed of surrounding whitespace.
+/// Returns `Some(token)` only when the header starts with the exact spelling
+/// `Bearer `. Case sensitivity is a deliberate strictness choice here, NOT an
+/// RFC requirement: RFC 6750 §2.1 transmits the scheme as `Bearer`, but
+/// HTTP auth-scheme matching itself is case-insensitive (RFC 7235 §2.1), so
+/// a client sending `bearer` is technically RFC-valid — it just gets a 401
+/// from us. The returned token is trimmed of surrounding whitespace.
 fn extract_bearer_token(header: &str) -> Option<&str> {
     header.strip_prefix("Bearer ").map(str::trim)
 }
@@ -809,8 +813,13 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 /// Reads the expected token from `state.config().mcp_token` on every request so
 /// configuration changes take effect immediately.
 fn is_bearer_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
+    // Fail-closed for an empty configured token (2026-08-30 review): the
+    // middleware's `is_request_authorized` already rejects that
+    // misconfiguration, but this helper's own contract must not be
+    // fail-open — a future caller bypassing the middleware would otherwise
+    // authenticate every request with an empty expected token.
     if expected_token.is_empty() {
-        return true;
+        return false;
     }
     headers
         .get("Authorization")
@@ -864,7 +873,13 @@ async fn bearer_auth_middleware(
     if authorized {
         next.run(request).await
     } else {
-        (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+        // RFC 6750 section 3: a 401 for a protected Bearer resource SHOULD
+        // carry the WWW-Authenticate challenge so clients know the scheme.
+        let mut response = (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        response
     }
 }
 
@@ -1255,6 +1270,16 @@ mod tests {
             .await
             .expect("router call");
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        // RFC 6750 section 3 (2026-08-30 review): the 401 must carry the
+        // Bearer challenge so clients learn the expected scheme.
+        assert_eq!(
+            unauthorized
+                .headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer"),
+            "401 must carry WWW-Authenticate: Bearer"
+        );
         let bytes = axum::body::to_bytes(unauthorized.into_body(), 1024)
             .await
             .expect("body readable");
