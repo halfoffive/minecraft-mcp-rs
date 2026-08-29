@@ -423,10 +423,14 @@ impl BotActions for RealBotClient {
         // azalea 0.15.1: entity_id_by_minecraft_id was renamed to
         // ecs_entity_by_minecraft_entity and takes a MinecraftEntityId.
         let eid = clamp_to_i32(entity_id);
+        // EntityNotFound (-32002 RESOURCE_NOT_FOUND), not Internal: an ECS
+        // lookup miss is "the entity is gone", which MCP clients branch on
+        // (2026-08-30 review — mirrors the executor-layer EntityNotFound
+        // mapping the F-34 round established).
         let entity = self
             .client
             .ecs_entity_by_minecraft_entity(azalea::world::MinecraftEntityId(eid))
-            .ok_or_else(|| BotError::Internal(format!("entity with id {} not found", entity_id)))?;
+            .ok_or(BotError::EntityNotFound(entity_id))?;
         self.client.attack(entity);
         Ok(())
     }
@@ -1683,6 +1687,18 @@ impl<B: BotActions> CommandExecutor<B> {
                 ),
                 data: Some(serde_json::json!({"verified": false, "removed": 0})),
             })
+        } else if removed > 0 {
+            // 2026-08-30 review: a PARTIAL drop (e.g. 3 of 5 thrown) used to
+            // fall into the "server rejected the click" branch below, whose
+            // "did not change" wording contradicted the `removed` data. Some
+            // items did leave the slot — report exactly how many.
+            Ok(BotResult {
+                success: false,
+                message: format!(
+                    "Partially dropped from slot {slot}: {removed} of {count} item(s) left the slot; the rest may still be there (server applied only some of the throw clicks)"
+                ),
+                data: Some(serde_json::json!({"verified": false, "removed": removed})),
+            })
         } else {
             // The server rejected the click or the slot count did not drop.
             Ok(BotResult {
@@ -1877,6 +1893,15 @@ impl<B: BotActions> CommandExecutor<B> {
 
     fn handle_take_from_container(&self, slot: u8, count: u8) -> Result<BotResult, BotError> {
         trace!(slot, count, "TakeFromContainer");
+        // 2026-08-30 review: the container-open check must come FIRST. The
+        // old order probed the live inventory before it — `InventoryFull` is
+        // computed from the player-inventory slots, but with NO container
+        // open it fired (misleadingly) even though the real problem was the
+        // missing container.
+        let container_open = self.state.has_container_open();
+        if !container_open {
+            return Err(BotError::ContainerNotOpen);
+        }
         // F6-3: fail fast if the player inventory has no free slots. This
         // prevents shift-clicking a container stack that would be dropped
         // or lost. The check reads the inventory LIVE from the currently
@@ -3007,7 +3032,6 @@ mod tests {
         /// Value returned by `player_inventory_occupied_slots` (F6-3).
         /// Default 0 (inventory has free slots).
         player_inventory_occupied: AtomicUsize,
-        position: Mutex<BlockPos>,
         /// Precise position reported by `BotActions::position`. `None`
         /// (default) mirrors a client whose position component is missing,
         /// so handlers fall back to the snapshot — existing tests keep their
@@ -3050,7 +3074,6 @@ mod tests {
                 inventory_calls: AtomicUsize::new(0),
                 inventory: Mutex::new(Vec::new()),
                 player_inventory_occupied: AtomicUsize::new(0),
-                position: Mutex::new(BlockPos::new(0, 64, 0)),
                 live_position: Mutex::new(None),
                 stop_pathfinding_calls: AtomicUsize::new(0),
                 swap_hotbar_calls: Mutex::new(Vec::new()),
@@ -3133,7 +3156,6 @@ mod tests {
                 });
             }
             if self.log.goto_succeeds.load(Ordering::SeqCst) {
-                *self.log.position.lock().unwrap() = *pos;
                 if self.log.goto_updates_snapshot.load(Ordering::SeqCst)
                     && let Some(state) = self.log.snapshot_for_goto.lock().unwrap().clone()
                 {
@@ -4198,6 +4220,61 @@ mod tests {
 
         drop(sender);
         handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_drop_item_partial_drop_reports_honestly() {
+        // 2026-08-30 review: a partial drop (3 of 5 requested left the slot)
+        // used to fall into the "server rejected the click" branch whose
+        // "did not change" wording contradicted the removed data. The mock
+        // drop removes only what the stack holds, so a 3-stack with a
+        // 5-request produces exactly that partial outcome.
+        let (executor, sender, _state, log) = make_executor();
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            inv.resize(36, None);
+            inv[0] = Some(ItemStack {
+                item_id: "dirt".into(),
+                count: 3,
+            });
+        }
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::DropItem(0, 5)).await;
+        let br = result.expect("partial drop returns a result, not an error");
+        assert!(!br.success, "a partial drop must not claim success");
+        assert!(
+            br.message.contains("Partially dropped"),
+            "message must say 'Partially dropped': {}",
+            br.message
+        );
+        assert!(
+            !br.message.contains("rejected"),
+            "message must not claim a rejection: {}",
+            br.message
+        );
+        let data = br.data.expect("partial drop must carry data");
+        assert_eq!(data["removed"], 3);
+        assert_eq!(data["verified"], false);
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_take_from_container_without_container_reports_not_open() {
+        // 2026-08-30 review: the container-open check must precede the
+        // inventory-full probe. With NO container open (and the player
+        // inventory artificially full), the old order returned the
+        // misleading InventoryFull instead of ContainerNotOpen.
+        let (executor, _sender, _state, log) = make_executor();
+        log.player_inventory_occupied.store(36, Ordering::SeqCst);
+
+        let result = executor.handle_take_from_container(5, 1);
+        assert!(
+            matches!(result, Err(BotError::ContainerNotOpen)),
+            "no container open must report ContainerNotOpen, got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -5556,12 +5633,21 @@ mod tests {
         // F6-3: with all 36 player-inventory slots occupied (read live
         // from the open menu), the take must fail fast with InventoryFull
         // instead of shift-clicking a stack that would be dropped.
+        //
+        // 2026-08-30 review: the container-open check now PRECEDES the
+        // inventory-full probe — an InventoryFull with no container open
+        // was misleading. In this unit-test environment no container can
+        // be open (a real ContainerHandle cannot be fabricated), so the
+        // handler honestly reports ContainerNotOpen; the InventoryFull
+        // branch itself is only reachable with a real open container.
+        // test_take_from_container_without_container_reports_not_open pins
+        // the ordering explicitly.
         let (executor, sender, _state, log) = make_executor();
         log.player_inventory_occupied.store(36, Ordering::SeqCst);
         let handle = spawn_executor(executor);
 
         let result = send_and_await(&sender, BotCommand::TakeFromContainer(3, 10)).await;
-        assert!(matches!(result, Err(BotError::InventoryFull)));
+        assert!(matches!(result, Err(BotError::ContainerNotOpen)));
 
         drop(sender);
         handle.await.expect("executor should finish");
