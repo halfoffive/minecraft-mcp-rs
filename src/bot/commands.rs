@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use azalea::pathfinder::goals::BlockPosGoal;
 use azalea::prelude::*;
@@ -15,6 +15,7 @@ use tracing::{debug, trace, warn};
 
 use crate::block_data::ItemStack;
 use crate::bot::ops::{CompoundOpExecutor, wait_for_block_present};
+use crate::bot::snapshot_updater::{RETENTION_CHUNK_FLOOR, block_within_chunk_radius};
 use crate::channel::{
     BotCommandReceiver, BotCommandSender, BotCommandWithResponder, ReceiverLease,
 };
@@ -690,6 +691,16 @@ impl<B: BotActions> CommandExecutor<B> {
     pub(crate) async fn run_with_lease(&mut self, mut lease: ReceiverLease) {
         trace!("command executor loop started (leased receiver)");
 
+        // 2026-08-29 review: commands buffered while no executor held the
+        // receiver belong to a PREVIOUS session (or to the offline window);
+        // executing them here would leak session A's effects into session B
+        // with every responder already gone. Drain-and-reject up front so
+        // each stale sender gets an immediate honest Offline error.
+        let drained = lease.drain_stale("stale command from a previous session");
+        if drained > 0 {
+            warn!("drained {drained} stale cross-session command(s) at executor start");
+        }
+
         loop {
             let wrapped = lease.receiver_mut().recv().await;
             match wrapped {
@@ -1094,6 +1105,21 @@ impl<B: BotActions> CommandExecutor<B> {
         // data — anything not in the index is genuinely unknown.
         let snapshot = self.state.read_snapshot();
         if !snapshot.block_index.contains_key(&pos) {
+            // Production snapshots filter air entries (L-4), so absence is
+            // ambiguous: the block was already mined (by us or someone
+            // else), or its chunk was never scanned / was pruned.
+            // Disambiguate with the retention bound (2026-08-29 review —
+            // both cases used to report the misleading ChunkNotLoaded):
+            // within max(chunk_scan_radius, 8) chunks of the player the
+            // snapshot is expected to see the block, so absence means the
+            // block is gone (BlockNotFound); outside that radius the world
+            // was genuinely never observed that far (ChunkNotLoaded).
+            let player = snapshot.self_player.position;
+            let retention =
+                (self.state.read_config().chunk_scan_radius as i32).max(RETENTION_CHUNK_FLOOR);
+            if block_within_chunk_radius(pos, (player.x >> 4, player.z >> 4), retention) {
+                return Err(BotError::BlockNotFound(pos));
+            }
             return Err(BotError::ChunkNotLoaded(pos));
         }
         self.bot.mine_block(&pos);
@@ -1217,6 +1243,21 @@ impl<B: BotActions> CommandExecutor<B> {
 
         // Server-side confirmation: poll the snapshot until a block appears
         // at `pos`. A timeout is an honest failure — never a fake success.
+        //
+        // The auto-approach above dispatches nothing, so a walk longer than
+        // the 3 s ACTIVITY_WINDOW lets the snapshot cadence relax to the
+        // 5 s idle interval — and the budget below (configured interval +
+        // 250 ms) would then poll a snapshot that only refreshes every 5 s,
+        // reporting an accepted placement as "did not appear". Re-stamp
+        // command activity when idle (same fix as `execute_mine_block`'s
+        // Step-10 verification) so the next tick (~50 ms) is on the fast
+        // cadence and the budget only has to cover one fast interval. The
+        // flow itself is not unit-tested (tokio paused-time cannot advance
+        // the std `Instant` stamps); the predicate is pinned by
+        // `test_snapshot_cadence_idle_tracks_activity` in state.rs.
+        if self.state.snapshot_cadence_idle(Instant::now()) {
+            self.state.mark_command_activity();
+        }
         let budget = Duration::from_millis(self.state.read_config().snapshot_interval_ms + 250);
         if wait_for_block_present(&self.state, pos, budget).await {
             return Ok(BotResult {
@@ -1377,6 +1418,18 @@ impl<B: BotActions> CommandExecutor<B> {
         if let Some(effect) = effect_pos
             && is_placement
         {
+            // The auto-approach above dispatches nothing, so a walk longer
+            // than the 3 s ACTIVITY_WINDOW lets the snapshot cadence relax
+            // to the 5 s idle interval — the verification budget below
+            // would then poll a 5 s-cadence snapshot and report an accepted
+            // interaction as "no effect observed". Re-stamp command
+            // activity when idle (same fix as `execute_mine_block`'s
+            // Step-10 verification) to put the updater back on the fast
+            // cadence. Predicate pinned by
+            // `test_snapshot_cadence_idle_tracks_activity` in state.rs.
+            if self.state.snapshot_cadence_idle(Instant::now()) {
+                self.state.mark_command_activity();
+            }
             let budget = Duration::from_millis(self.state.read_config().snapshot_interval_ms + 250);
             if wait_for_block_present(&self.state, effect, budget).await {
                 return Ok(BotResult {
@@ -1524,11 +1577,15 @@ impl<B: BotActions> CommandExecutor<B> {
         // Report honestly instead of faking success if the read ever comes
         // back empty.
         if after.is_empty() && !before.is_empty() {
+            // 2026-08-29 review: honest failure. The stack left the slot but
+            // a container window is open — the click may have been swallowed
+            // by the container menu (shift-click moved it INTO the container)
+            // instead of throwing it on the ground. Claiming "Dropped N
+            // item(s)" with `success: true` contradicted `verified: false`.
             return Ok(BotResult {
-                success: true,
+                success: false,
                 message: format!(
-                    "Dropped {} item(s) from slot {} (container window open; drop may not apply until the container is closed)",
-                    count, slot
+                    "Slot {slot} emptied while a container window is open — the stack may have been moved into the container instead of dropped; close the container and retry"
                 ),
                 data: Some(serde_json::json!({"verified": false, "container_window_open": true})),
             });
@@ -1773,7 +1830,11 @@ impl<B: BotActions> CommandExecutor<B> {
                 data: None,
             })
         } else {
-            Err(BotError::Internal("no container is currently open".into()))
+            // Dedicated runtime-state variant (-32010): the parameters were
+            // fine, the state is wrong — MCP clients branch on it (L-9).
+            // This executor-side fallback is reachable when the container
+            // closes between the MCP layer's pre-check and this dispatch.
+            Err(BotError::ContainerNotOpen)
         }
     }
 
@@ -1800,7 +1861,11 @@ impl<B: BotActions> CommandExecutor<B> {
                 data: None,
             })
         } else {
-            Err(BotError::Internal("no container is currently open".into()))
+            // Dedicated runtime-state variant (-32010): the parameters were
+            // fine, the state is wrong — MCP clients branch on it (L-9).
+            // This executor-side fallback is reachable when the container
+            // closes between the MCP layer's pre-check and this dispatch.
+            Err(BotError::ContainerNotOpen)
         }
     }
 
@@ -2065,9 +2130,23 @@ impl<B: BotActions> CommandExecutor<B> {
         // attempt. Retry exactly once before declaring an obstacle; a
         // TimedOut already spent the full movement window, so it is never
         // retried (retrying would double the latency for no benefit).
+        //
+        // 2026-08-29 review: the retry used to run a FULL fresh
+        // goto_with_margin window (command_timeout − 1 s), so a first
+        // attempt that failed after >0.7 s pushed the total wall time past
+        // send_command's command_timeout envelope — the channel layer then
+        // answered a bare CommandTimeout and the structured
+        // {reached, obstacle, retried} result was dropped (the same failure
+        // M-5/F-1 fixed for collect_items and mining). The retry now gets
+        // only the REMAINING movement window (first-attempt wall time +
+        // retry delay subtracted), keeping the total inside the envelope,
+        // and is skipped when less than 2 s of window is left — too small
+        // to hold a meaningful pathfinding attempt plus the reply margin.
+        let started = Instant::now();
         let mut retried = false;
+        let mut last = self.goto_with_margin(target).await;
         loop {
-            match self.goto_with_margin(target).await {
+            match last {
                 GotoOutcome::TimedOut {
                     start,
                     current,
@@ -2107,10 +2186,26 @@ impl<B: BotActions> CommandExecutor<B> {
                     if !reached && !retried {
                         // First attempt stopped short (Ok-but-unreached or a
                         // pathfinder error). Give the world a beat and retry
-                        // once before declaring an obstacle.
-                        retried = true;
-                        tokio::time::sleep(SMART_MOVE_RETRY_DELAY).await;
-                        continue;
+                        // once — bounded by the REMAINING movement window so
+                        // the total never exceeds the command envelope. With
+                        // no budget left, skip the retry and report the first
+                        // attempt honestly (the `Completed` outcome proves
+                        // the first attempt finished inside its window, so
+                        // `started.elapsed()` is strictly below it).
+                        let window =
+                            Duration::from_secs(self.state.read_config().command_timeout_secs)
+                                .saturating_sub(MOVEMENT_REPLY_MARGIN);
+                        let remaining = window
+                            .saturating_sub(started.elapsed())
+                            .saturating_sub(SMART_MOVE_RETRY_DELAY);
+                        if remaining >= 2 * MOVEMENT_REPLY_MARGIN {
+                            retried = true;
+                            tokio::time::sleep(SMART_MOVE_RETRY_DELAY).await;
+                            last = self
+                                .goto_with_margin_with_timeout(target, Some(remaining.as_secs()))
+                                .await;
+                            continue;
+                        }
                     }
 
                     let reason = if reached { "reached" } else { "obstacle" };
@@ -4613,21 +4708,49 @@ mod tests {
 
     /// Sanity counterpart to `test_break_block_loaded_chunk_not_rejected`:
     /// when the block is genuinely unknown (no entry in the block
-    /// index), the pre-check must still return `ChunkNotLoaded`. This
-    /// guards against the new check becoming a no-op.
+    /// index), the pre-check must still reject. 2026-08-29 review: the
+    /// rejection is now split by the retention bound — an absent block
+    /// WITHIN the retained area is reported as `BlockNotFound` (it is
+    /// gone, e.g. already mined), one OUTSIDE as `ChunkNotLoaded` (the
+    /// world was never observed that far).
     #[tokio::test]
     async fn test_break_block_unknown_block_still_rejected() {
         let (executor, sender, state, _log) = make_executor();
         let handle = spawn_executor(executor);
 
-        // Empty snapshot: nothing is loaded.
+        // Empty snapshot: nothing is loaded. The player sits at the
+        // origin, so (100, 64, 100) — chunk (6, 6) — is INSIDE the
+        // retention radius (floor 8 chunks): absence means the block is
+        // gone, not that the world is unobserved.
         state.update_snapshot(crate::types::WorldSnapshot::default());
 
         let pos = BlockPos::new(100, 64, 100);
         let result = send_and_await(&sender, BotCommand::BreakBlock(pos)).await;
         assert!(
+            matches!(result, Err(BotError::BlockNotFound(p)) if p == pos),
+            "expected BlockNotFound for a gone block inside the retention radius, got: {:?}",
+            result
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_break_block_outside_retention_reports_chunk_not_loaded() {
+        // 2026-08-29 review: a block far outside the retention bound
+        // (chunk (62, 62) vs the player's (0, 0), floor 8 chunks) was
+        // never observed — ChunkNotLoaded stays the honest answer.
+        let (executor, sender, state, _log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        state.update_snapshot(crate::types::WorldSnapshot::default());
+
+        let pos = BlockPos::new(1000, 64, 1000);
+        let result = send_and_await(&sender, BotCommand::BreakBlock(pos)).await;
+        assert!(
             matches!(result, Err(BotError::ChunkNotLoaded(p)) if p == pos),
-            "expected ChunkNotLoaded for an unknown block, got: {:?}",
+            "expected ChunkNotLoaded for a block outside the retention radius, got: {:?}",
             result
         );
 
@@ -5243,7 +5366,7 @@ mod tests {
 
         let result = send_and_await(&sender, BotCommand::TakeFromContainer(3, 10)).await;
         assert!(result.is_err());
-        assert!(matches!(result, Err(BotError::Internal(_))));
+        assert!(matches!(result, Err(BotError::ContainerNotOpen)));
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -5256,7 +5379,7 @@ mod tests {
 
         let result = send_and_await(&sender, BotCommand::PutIntoContainer(5, 8)).await;
         assert!(result.is_err());
-        assert!(matches!(result, Err(BotError::Internal(_))));
+        assert!(matches!(result, Err(BotError::ContainerNotOpen)));
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -5292,7 +5415,7 @@ mod tests {
 
         let result = send_and_await(&sender, BotCommand::TakeFromContainer(3, 10)).await;
         assert!(
-            matches!(&result, Err(BotError::Internal(msg)) if msg.contains("no container")),
+            matches!(&result, Err(BotError::ContainerNotOpen)),
             "guard must not fire with a free slot; got: {result:?}"
         );
 
@@ -5623,6 +5746,47 @@ mod tests {
         drop(sender);
         handle.await.expect("executor should finish");
         assert_eq!(log.goto_calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_smart_move_retry_skipped_when_budget_exhausted() {
+        // 2026-08-29 review: with command_timeout_secs=1 the movement window
+        // is 1s − 1s margin = 0, so after the first attempt fails there is
+        // no budget left for a meaningful retry. The old code retried with
+        // a full fresh window anyway, pushing the total past the command
+        // envelope until the channel answered a bare CommandTimeout and the
+        // structured result was dropped. Now the retry is skipped: the
+        // honest obstacle report comes back within the envelope and only
+        // ONE goto call is made.
+        let (executor, sender, state, log) = make_executor();
+        state.update_config(|cfg| cfg.command_timeout_secs = 1);
+        log.goto_failures_remaining.store(1, Ordering::SeqCst);
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(5, 64, 5);
+        let result = send_and_await(&sender, BotCommand::SmartMove(target)).await;
+        let br = result.expect("expected Ok(BotResult), not a channel CommandTimeout");
+        assert!(!br.success, "expected success == false: {br:?}");
+        let data = br.data.expect("data present");
+        assert_eq!(data.get("reached"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            data.get("retried"),
+            Some(&serde_json::json!(false)),
+            "no second attempt was affordable"
+        );
+        assert_eq!(
+            data.get("reason"),
+            Some(&serde_json::json!("obstacle")),
+            "first attempt failure reported honestly"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+        assert_eq!(
+            log.goto_calls.lock().unwrap().len(),
+            1,
+            "retry must be skipped when the movement window is exhausted"
+        );
     }
 
     #[tokio::test]

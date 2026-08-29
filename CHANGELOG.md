@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`place_block` / `use_item_on_block` verification no longer races the
+  idle snapshot relaxation.** The auto-approach leg dispatches nothing, so
+  a walk longer than the 3 s activity window let the snapshot cadence
+  relax to 5 s while the verification budget stayed at
+  `snapshot_interval_ms + 250` ms — an accepted placement was reported as
+  "did not appear ... likely rejected". Both handlers now re-stamp command
+  activity when the cadence is idle (the fix `execute_mine_block` got in
+  1.4.2).
+- **`give_item` propagates the executor's result through the
+  `/item replace` step.** The arm bound the result as `Ok(_)` and
+  hardcoded `success: true`, answering "Gave Nx ... into hotbar slot N"
+  even when the executor reported `success: false` (server accepted the
+  command but did not honour it).
+- **The headless supervisor's quiet-wait no longer consumes the
+  config-restart flag when a bot thread has appeared.** `connect_bot`
+  spawning a thread while the supervisor waited went unnoticed (the wait
+  polled only shutdown + the flag), so an online `update_settings` restart
+  was consumed and silently lost. The extracted `quiet_wait_step`
+  re-checks `SharedState::bot_thread_running` before consuming.
+- **`smart_move`'s retry is bounded by the command envelope.** A retry
+  after a Completed-but-unreached first attempt ran a full fresh goto
+  window, so first attempts failing after >0.7 s overran
+  `command_timeout` and the structured `{reached, obstacle, retried}`
+  result was dropped for a bare `CommandTimeout`. The retry now gets only
+  the remaining window and is skipped when <2 s is left.
+- **The executor's container fallbacks return `ContainerNotOpen`
+  (-32010)** instead of generic `Internal` (-32603) — the dedicated
+  runtime-state variant clients were told to branch on. `execute_open_
+  container` keeps the executor's real failure message instead of
+  replacing every non-success with `ContainerTimeout`, and
+  `execute_equip_tool` feeds dispatch errors through the state machine
+  like every other arm.
+- **Stale cross-session commands are drained at executor start.**
+  Commands buffered while no executor held the receiver (offline window /
+  aborted previous session) used to execute in the NEXT session with all
+  responses lost. Each is now answered immediately with an honest
+  `Offline("stale command from a previous session; reconnect and retry")`.
+- **`snapshot_interval_ms` takes effect immediately.** It was frozen into
+  `BotState` at connect time, so `update_settings` reported `applied` but
+  the running session kept the old cadence until reconnect. The tick now
+  reads it live from the config; the injection static is removed.
+- **`break_block` distinguishes a gone block from an unobserved one.** An
+  absent snapshot entry inside the retention bound
+  (`max(chunk_scan_radius, 8)` chunks) reports `BlockNotFound` (the block
+  was mined); outside it, `ChunkNotLoaded` remains.
+- **`drop_item`'s container-window branch reports `success: false`.** The
+  stack may have been shift-clicked into the container instead of thrown;
+  claiming "Dropped N item(s)" contradicted `verified: false`.
+- **Harvest levels corrected to the vanilla 1.21 tags.** `lapis_block`
+  0→1 (needs_stone_tool) and `redstone_block` 0→2 (needs_iron_tool) — the
+  old entries let a wood pickaxe break them for no drops;
+  `netherite_block` 4→3 (needs_netherite_tool is empty, needs_diamond_tool
+  applies) — a diamond pickaxe is no longer refused a legal mining.
+- **`crying_obsidian` / `respawn_anchor` added to all mining tables**
+  (hardness 50, diamond-tier, drop-gated). They previously fell through to
+  Hand + hardness 1.0: a 1.5 s budget against a real 250 s hand-break with
+  no tool refusal.
+- **`stone_slab` hardness 1.5 → 2.0** (vanilla; every sibling slab was
+  already 2.0).
+- **The headless HTTP bind resolves `localhost` by name.** The only
+  consumer of `mcp_address` coerced every non-IP spelling to 127.0.0.1;
+  `resolve_bind_addr` now passes IP literals through, resolves hostnames
+  via the OS resolver, and keeps the warn + loopback fallback.
+- **The Settings panel's `apply` merges only dirty fields under the
+  config write lock**, so a concurrent `update_settings` landing inside
+  the old read-modify-write window is no longer silently reverted.
+- **The MCP Config panel shows a pending-edits hint** while any edit
+  buffer is dirty (the copyable JSON can differ from the running config
+  until Connect), and its TLS warning suppresses the empty-address case
+  like the Settings panel.
+- **Doc drift:** `get_bot_status`'s description says `snapshot_timestamp`
+  (epoch ms), not "snapshot age"; the `Language` doc no longer claims
+  persistence across restarts; the `last_language` cache doc matches what
+  it actually skips; the mining-calc ice test comment no longer claims
+  ice is absent from `BLOCK_TO_TOOL_TYPE`.
+
+### Changed
+
+- **`get_world_view`'s cache key check probes
+  `SharedState::world_view_cache_meta()` first**, avoiding a ~700 KB PNG
+  clone on every cache miss. No wire change.
+- **Honest test rewrites:** `prop_higher_tier_faster_or_equal` compared
+  tiers in strictly ascending speed order, so its assertion body never
+  executed (a complete tautology); it now compares all unordered
+  same-side-of-the-harvest-gate pairs and genuinely asserts. The gold
+  round-trip oracle expects the `golden_` prefix the parser accepts.
+  `test_subsecond_timeout_not_truncated` exercises a real 200 ms
+  `send_command_with_timeout` envelope; the receiver-lease retry test
+  drops the real lease instead of planting a foreign receiver;
+  `test_auto_reconnect_sequence_simulation` renamed to
+  `test_online_offline_snapshot_reseed_flow` (it never exercised a
+  reconnect loop); the offline-connect test binds and drops an ephemeral
+  port instead of hardcoding port 1.
+
 ## [1.4.2] - 2026-08-28
 
 ### Fixed

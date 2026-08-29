@@ -1141,6 +1141,24 @@ impl SharedState {
         let mut guard = self.bot_thread.lock().unwrap_or_else(|e| e.into_inner());
         guard.take()
     }
+
+    /// Non-consuming probe: is a bot connection thread alive right now?
+    ///
+    /// Unlike [`Self::take_bot_thread_handle`] this leaves the handle in
+    /// place. The headless supervisor's quiet-wait uses it to re-check,
+    /// before consuming the config-restart flag, that no bot thread has
+    /// appeared since it entered the wait (2026-08-29 review — an agent
+    /// can call `connect_bot` while the supervisor sits in the quiet-wait;
+    /// a live thread then owns the flag per the M-10 single-ownership
+    /// rule).
+    pub(crate) fn bot_thread_running(&self) -> bool {
+        self.bot_thread
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|handle| !handle.is_finished())
+            .unwrap_or(false)
+    }
 }
 
 // ---------------------------------------------------------------------------

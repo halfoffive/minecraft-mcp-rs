@@ -704,11 +704,13 @@ async fn test_command_timeout_responder_alive_but_slow() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Test 7: Auto-reconnect sequence simulation
+// Test 7: Online → offline → snapshot-reseed flow (formerly named
+// "auto-reconnect simulation"; it never exercised the reconnect loop —
+// renamed to say what it does, 2026-08-29 review)
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn test_auto_reconnect_sequence_simulation() {
+async fn test_online_offline_snapshot_reseed_flow() {
     let state = make_online_state();
     let (sender, mut receiver) = channel::create_command_channel(4, state.clone());
 
@@ -1407,9 +1409,14 @@ fn test_update_settings_applies_valid_input() {
 #[tokio::test]
 async fn test_connect_bot_offline_spawns_connection() {
     let state = make_offline_state();
-    // Point at a port nothing listens on so the connection attempt fails
-    // fast (no real network dependency in tests).
-    state.update_config(|cfg| cfg.mc_port = 1);
+    // Bind-and-drop an ephemeral port so the connection attempt hits a
+    // CLOSED port that is guaranteed unprivileged and (unlike the old
+    // hardcoded port 1) not subject to firewall/privilege filtering on
+    // CI sandboxes — 2026-08-29 review.
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe listener binds");
+    let closed_port = probe.local_addr().expect("local addr").port();
+    drop(probe);
+    state.update_config(|cfg| cfg.mc_port = closed_port);
     let (sender, _receiver) = channel::create_command_channel(4, state.clone());
     let slot: Arc<std::sync::Mutex<Option<channel::BotCommandReceiver>>> =
         Arc::new(std::sync::Mutex::new(None));

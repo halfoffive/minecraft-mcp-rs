@@ -157,6 +157,18 @@ impl McpConfigCache {
 pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig, cache: &mut McpConfigCache) {
     let json_text = cache.get(edit);
 
+    // ── Pending-edits hint ─────────────────────────────────────
+    // The JSON is generated from the edit buffers, so while any field has
+    // un-applied local edits it can differ from the live config until the
+    // user clicks Connect (2026-08-29 review — previously silent).
+    if edit.dirty.any() {
+        ui.label(
+            egui::RichText::new(i18n::tr(TextKey::ConfigPendingHint))
+                .color(egui::Color32::from_rgb(220, 160, 60))
+                .small(),
+        );
+    }
+
     // ── Copy button + hint ─────────────────────────────────────
     ui.horizontal(|ui| {
         if ui.button(i18n::tr(TextKey::Copy)).clicked() {
@@ -172,10 +184,12 @@ pub fn mcp_config_panel(ui: &mut Ui, edit: &EditConfig, cache: &mut McpConfigCac
     // the token to anyone on the network. The predicate is config.rs's
     // loopback check — the same rule validate() applies, so any
     // loopback spelling (e.g. 127.0.0.2) agrees on both sides
-    // (2026-08-26 review).
+    // (2026-08-26 review). An empty address is suppressed like the
+    // Settings panel does (2026-08-29 review: the two panels used to
+    // disagree on that case).
     if edit.mcp_transport == McpTransport::Http {
         let is_safe = crate::config::is_loopback_bind_address(&edit.mcp_address);
-        if !is_safe {
+        if !is_safe && !edit.mcp_address.is_empty() {
             ui.label(
                 egui::RichText::new(i18n::tr(TextKey::TlsWarning))
                     .color(egui::Color32::from_rgb(220, 80, 80)),

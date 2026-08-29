@@ -128,6 +128,9 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::WorldView => "World View:",
         TextKey::Refresh => "Refresh",
         TextKey::RefreshTooltip => "Re-render the current snapshot at radius=8, scale=2",
+        TextKey::ConfigPendingHint => {
+            "Some settings have un-applied edits — the JSON below may differ from the running config until you click Connect."
+        }
         TextKey::WorldViewPlaceholder => {
             "No render cached yet — click Refresh to render the current snapshot."
         }

@@ -44,8 +44,10 @@ pub mod zh_cn;
 
 /// Selectable UI display language.
 ///
-/// Persisted inside [`AppConfig`](crate::config::AppConfig) so the user's
-/// choice survives restarts.  `Default` is [`Language::En`].
+/// Held inside [`AppConfig`](crate::config::AppConfig) for the running
+/// process. Since config files were removed (S-8) the choice is NOT
+/// persisted to disk — config is env-var sourced and runtime changes live
+/// only until the process exits. `Default` is [`Language::En`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub enum Language {
     /// English (US) — the canonical source strings in `en::lookup`.
@@ -268,6 +270,12 @@ pub enum TextKey {
     /// Placeholder shown when no render is cached yet.
     /// "No render cached yet — click Refresh to render the current snapshot."
     WorldViewPlaceholder,
+
+    // ── MCP config panel ─────────────────────────────────────────────
+    /// Hint shown in the MCP Config panel while any edit-buffer field has
+    /// un-applied local edits: the copyable JSON is generated from the
+    /// buffers, so it can differ from the live config until Connect.
+    ConfigPendingHint,
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -403,6 +411,7 @@ pub fn key_name(key: TextKey) -> &'static str {
         TextKey::Refresh => "Refresh",
         TextKey::RefreshTooltip => "RefreshTooltip",
         TextKey::WorldViewPlaceholder => "WorldViewPlaceholder",
+        TextKey::ConfigPendingHint => "ConfigPendingHint",
     }
 }
 
