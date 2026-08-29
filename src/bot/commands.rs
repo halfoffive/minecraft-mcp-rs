@@ -15,6 +15,7 @@ use tracing::{debug, trace, warn};
 
 use crate::block_data::ItemStack;
 use crate::bot::ops::{CompoundOpExecutor, wait_for_block_present};
+use crate::bot::snapshot_updater::{RETENTION_CHUNK_FLOOR, block_within_chunk_radius};
 use crate::channel::{
     BotCommandReceiver, BotCommandSender, BotCommandWithResponder, ReceiverLease,
 };
@@ -1094,6 +1095,21 @@ impl<B: BotActions> CommandExecutor<B> {
         // data — anything not in the index is genuinely unknown.
         let snapshot = self.state.read_snapshot();
         if !snapshot.block_index.contains_key(&pos) {
+            // Production snapshots filter air entries (L-4), so absence is
+            // ambiguous: the block was already mined (by us or someone
+            // else), or its chunk was never scanned / was pruned.
+            // Disambiguate with the retention bound (2026-08-29 review —
+            // both cases used to report the misleading ChunkNotLoaded):
+            // within max(chunk_scan_radius, 8) chunks of the player the
+            // snapshot is expected to see the block, so absence means the
+            // block is gone (BlockNotFound); outside that radius the world
+            // was genuinely never observed that far (ChunkNotLoaded).
+            let player = snapshot.self_player.position;
+            let retention = (self.state.read_config().chunk_scan_radius as i32)
+                .max(RETENTION_CHUNK_FLOOR);
+            if block_within_chunk_radius(pos, (player.x >> 4, player.z >> 4), retention) {
+                return Err(BotError::BlockNotFound(pos));
+            }
             return Err(BotError::ChunkNotLoaded(pos));
         }
         self.bot.mine_block(&pos);
@@ -1551,11 +1567,15 @@ impl<B: BotActions> CommandExecutor<B> {
         // Report honestly instead of faking success if the read ever comes
         // back empty.
         if after.is_empty() && !before.is_empty() {
+            // 2026-08-29 review: honest failure. The stack left the slot but
+            // a container window is open — the click may have been swallowed
+            // by the container menu (shift-click moved it INTO the container)
+            // instead of throwing it on the ground. Claiming "Dropped N
+            // item(s)" with `success: true` contradicted `verified: false`.
             return Ok(BotResult {
-                success: true,
+                success: false,
                 message: format!(
-                    "Dropped {} item(s) from slot {} (container window open; drop may not apply until the container is closed)",
-                    count, slot
+                    "Slot {slot} emptied while a container window is open — the stack may have been moved into the container instead of dropped; close the container and retry"
                 ),
                 data: Some(serde_json::json!({"verified": false, "container_window_open": true})),
             });
@@ -4682,21 +4702,49 @@ mod tests {
 
     /// Sanity counterpart to `test_break_block_loaded_chunk_not_rejected`:
     /// when the block is genuinely unknown (no entry in the block
-    /// index), the pre-check must still return `ChunkNotLoaded`. This
-    /// guards against the new check becoming a no-op.
+    /// index), the pre-check must still reject. 2026-08-29 review: the
+    /// rejection is now split by the retention bound — an absent block
+    /// WITHIN the retained area is reported as `BlockNotFound` (it is
+    /// gone, e.g. already mined), one OUTSIDE as `ChunkNotLoaded` (the
+    /// world was never observed that far).
     #[tokio::test]
     async fn test_break_block_unknown_block_still_rejected() {
         let (executor, sender, state, _log) = make_executor();
         let handle = spawn_executor(executor);
 
-        // Empty snapshot: nothing is loaded.
+        // Empty snapshot: nothing is loaded. The player sits at the
+        // origin, so (100, 64, 100) — chunk (6, 6) — is INSIDE the
+        // retention radius (floor 8 chunks): absence means the block is
+        // gone, not that the world is unobserved.
         state.update_snapshot(crate::types::WorldSnapshot::default());
 
         let pos = BlockPos::new(100, 64, 100);
         let result = send_and_await(&sender, BotCommand::BreakBlock(pos)).await;
         assert!(
+            matches!(result, Err(BotError::BlockNotFound(p)) if p == pos),
+            "expected BlockNotFound for a gone block inside the retention radius, got: {:?}",
+            result
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_break_block_outside_retention_reports_chunk_not_loaded() {
+        // 2026-08-29 review: a block far outside the retention bound
+        // (chunk (62, 62) vs the player's (0, 0), floor 8 chunks) was
+        // never observed — ChunkNotLoaded stays the honest answer.
+        let (executor, sender, state, _log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        state.update_snapshot(crate::types::WorldSnapshot::default());
+
+        let pos = BlockPos::new(1000, 64, 1000);
+        let result = send_and_await(&sender, BotCommand::BreakBlock(pos)).await;
+        assert!(
             matches!(result, Err(BotError::ChunkNotLoaded(p)) if p == pos),
-            "expected ChunkNotLoaded for an unknown block, got: {:?}",
+            "expected ChunkNotLoaded for a block outside the retention radius, got: {:?}",
             result
         );
 

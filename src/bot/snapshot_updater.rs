@@ -200,7 +200,23 @@ fn section_base_y(world_min_y: i32, section_idx: usize) -> i32 {
     world_min_y + (section_idx as i32) * 16
 }
 
-fn block_within_chunk_radius(pos: BlockPos, player_chunk: (i32, i32), radius: i32) -> bool {
+/// Snapshot retention floor in chunks (W-6): at least this many chunks
+/// around the player are always retained. Shared with consumers that must
+/// agree on the bound — e.g. `handle_break_block` uses it to decide whether
+/// an absent block is "gone" (inside the retained area) or "never seen"
+/// (outside it).
+pub(crate) const RETENTION_CHUNK_FLOOR: i32 = 8;
+
+/// Whether `pos`'s chunk is within `radius` chunks (Chebyshev distance) of
+/// `player_chunk` — the same bound the retention pruning applies, so a block
+/// OUTSIDE this radius can legitimately be absent from the snapshot (never
+/// scanned / pruned) while one inside it that is absent is genuinely gone
+/// (mined, or the chunk was never loaded).
+pub(crate) fn block_within_chunk_radius(
+    pos: BlockPos,
+    player_chunk: (i32, i32),
+    radius: i32,
+) -> bool {
     let chunk = (pos.x >> 4, pos.z >> 4);
     ((chunk.0 - player_chunk.0).abs()).max((chunk.1 - player_chunk.1).abs()) <= radius
 }
@@ -286,7 +302,7 @@ async fn build_snapshot_inner(
     // on every build — without this, every chunk the bot ever walked through
     // stayed in `blocks` forever and the per-tick clone + block_index rebuild
     // grew without bound.
-    let retention_chunks = chunk_scan_radius.max(8);
+    let retention_chunks = chunk_scan_radius.max(RETENTION_CHUNK_FLOOR);
 
     // ── Read world for changed blocks ────────────────────────
     let mut new_blocks = Vec::new();
