@@ -136,7 +136,14 @@ impl Default for BotState {
             tick_tasks: Arc::new(Mutex::new(tokio::task::JoinSet::new())),
             egui_ctx,
             dirty_tracker: Arc::new(Mutex::new(DirtyTracker::new())),
-            last_snapshot_time: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(3600))),
+            // Backdating 3600 s makes the first tick pass the throttle gate
+            // immediately. The backdate MUST saturate (P1, 2026-08-30
+            // review): a raw `Instant::now() - 3600s` panics on Linux/macOS
+            // when the machine has been up for less than an hour, killing
+            // the bot connection thread on every connect attempt.
+            last_snapshot_time: Arc::new(Mutex::new(crate::utils::backdate_instant(
+                Duration::from_secs(3600),
+            ))),
             command_sender,
         }
     }
