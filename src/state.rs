@@ -894,18 +894,6 @@ impl SharedState {
         }
     }
 
-    /// Whether the snapshot updater is on its relaxed idle cadence at `now`.
-    ///
-    /// True when no command has been dispatched within
-    /// [`Self::ACTIVITY_WINDOW`] — including the never-dispatched case.
-    /// Compound operations that sleep between their last dispatch and a
-    /// snapshot-dependent verification step (mining) use this to detect that
-    /// they must re-stamp activity before polling, or the relaxed cadence
-    /// would outlast the verification budget.
-    pub(crate) fn snapshot_cadence_idle(&self, now: Instant) -> bool {
-        !Self::within_activity_window(self.last_command_at(), now)
-    }
-
     /// Whether a verification step with the given `budget` must re-stamp
     /// command activity *before* it starts polling.
     ///
@@ -1748,24 +1736,27 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_cadence_idle_tracks_activity() {
+    fn test_activity_window_predicate_tracks_activity() {
         // Regression (2026-08-25 review): execute_mine_block re-stamps
         // command activity after a long mine sleep so the relaxed idle
         // snapshot cadence cannot outlast the mining verification budget.
-        // This pins the predicate that decides whether the restamp fires.
+        // This pins the pure window predicate behind that decision (the
+        // `snapshot_cadence_idle` wrapper it used to test was removed in
+        // the 2026-08-30 round when every call site moved to
+        // `verification_needs_activity_restamp`).
         let state = SharedState::new(AppConfig::default());
 
-        // Never dispatched → updater is on the relaxed cadence.
+        // Never dispatched → not within the window (idle cadence).
         assert!(
-            state.snapshot_cadence_idle(Instant::now()),
-            "no command ever → idle cadence"
+            !SharedState::within_activity_window(state.last_command_at(), Instant::now()),
+            "no command ever → outside the window"
         );
 
         // A fresh dispatch puts the updater back on the fast cadence.
         state.mark_command_activity();
         assert!(
-            !state.snapshot_cadence_idle(Instant::now()),
-            "just-dispatched → fast cadence"
+            SharedState::within_activity_window(state.last_command_at(), Instant::now()),
+            "just-dispatched → inside the window"
         );
 
         // The pure window check agrees with the accessor-based view for

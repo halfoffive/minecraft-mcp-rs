@@ -346,7 +346,6 @@ mod tests {
     // ── SnapshotBuilder tests ───────────────────────────────
 
     #[test]
-    #[test]
     fn test_dirty_chunk_index_covers_dirty_regions() {
         // 2026-08-30 review invariant: every chunk touched by a dirty
         // block, and every fully-dirty chunk, has a key in the index —
@@ -380,6 +379,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn test_builder_no_changes_copies_all() {
         let old = make_snapshot(
             vec![block(BlockPos::new(0, 64, 0), "stone")],

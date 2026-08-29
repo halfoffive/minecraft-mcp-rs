@@ -234,7 +234,7 @@ pub fn update_settings(
     let (connection_fields_changed, transport_restart_fields_changed) =
         state.modify_config(|cfg| -> Result<(bool, bool), BotError> {
             let old = cfg.clone();
-            let (mut candidate, lang) = merge_input_into_candidate(&old, input, &mut applied)?;
+            let (candidate, lang) = merge_input_into_candidate(&old, input, &mut applied)?;
             new_language = lang;
 
             // Validate BEFORE any global side effect: the old order called
