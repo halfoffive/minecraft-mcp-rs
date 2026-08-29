@@ -885,6 +885,22 @@ impl<B: BotActions> CommandExecutor<B> {
 
     // ── Movement handlers ────────────────────────────────────────
 
+    /// Live bot position floored to a [`BlockPos`], falling back to the
+    /// throttled snapshot when the client has no position component yet
+    /// (offline or before the first sync).
+    ///
+    /// The F-25/M-4/R-12 pattern every movement result uses: a throttled
+    /// snapshot can lag a just-finished (or just-aborted) move by a whole
+    /// idle interval, and LLM clients misread that stale coordinate as
+    /// "did not arrive" — so the live `Position` component wins whenever it
+    /// is available.
+    fn live_blockpos(&self) -> BlockPos {
+        self.bot
+            .position()
+            .map(|[x, y, z]| BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32))
+            .unwrap_or_else(|| self.state.read_snapshot().self_player.position)
+    }
+
     async fn handle_move_to(&self, pos: BlockPos) -> Result<BotResult, BotError> {
         trace!(?pos, "MoveTo");
         match self.goto_with_margin(pos).await {
@@ -948,7 +964,13 @@ impl<B: BotActions> CommandExecutor<B> {
         // Leave a small margin for the executor to reply before the envelope
         // timeout in `BotCommandSender::send_command` abandons the response.
         let goto_window = timeout_dur.saturating_sub(MOVEMENT_REPLY_MARGIN);
-        let start = self.state.read_snapshot().self_player.position;
+        // P2 (2026-08-30 review): BOTH timeout-payload endpoints come from
+        // the live position. The old snapshot reads raced the idle-snapshot
+        // relaxation (≥5 s cadence): a move timing out >3 s after the last
+        // command reported `start`/`position` up to 5 s stale and
+        // under-counted `distance_moved` — the same drift the other
+        // movement results already avoid via `live_blockpos`.
+        let start = self.live_blockpos();
         // Route through `goto_with_deadline` so the explicit timeout (e.g.
         // the fly timeout) reaches the pathfinder's wait-for-completion loop
         // — not just the outer envelope (audit M-1).
@@ -961,7 +983,7 @@ impl<B: BotActions> CommandExecutor<B> {
             Ok(result) => GotoOutcome::Completed(result),
             Err(_) => {
                 self.bot.stop_pathfinding();
-                let current = self.state.read_snapshot().self_player.position;
+                let current = self.live_blockpos();
                 GotoOutcome::TimedOut {
                     start,
                     current,
@@ -1037,12 +1059,7 @@ impl<B: BotActions> CommandExecutor<B> {
                 // zero-wait live position component — the throttled snapshot
                 // can lag a just-finished move by one interval (5 s when
                 // idle) — and fall back to the snapshot when unavailable.
-                let live_position = self.bot.position();
-                let end_pos = live_position
-                    .map(|[x, y, z]| {
-                        BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32)
-                    })
-                    .unwrap_or_else(|| self.state.read_snapshot().self_player.position);
+                let end_pos = self.live_blockpos();
 
                 Ok(BotResult {
                     success: true,
@@ -2218,12 +2235,7 @@ impl<B: BotActions> CommandExecutor<B> {
                     // reported an "obstacle". Falls back to the snapshot
                     // when the position component is unavailable (offline /
                     // before the first sync). Mirrors `handle_walk_direction`.
-                    let live_position = self.bot.position();
-                    let current_pos = live_position
-                        .map(|[x, y, z]| {
-                            BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32)
-                        })
-                        .unwrap_or_else(|| self.state.read_snapshot().self_player.position);
+                    let current_pos = self.live_blockpos();
 
                     // Reached when the bot ends within one block of the target
                     // on every axis (the same margin the previous logic used).
@@ -3547,6 +3559,9 @@ mod tests {
         state.set_online(true);
         let mock = MockBotClient::new();
         mock.log.goto_hangs.store(true, Ordering::SeqCst);
+        // Live position the handler must report (floored) instead of the
+        // snapshot's (0, 64, 0).
+        *mock.log.live_position.lock().unwrap() = Some([70.6, 64.0, 30.4]);
         let log = mock.log().clone();
         let executor = CommandExecutor::new(mock, Arc::clone(&state), receiver, None);
         let handle = spawn_executor(executor);
@@ -3561,6 +3576,25 @@ mod tests {
         assert_eq!(data["target"], serde_json::json!([100, 64, 200]));
         assert!(data["distance_moved"].is_number());
         assert!(br.message.contains("timed out"), "message: {}", br.message);
+        // P2 (2026-08-30 review): the timeout payload's endpoints come from
+        // the LIVE position, not the throttled snapshot. The bot never moved
+        // (goto hangs), so both endpoints must equal the floored live
+        // coordinate and the moved distance must be 0.
+        assert_eq!(
+            data["position"],
+            serde_json::json!([70, 64, 30]),
+            "current position must come from the live component"
+        );
+        assert_eq!(
+            data["start"],
+            serde_json::json!([70, 64, 30]),
+            "start position must come from the live component"
+        );
+        assert_eq!(
+            data["distance_moved"],
+            serde_json::json!(0.0),
+            "a hanging goto moved nothing"
+        );
 
         drop(sender);
         handle.await.expect("executor should finish");
