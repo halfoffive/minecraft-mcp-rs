@@ -1,6 +1,5 @@
 //! Event processing from the Minecraft client (chat, move, damage, etc.).
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -56,15 +55,6 @@ pub(crate) static INJECTED_EGUI_CTX: Mutex<Option<egui::Context>> = Mutex::new(N
 /// on disconnect.
 pub(crate) static INJECTED_COMMAND_SENDER: Mutex<Option<BotCommandSender>> = Mutex::new(None);
 
-/// Pre-initialized snapshot interval to inject into [`BotState`].
-///
-/// Uses [`AtomicU64`] (rather than [`OnceLock`]) so the value can be
-/// refreshed on each reconnect — `OnceLock::set` only succeeds once, which
-/// silently dropped updates to `snapshot_interval_ms` on subsequent
-/// connection attempts. A value of `0` means "not set"; [`BotState::default`]
-/// falls back to `500` in that case.
-pub(crate) static INJECTED_SNAPSHOT_INTERVAL_MS: AtomicU64 = AtomicU64::new(0);
-
 // ---------------------------------------------------------------------------
 // BotState
 // ---------------------------------------------------------------------------
@@ -95,8 +85,6 @@ pub struct BotState {
     pub dirty_tracker: Arc<Mutex<DirtyTracker>>,
     /// Last time a snapshot was written to [`SharedState`].
     pub last_snapshot_time: Arc<Mutex<Instant>>,
-    /// Minimum milliseconds between snapshot updates.
-    pub snapshot_interval_ms: u64,
     /// Optional command sender for issuing sub-commands (e.g. `Act::Mine`
     /// delegating to `CompoundOpExecutor`). `None` in unit tests; set from
     /// `INJECTED_COMMAND_SENDER` in production.
@@ -133,13 +121,13 @@ impl Default for BotState {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
 
-        let snapshot_interval_ms = {
-            let v = INJECTED_SNAPSHOT_INTERVAL_MS.load(Ordering::Relaxed);
-            // A value of 0 means "not injected yet" — fall back to the
-            // default 500 ms so unit tests and any pre-inject path still
-            // get a sane throttle interval.
-            if v == 0 { 500 } else { v }
-        };
+        // 2026-08-29 review: the snapshot interval used to be snapshotted
+        // into BotState once per connection, so an `update_settings` change
+        // reported `applied` but never reached the running session until
+        // the next reconnect. The tick now reads it live from the config
+        // (a per-tick RwLock read is negligible against a full snapshot
+        // build), matching `chunk_scan_radius` / `block_perception_radius`
+        // which were already read live.
 
         Self {
             shared_state,
@@ -149,7 +137,6 @@ impl Default for BotState {
             egui_ctx,
             dirty_tracker: Arc::new(Mutex::new(DirtyTracker::new())),
             last_snapshot_time: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(3600))),
-            snapshot_interval_ms,
             command_sender,
         }
     }
@@ -390,7 +377,6 @@ async fn handle_disconnect(bot: Client, state: &BotState) {
     *INJECTED_COMMAND_SENDER
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = None;
-    INJECTED_SNAPSHOT_INTERVAL_MS.store(0, Ordering::Relaxed);
 
     // Tell azalea to end the client so ClientBuilder::start returns and the
     // connection loop can retry. Without this the bot thread may hang waiting
@@ -433,12 +419,19 @@ async fn handle_tick(bot: Client, state: BotState) {
 
     // Build a SnapshotUpdater from the BotState's shared fields and delegate
     // the throttle check + snapshot build to it. This avoids duplicating the
-    // snapshot logic that already lives in snapshot_updater.rs.
+    // snapshot logic that already lives in snapshot_updater.rs. The interval
+    // is read LIVE from the config every tick (2026-08-29 review): it used
+    // to be frozen into BotState at connect time, so `update_settings`
+    // reported the change as applied but the running session kept the old
+    // cadence until the next reconnect.
     let updater = SnapshotUpdater::new(
         Arc::clone(&state.shared_state),
         Arc::clone(&state.dirty_tracker),
         Arc::clone(&state.last_snapshot_time),
-        effective_snapshot_interval_ms(&state.shared_state, state.snapshot_interval_ms),
+        effective_snapshot_interval_ms(
+            &state.shared_state,
+            state.shared_state.read_config().snapshot_interval_ms,
+        ),
     );
     let egui_ctx = state.egui_ctx.clone();
 
@@ -587,7 +580,6 @@ mod tests {
     fn test_bot_state_default() {
         let state = BotState::default();
         assert!(!state.shared_state.is_online());
-        assert_eq!(state.snapshot_interval_ms, 500);
         assert!(state.egui_ctx.is_none());
     }
 

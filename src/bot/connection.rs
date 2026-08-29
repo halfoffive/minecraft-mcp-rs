@@ -106,9 +106,11 @@ impl ConnectionManager {
     ///   Disconnect click interrupts it immediately.
     ///
     /// Every iteration hot-reloads the connection-relevant config values
-    /// (`ai_username`, `mc_address`, `mc_port`, `snapshot_interval_ms`, and
-    /// the backoff delays) from [`SharedState::read_config`] so
-    /// agent-driven settings changes take effect without a restart.
+    /// (`ai_username`, `mc_address`, `mc_port`, and the backoff delays) from
+    /// [`SharedState::read_config`] so agent-driven settings changes take
+    /// effect without a restart. (The snapshot interval is not injected at
+    /// all since the 2026-08-29 review — `handle_tick` reads it live from
+    /// the config, so it never needed the reconnect to apply.)
     ///
     /// Spawn this as a background task via [`tokio::spawn`].
     ///
@@ -159,19 +161,15 @@ impl ConnectionManager {
             // Hot config reload: read the connection-relevant values fresh
             // from `SharedState` on every iteration instead of using the
             // frozen `self.config` snapshot. This lets agent-driven
-            // `update_settings` changes (username, server address/port,
-            // snapshot interval) take effect on the very next reconnect
-            // without restarting the process. The RwLock read guard is
-            // confined to this block and dropped before any `.await` —
-            // never held across an await point.
-            let (ai_username, mc_address, mc_port, snapshot_interval_ms) = {
+            // `update_settings` changes (username, server address/port)
+            // take effect on the very next reconnect without restarting
+            // the process. The RwLock read guard is confined to this block
+            // and dropped before any `.await` — never held across an await
+            // point. (The snapshot interval is no longer injected at all —
+            // the tick reads it live from the config, 2026-08-29 review.)
+            let (ai_username, mc_address, mc_port) = {
                 let cfg = self.state.read_config();
-                (
-                    cfg.ai_username.clone(),
-                    cfg.mc_address.clone(),
-                    cfg.mc_port,
-                    cfg.snapshot_interval_ms,
-                )
+                (cfg.ai_username.clone(), cfg.mc_address.clone(), cfg.mc_port)
             };
 
             // Inject dependencies so BotState::default() picks them up when
@@ -182,13 +180,7 @@ impl ConnectionManager {
             // clears them all to None on disconnect — without this, a
             // reconnect would fall back to a throwaway SharedState and the
             // is_online() flag would never flip on the real state.
-            Self::inject_dependencies(
-                &self.state,
-                &command_receiver,
-                egui_ctx.as_ref(),
-                &command_sender,
-                snapshot_interval_ms,
-            );
+            Self::inject_dependencies(&self.state, &command_receiver, egui_ctx.as_ref(), &command_sender);
 
             let account = Account::offline(&ai_username);
             let address = format!("{mc_address}:{mc_port}");
@@ -405,7 +397,6 @@ impl ConnectionManager {
         command_receiver: &ReceiverSlot,
         egui_ctx: Option<&egui::Context>,
         command_sender: &BotCommandSender,
-        snapshot_interval_ms: u64,
     ) {
         *events::INJECTED_SHARED_STATE
             .lock()
@@ -419,8 +410,6 @@ impl ConnectionManager {
         *events::INJECTED_COMMAND_SENDER
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(command_sender.clone());
-        events::INJECTED_SNAPSHOT_INTERVAL_MS
-            .store(snapshot_interval_ms, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -809,13 +798,7 @@ mod tests {
         let sender = _sender;
 
         // Iteration 1: connect loop installs the values.
-        ConnectionManager::inject_dependencies(
-            &state,
-            &slot,
-            None,
-            &sender,
-            config.snapshot_interval_ms,
-        );
+        ConnectionManager::inject_dependencies(&state, &slot, None, &sender);
         assert!(
             events::INJECTED_SHARED_STATE
                 .lock()
@@ -840,10 +823,6 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .is_some()
         );
-        assert_eq!(
-            events::INJECTED_SNAPSHOT_INTERVAL_MS.load(std::sync::atomic::Ordering::Relaxed),
-            config.snapshot_interval_ms
-        );
 
         // handle_disconnect clears them all (mirroring events::handle_disconnect).
         *events::INJECTED_SHARED_STATE
@@ -858,16 +837,9 @@ mod tests {
         *events::INJECTED_COMMAND_SENDER
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
-        events::INJECTED_SNAPSHOT_INTERVAL_MS.store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Iteration 2: the loop MUST re-install everything.
-        ConnectionManager::inject_dependencies(
-            &state,
-            &slot,
-            None,
-            &sender,
-            config.snapshot_interval_ms,
-        );
+        ConnectionManager::inject_dependencies(&state, &slot, None, &sender);
         assert!(
             events::INJECTED_SHARED_STATE
                 .lock()
@@ -895,11 +867,6 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .is_some(),
             "INJECTED_COMMAND_SENDER must be Some after iteration 2"
-        );
-        assert_eq!(
-            events::INJECTED_SNAPSHOT_INTERVAL_MS.load(std::sync::atomic::Ordering::Relaxed),
-            config.snapshot_interval_ms,
-            "snapshot interval must be restored on iteration 2"
         );
     }
 
