@@ -1800,7 +1800,11 @@ impl<B: BotActions> CommandExecutor<B> {
                 data: None,
             })
         } else {
-            Err(BotError::Internal("no container is currently open".into()))
+            // Dedicated runtime-state variant (-32010): the parameters were
+            // fine, the state is wrong — MCP clients branch on it (L-9).
+            // This executor-side fallback is reachable when the container
+            // closes between the MCP layer's pre-check and this dispatch.
+            Err(BotError::ContainerNotOpen)
         }
     }
 
@@ -1827,7 +1831,11 @@ impl<B: BotActions> CommandExecutor<B> {
                 data: None,
             })
         } else {
-            Err(BotError::Internal("no container is currently open".into()))
+            // Dedicated runtime-state variant (-32010): the parameters were
+            // fine, the state is wrong — MCP clients branch on it (L-9).
+            // This executor-side fallback is reachable when the container
+            // closes between the MCP layer's pre-check and this dispatch.
+            Err(BotError::ContainerNotOpen)
         }
     }
 
@@ -5304,7 +5312,7 @@ mod tests {
 
         let result = send_and_await(&sender, BotCommand::TakeFromContainer(3, 10)).await;
         assert!(result.is_err());
-        assert!(matches!(result, Err(BotError::Internal(_))));
+        assert!(matches!(result, Err(BotError::ContainerNotOpen)));
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -5317,7 +5325,7 @@ mod tests {
 
         let result = send_and_await(&sender, BotCommand::PutIntoContainer(5, 8)).await;
         assert!(result.is_err());
-        assert!(matches!(result, Err(BotError::Internal(_))));
+        assert!(matches!(result, Err(BotError::ContainerNotOpen)));
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -5353,7 +5361,7 @@ mod tests {
 
         let result = send_and_await(&sender, BotCommand::TakeFromContainer(3, 10)).await;
         assert!(
-            matches!(&result, Err(BotError::Internal(msg)) if msg.contains("no container")),
+            matches!(&result, Err(BotError::ContainerNotOpen)),
             "guard must not fire with a free slot; got: {result:?}"
         );
 
