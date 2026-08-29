@@ -407,7 +407,17 @@ pub async fn handle_give_item(
             "/item replace entity {username} hotbar.{hotbar_slot} with {namespaced} {count}"
         ));
         match sender.send_command(replace_cmd).await {
-            Ok(_) => {
+            Ok(replace_result) => {
+                // The L-6 discipline covers this arm too: the executor can
+                // report `success:false` through `Ok` (server accepted the
+                // command but the feedback shows it was not honoured), so
+                // hardcoding `success:true` here would fabricate a hotbar
+                // placement the data denies. Return the honest BotResult
+                // verbatim, exactly like the `/give` arm above.
+                if !replace_result.success {
+                    return serde_json::to_string(&replace_result)
+                        .map_err(|e| BotError::Internal(format!("Serialization error: {e}")));
+                }
                 return serde_json::to_string(&crate::types::BotResult {
                     success: true,
                     message: format!(
@@ -1052,6 +1062,58 @@ mod tests {
         );
         assert_eq!(parsed["message"], "server said no");
         assert_eq!(parsed["data"]["reason"], "give_undelivered");
+        responder.await.expect("responder finished");
+    }
+
+    /// RED (2026-08-29 review): the executor can report
+    /// `Ok(BotResult{success:false})` for the `/item replace` step too (the
+    /// server accepts the command but the feedback shows it was not
+    /// honoured). The old code bound the result as `Ok(_)` and hardcoded
+    /// `success:true` — a fake "into hotbar slot N" success. The result
+    /// must be propagated verbatim.
+    #[tokio::test]
+    async fn test_give_item_item_replace_executor_failure_propagates() {
+        let state = make_give_state();
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
+
+        let responder = tokio::spawn(async move {
+            consume_probe(&mut receiver).await;
+            let first = receiver.recv().await.expect("give");
+            first
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: true,
+                    message: "ok".into(),
+                    data: None,
+                }))
+                .unwrap();
+            let second = receiver.recv().await.expect("replace");
+            second
+                .respond_to
+                .send(Ok(crate::types::BotResult {
+                    success: false,
+                    message: "item replace not honoured".into(),
+                    data: Some(serde_json::json!({ "reason": "replace_undelivered" })),
+                }))
+                .unwrap();
+        });
+
+        let input = GiveItemInput {
+            item_id: "water_bucket".into(),
+            count: None,
+            target: Some("hotbar".into()),
+            hotbar_slot: Some(3),
+        };
+        let result = handle_give_item(&state, &sender, input)
+            .await
+            .expect("executor failure must be returned, not errored");
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["success"], false,
+            "must not claim success when the /item replace step failed: {result}"
+        );
+        assert_eq!(parsed["message"], "item replace not honoured");
+        assert_eq!(parsed["data"]["reason"], "replace_undelivered");
         responder.await.expect("responder finished");
     }
 
