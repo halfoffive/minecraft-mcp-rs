@@ -40,15 +40,17 @@ pub fn to_snake_case(s: &str) -> String {
     result
 }
 
-/// Case-insensitive ASCII substring search (single allocation for the
-/// lowercased needle, none per haystack).
+/// Case-insensitive ASCII substring search (no allocations at all).
 ///
-/// `needle` must already be lowercased. `haystack` is scanned byte-wise with
-/// a non-allocating ASCII-folding comparison, so filtering thousands of
-/// blocks by `block_type` no longer allocates one lowercase `String` per
-/// block (see `get_nearby_blocks`). Non-ASCII bytes are compared verbatim —
-/// block/item ids are pure ASCII, so this is safe for them; for non-ASCII
-/// input the comparison is byte-exact rather than case-insensitive.
+/// Both `haystack` and `needle` are scanned byte-wise with a
+/// non-allocating ASCII-folding comparison — the needle does NOT need to be
+/// pre-lowercased (an earlier revision of this doc claimed it did; the
+/// implementation folds both sides, and no caller pre-lowercases it).
+/// Filtering thousands of blocks by `block_type` therefore allocates
+/// nothing (see `get_nearby_blocks`). Non-ASCII bytes are compared
+/// verbatim — block/item ids are pure ASCII, so this is safe for them; for
+/// non-ASCII input the comparison is byte-exact rather than
+/// case-insensitive.
 pub fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;

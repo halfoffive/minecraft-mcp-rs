@@ -2425,7 +2425,7 @@ mod tests {
         // revert). If it ever drops below 8, an arm was reverted to `?`.
         assert!(
             occurrences >= 8,
-            "expected at least 7 occurrences of the dispatch-err \
+            "expected at least 8 occurrences of the dispatch-err \
              `state.advance(Failed(e))` pattern (one per dispatch arm \
              across `execute_mine_block`, `execute_place_block`, and \
              `execute_open_container`), found {occurrences}. A future \
