@@ -4,7 +4,8 @@
 //! randomly-generated inputs.
 
 use minecraft_mcp_rs::block_data::{
-    ItemStack, MATERIAL_PRIORITY, MATERIAL_TIER_SPEED, best_tool_for_block, material_from_item_name,
+    ItemStack, MATERIAL_PRIORITY, MATERIAL_TIER_SPEED, best_tool_for_block,
+    harvest_level_of, material_from_item_name,
 };
 use minecraft_mcp_rs::command_validate::validate_coordinates;
 use minecraft_mcp_rs::compound_ops::find_standable_neighbor;
@@ -281,8 +282,22 @@ proptest! {
         }
     }
 
-    /// Property: Higher-tier materials mine faster (or equal) than lower-tier
-    /// materials for the same block and correct tool.
+    /// Property: Higher-tier materials mine faster (or equal) than
+    /// lower-tier materials for the same block and correct tool — compared
+    /// only WITHIN the same side of the block's harvest gate.
+    ///
+    /// 2026-08-29 review: the old comparison iterated the tiers array in
+    /// strictly ascending speed order (2, 4, 6, 8, 9, 12) and guarded with
+    /// `if speed_a > speed_b`, which was NEVER true for i < j — the
+    /// assertion body never executed and the property was a complete
+    /// tautology (swapping two speeds in MATERIAL_TIER_SPEED still passed).
+    /// The property as originally stated is also false across the harvest
+    /// gate: on diamond_ore (level 2) a gold pickaxe (speed 12, level 1)
+    /// takes the non-harvest branch and is SLOWER than iron (speed 6,
+    /// level 2). Pairs are now compared across ALL unordered combinations,
+    /// but only when both tiers sit on the same side of the block's
+    /// required harvest level — within one side the monotone-speed ⇒
+    /// monotone-time property genuinely holds.
     #[test]
     fn prop_higher_tier_faster_or_equal(
         block_type in block_type_strategy(),
@@ -292,6 +307,11 @@ proptest! {
         // F-16: exclude unbreakable blocks so the property has no INFINITY
         // escape hatch — every generated case must satisfy the ordering.
         prop_assume!(get_block_hardness(&block_type) >= 0.0);
+
+        let required_level = minecraft_mcp_rs::block_data::HARVEST_LEVEL
+            .get(block_type.as_str())
+            .copied()
+            .unwrap_or(0);
 
         let tiers = [
             MaterialTier::Wood,
@@ -308,23 +328,36 @@ proptest! {
             times.push((*tier, time));
         }
 
-        // For each pair, if tier A has higher speed than tier B, its time should be <=.
+        // Every unordered pair with higher speed must mine no slower —
+        // provided both tiers meet (or both miss) the block's harvest gate.
+        // Note this now DOES execute assertions: e.g. Stone (4) vs Wood (2)
+        // on a level-0 block, or Netherite (9) vs Gold (12) on any block.
         for i in 0..times.len() {
-            for j in (i + 1)..times.len() {
+            for j in 0..times.len() {
+                if i == j {
+                    continue;
+                }
                 let (tier_a, time_a) = times[i];
                 let (tier_b, time_b) = times[j];
 
                 let speed_a = MATERIAL_TIER_SPEED.get(&tier_a).copied().unwrap_or(1.0);
                 let speed_b = MATERIAL_TIER_SPEED.get(&tier_b).copied().unwrap_or(1.0);
-
-                if speed_a > speed_b {
-                    prop_assert!(
-                        time_a <= time_b,
-                        "Tier {:?} (speed {speed_a}, time {time_a}) should mine faster \
-                         than tier {:?} (speed {speed_b}, time {time_b})",
-                        tier_a, tier_b
-                    );
+                if speed_a <= speed_b {
+                    continue;
                 }
+                let meets_a = harvest_level_of(tier_a) >= required_level;
+                let meets_b = harvest_level_of(tier_b) >= required_level;
+                if meets_a != meets_b {
+                    // Across the harvest gate the property does not hold
+                    // (the under-tier tool drops to the 100-tick branch).
+                    continue;
+                }
+                prop_assert!(
+                    time_a <= time_b,
+                    "Tier {tier_a:?} (speed {speed_a}, time {time_a}) should mine faster \
+                     than tier {tier_b:?} (speed {speed_b}, time {time_b}) on {block_type} \
+                     (required level {required_level})",
+                );
             }
         }
     }
@@ -406,7 +439,13 @@ proptest! {
             // parsed item name must be built from the parser's accepted
             // material/tool name parts.
             let tool_part = format!("{tool:?}").to_lowercase();
-            let material_part = format!("{material:?}").to_lowercase();
+            // 2026-08-29 review: the parser only accepts the "golden_" prefix
+            // for Gold (vanilla item naming), not "gold_" — the Debug-derived
+            // "gold" made the oracle wrong for every gold_* expectation.
+            let material_part = match material {
+                MaterialTier::Gold => "golden".to_string(),
+                other => format!("{other:?}").to_lowercase(),
+            };
             let expected = if tool == ToolType::Shears {
                 "shears".to_string()
             } else {
