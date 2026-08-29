@@ -1197,7 +1197,9 @@ mod tests {
             });
         }
 
-        fn drop_item(&self, _slot: u8, _count: u8) {}
+        fn drop_item(&self, _slot: u8, _count: u8) -> Result<(), BotError> {
+            Ok(())
+        }
 
         fn start_use_item(&self) {}
 

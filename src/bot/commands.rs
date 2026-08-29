@@ -95,7 +95,13 @@ pub(crate) trait BotActions {
     fn switch_hotbar_slot(&self, slot: u8);
 
     /// Drop items from an inventory slot (0-35).
-    fn drop_item(&self, slot: u8, count: u8);
+    ///
+    /// Returns [`BotError::ContainerAlreadyOpen`] when a container window is
+    /// open: the throw-click would target the container menu and eject *its*
+    /// items (2026-08-30 review — the same guard `swap_hotbar` has, but
+    /// reported as an error instead of a silent skip so the caller sees the
+    /// drop never happened rather than a misleading "server rejected").
+    fn drop_item(&self, slot: u8, count: u8) -> Result<(), BotError>;
 
     /// Swap the stack in `source_menu_slot` with the hotbar slot
     /// `target_hotbar_slot` (0-8) via a container swap-click.
@@ -314,13 +320,30 @@ impl BotActions for RealBotClient {
         self.client.set_selected_hotbar_slot(slot);
     }
 
-    fn drop_item(&self, slot: u8, count: u8) {
+    fn drop_item(&self, slot: u8, count: u8) -> Result<(), BotError> {
         // Best-effort: issue a `Throw` click on the player's inventory menu
         // (id=0, no container UI required). The Player menu places the hotbar
         // at slots 36..=44 and the main inventory at 9..=35, so the logical
         // inventory slot (0-35) is mapped to its menu slot. `ThrowClick::Single`
         // drops one item per click (like pressing Q); we issue `count` clicks.
         use azalea_inventory::operations::ThrowClick;
+
+        // Same guard as `swap_hotbar`: the click is only valid against the
+        // player menu (window id 0). While a container is open the throw
+        // would act on the container menu and physically eject the
+        // container's items — an irreversible side effect (2026-08-30
+        // review). Refuse BEFORE touching the selected hotbar slot.
+        let inventory = self.client.get_inventory();
+        if inventory.id() != 0 {
+            warn!(
+                slot,
+                count,
+                window = inventory.id(),
+                "drop_item refused: a container window is open, \
+                 the throw-click would target the container menu"
+            );
+            return Err(BotError::ContainerAlreadyOpen);
+        }
 
         // `set_selected_hotbar_slot` panics on slot > 8, and dropping from a
         // main-inventory slot (9-35) doesn't need selection, so only select
@@ -338,7 +361,6 @@ impl BotActions for RealBotClient {
         } else {
             slot as u16
         };
-        let inventory = self.client.get_inventory();
         for _ in 0..count {
             inventory.click(ThrowClick::Single { slot: menu_slot });
         }
@@ -349,6 +371,7 @@ impl BotActions for RealBotClient {
         if switched_hotbar {
             self.client.set_selected_hotbar_slot(original_slot);
         }
+        Ok(())
     }
 
     fn swap_hotbar(&self, source_menu_slot: u16, target_hotbar_slot: u8) {
@@ -1530,9 +1553,11 @@ impl<B: BotActions> CommandExecutor<B> {
     ///
     /// The previous implementation returned success unconditionally, so a
     /// drop that was silently rejected by the server (e.g. the slot was
-    /// already empty, or a container window was open and the click targeted
-    /// the wrong menu) still reported "Dropped N item(s)". We now read the
-    /// inventory before and after the click and report the truth.
+    /// already empty) still reported "Dropped N item(s)". We now read the
+    /// inventory before and after the click and report the truth. A drop
+    /// with a container window open is refused outright with
+    /// [`BotError::ContainerAlreadyOpen`] (2026-08-30 review) instead of
+    /// silently ejecting the container's items.
     async fn handle_drop_item(&self, slot: u8, count: u8) -> Result<BotResult, BotError> {
         trace!(slot, count, "DropItem");
         // A count of 0 means "drop nothing" — return early without touching the
@@ -1556,7 +1581,11 @@ impl<B: BotActions> CommandExecutor<B> {
             .map(|stack| stack.count)
             .unwrap_or(0);
 
-        self.bot.drop_item(slot, count);
+        // Refuse before touching anything when a container window is open
+        // (P2, 2026-08-30 review): the throw-click would target the
+        // container menu and eject the container's items. The guard lives
+        // in `RealBotClient::drop_item`; the error propagates verbatim.
+        self.bot.drop_item(slot, count)?;
 
         // Give the server a moment to apply the click and send the
         // container-content packets back.
@@ -3102,10 +3131,12 @@ mod tests {
             self.log.hotbar_switch_calls.lock().unwrap().push(slot);
         }
 
-        fn drop_item(&self, slot: u8, count: u8) {
+        fn drop_item(&self, slot: u8, count: u8) -> Result<(), BotError> {
             self.log.drop_item_calls.lock().unwrap().push((slot, count));
             // Simulate the server applying the throw-click so drop
             // verification sees a reduced stack (mirrors a real drop).
+            // (The mock has no container-window state, so the
+            // ContainerAlreadyOpen guard is RealBotClient-only.)
             let mut inv = self.log.inventory.lock().unwrap();
             if let Some(Some(stack)) = inv.get_mut(slot as usize) {
                 stack.count = stack.count.saturating_sub(count);
@@ -3113,6 +3144,7 @@ mod tests {
                     inv[slot as usize] = None;
                 }
             }
+            Ok(())
         }
 
         fn stop_pathfinding(&self) {
