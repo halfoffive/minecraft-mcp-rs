@@ -235,8 +235,10 @@ mod tests {
 
     #[test]
     fn test_mine_time_hand_no_penalty() {
-        // ice is not in BLOCK_TO_TOOL_TYPE, so it doesn't require a tool.
-        // Hand on ice: no penalty, speed = 1.0.
+        // Hand on ice: no tool-for-drops gate (ice has HARVEST_LEVEL 0 and
+        // is NOT in TOOL_REQUIRED_FOR_DROPS — the pickaxe entry in
+        // BLOCK_TO_TOOL_TYPE only makes the pickaxe faster, it does not
+        // gate drops), so Hand stays on the 30-tick branch with speed 1.0.
         let time = calculate_mine_time("ice", ToolType::Hand, MaterialTier::Wood);
         assert!((time - 0.75).abs() < 1e-9); // 0.5 * 1.5 / 1.0 = 0.75
     }

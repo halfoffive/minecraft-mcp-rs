@@ -456,6 +456,45 @@ mod tests {
     }
 
     #[test]
+    fn test_harvest_level_wood_cant_mine_lapis_block() {
+        // 2026-08-29 review: lapis_block is vanilla needs_stone_tool
+        // (level 1). The old level-0 entry accepted a wood pickaxe, which
+        // breaks the block for NO drops. Stone tier is required.
+        let inv = vec![Some(ItemStack {
+            item_id: "wooden_pickaxe".to_string(),
+            count: 1,
+        })];
+        assert_eq!(
+            find_tool_in_inventory(&ToolType::Pickaxe, &inv, Some(1)),
+            None
+        );
+        // A stone pickaxe passes.
+        let inv = vec![Some(ItemStack {
+            item_id: "stone_pickaxe".to_string(),
+            count: 1,
+        })];
+        assert_eq!(
+            find_tool_in_inventory(&ToolType::Pickaxe, &inv, Some(1)),
+            Some((MaterialTier::Stone, 0))
+        );
+    }
+
+    #[test]
+    fn test_harvest_level_diamond_pickaxe_mines_netherite_block() {
+        // 2026-08-29 review: netherite_block sits at level 3 (vanilla
+        // needs_diamond_tool; needs_netherite_tool is empty), so a diamond
+        // pickaxe must NOT be refused anymore.
+        let inv = vec![Some(ItemStack {
+            item_id: "diamond_pickaxe".to_string(),
+            count: 1,
+        })];
+        assert_eq!(
+            find_tool_in_inventory(&ToolType::Pickaxe, &inv, Some(3)),
+            Some((MaterialTier::Diamond, 0))
+        );
+    }
+
+    #[test]
     fn test_harvest_level_iron_passes_diamond_filter() {
         // iron_pickaxe has level 2 — exactly meets diamond_ore's requirement.
         let inv = vec![Some(ItemStack {

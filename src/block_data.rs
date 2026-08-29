@@ -49,6 +49,8 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "cobblestone_wall",
         "bedrock",
         "obsidian",
+        "crying_obsidian",
+        "respawn_anchor",
         // Ores
         "coal_ore",
         "iron_ore",
@@ -520,7 +522,7 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
     m.insert("cobblestone_slab", 2.0);
     m.insert("cobblestone_wall", 2.0);
     m.insert("stone_stairs", 1.5);
-    m.insert("stone_slab", 1.5);
+    m.insert("stone_slab", 2.0);
     m.insert("mossy_stone_bricks", 1.5);
     m.insert("cracked_stone_bricks", 1.5);
     m.insert("brick_stairs", 2.0);
@@ -671,6 +673,8 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
 
     // Notable blocks
     m.insert("obsidian", 50.0);
+    m.insert("crying_obsidian", 50.0);
+    m.insert("respawn_anchor", 50.0);
     m.insert("furnace", 3.5);
     m.insert("blast_furnace", 3.5);
     m.insert("smoker", 3.5);
@@ -1113,8 +1117,6 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
         "bone_block",
         "magma_block",
         "coal_block",
-        "redstone_block",
-        "lapis_block",
     ] {
         m.insert(block, 0u8);
     }
@@ -1151,6 +1153,7 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
         "deepslate_copper_ore",
         "lapis_ore",
         "deepslate_lapis_ore",
+        "lapis_block",
         "copper_block",
         "exposed_copper",
         "weathered_copper",
@@ -1179,6 +1182,7 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
         "deepslate_gold_ore",
         "redstone_ore",
         "deepslate_redstone_ore",
+        "redstone_block",
         "diamond_ore",
         "deepslate_diamond_ore",
         "emerald_ore",
@@ -1191,13 +1195,18 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
         m.insert(block, 2u8);
     }
 
-    // Level 3: needs diamond+ (obsidian, ancient debris). A diamond pickaxe
-    // is sufficient to mine and drop ancient debris in vanilla Minecraft.
+    // Level 3: needs diamond+ (vanilla needs_diamond_tool: obsidian,
+    // ancient debris, crying obsidian, respawn anchor, and the block of
+    // netherite — vanilla's needs_netherite_tool tag is EMPTY, so the
+    // netherite block sits at level 3 like its ore-derived siblings; the
+    // old level-4 entry refused a diamond pickaxe from a block the server
+    // happily lets it mine). A diamond pickaxe is sufficient to mine and
+    // drop all of these in vanilla Minecraft.
     m.insert("obsidian", 3u8);
     m.insert("ancient_debris", 3u8);
-
-    // Level 4: needs netherite (netherite block only).
-    m.insert("netherite_block", 4u8);
+    m.insert("crying_obsidian", 3u8);
+    m.insert("respawn_anchor", 3u8);
+    m.insert("netherite_block", 3u8);
 
     // Bedrock is unbreakable regardless of tool.
     m.insert("bedrock", u8::MAX);
@@ -1373,6 +1382,8 @@ pub static TOOL_REQUIRED_FOR_DROPS: LazyLock<HashSet<&'static str>> = LazyLock::
         "obsidian",
         "ancient_debris",
         "netherite_block",
+        "crying_obsidian",
+        "respawn_anchor",
         // Non-pickaxe tools: cobweb needs sword/shears for string, snow
         // needs a shovel for snowballs.
         "cobweb",
@@ -1454,6 +1465,7 @@ pub fn material_from_item_name(name: &str) -> Option<(ToolType, MaterialTier)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mining_calc::get_block_hardness;
     use crate::types::{MaterialTier, ToolType};
 
     // --- best_tool_for_block ---
@@ -1464,6 +1476,23 @@ mod tests {
         assert_eq!(best_tool_for_block("cobblestone"), ToolType::Pickaxe);
         assert_eq!(best_tool_for_block("iron_ore"), ToolType::Pickaxe);
         assert_eq!(best_tool_for_block("deepslate"), ToolType::Pickaxe);
+        // 2026-08-29 review: the common nether blocks used to fall through
+        // to the Hand default (untabled) — a 1.5 s budget against a real
+        // 250 s hand-break with no M-16 tool refusal.
+        assert_eq!(best_tool_for_block("crying_obsidian"), ToolType::Pickaxe);
+        assert_eq!(best_tool_for_block("respawn_anchor"), ToolType::Pickaxe);
+    }
+
+    #[test]
+    fn test_block_hardness_new_nether_blocks() {
+        // 2026-08-29 review: crying_obsidian / respawn_anchor carry their
+        // vanilla hardness (50, same as obsidian) so the mine-time model
+        // budgets the real work instead of the 1.0 default.
+        assert_eq!(get_block_hardness("crying_obsidian"), 50.0);
+        assert_eq!(get_block_hardness("respawn_anchor"), 50.0);
+        // stone_slab corrected to the vanilla 2.0 (all sibling slabs were
+        // already 2.0).
+        assert_eq!(get_block_hardness("stone_slab"), 2.0);
     }
 
     #[test]
@@ -1887,8 +1916,21 @@ mod tests {
         assert_eq!(HARVEST_LEVEL.get("obsidian").copied(), Some(3));
         // Ancient debris needs a diamond pickaxe (level 3), not netherite.
         assert_eq!(HARVEST_LEVEL.get("ancient_debris").copied(), Some(3));
-        // Needs netherite.
-        assert_eq!(HARVEST_LEVEL.get("netherite_block").copied(), Some(4));
+        // 2026-08-29 review: vanilla's needs_diamond_tool tag covers
+        // crying obsidian and the respawn anchor too.
+        assert_eq!(HARVEST_LEVEL.get("crying_obsidian").copied(), Some(3));
+        assert_eq!(HARVEST_LEVEL.get("respawn_anchor").copied(), Some(3));
+        // Needs netherite -> level 3. Vanilla's needs_netherite_tool tag is
+        // EMPTY; the block of netherite is in needs_diamond_tool, so a
+        // diamond pickaxe mines it (the old level-4 entry refused a legal
+        // mining).
+        assert_eq!(HARVEST_LEVEL.get("netherite_block").copied(), Some(3));
+        // 2026-08-29 review: lapis_block is in vanilla needs_stone_tool and
+        // redstone_block in needs_iron_tool — matching their ores
+        // (lapis_ore=1, redstone_ore=2). The old level-0 entries let a wood
+        // pickaxe break them for no drops.
+        assert_eq!(HARVEST_LEVEL.get("lapis_block").copied(), Some(1));
+        assert_eq!(HARVEST_LEVEL.get("redstone_block").copied(), Some(2));
         // Unbreakable.
         assert_eq!(HARVEST_LEVEL.get("bedrock").copied(), Some(u8::MAX));
     }
