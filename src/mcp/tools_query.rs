@@ -276,7 +276,7 @@ pub fn get_nearby_blocks(
         })
         .collect();
 
-    let total_matched = matched.len();
+    let mut total_matched = matched.len();
 
     if top_only {
         // Group by (x, z) and keep the entry with the greatest y.
@@ -296,6 +296,12 @@ pub fn get_nearby_blocks(
             ))
         });
         matched.dedup_by(|a, b| a.position.x == b.position.x && a.position.z == b.position.z);
+        // 2026-08-30 review: `total_matched` is re-counted AFTER the
+        // air-drop and column dedup for `top_only` — it must describe what
+        // matched the view (the columns the caller is about to see), not a
+        // pre-transform number that includes air entries and buried
+        // duplicates `count` can never report.
+        total_matched = matched.len();
     }
 
     // Cap the response; report truncation honestly so the caller can shrink
@@ -496,22 +502,36 @@ pub(crate) async fn probe_commands_enabled(
 
 /// The probe logic with an explicit envelope timeout (unit-testable with a
 /// short duration; production uses [`PROBE_TIMEOUT`]).
+///
+/// 2026-08-30 review: the cache write only happens on a DEFINITIVE outcome.
+/// The old shape cached unconditionally — the unknown branch read the
+/// previous value and wrote it right back (a no-op write that could
+/// resurrect a probe `clear_session_state` had just cleared between the
+/// get and the set), and `Ok(_)` cached `Some(true)` without even looking
+/// at `BotResult::success`.
 async fn probe_commands_enabled_with_timeout(
     state: &Arc<SharedState>,
     sender: &BotCommandSender,
     timeout: Duration,
 ) -> Option<bool> {
-    let probe = match sender
+    let outcome = match sender
         .send_command_with_timeout(BotCommand::ExecuteCommand("/seed".into()), timeout)
         .await
     {
-        Ok(_) => Some(true),
+        // Only a successful round-trip proves the bot can run commands.
+        Ok(res) if res.success => Some(true),
         Err(BotError::CommandRejected { .. }) => Some(false),
-        // Timeout/offline/internal: keep the previous value (or None).
-        Err(_) => state.get_commands_probe(),
+        // Ok-but-unsuccessful, timeout, offline, internal: no evidence
+        // either way — leave the cache untouched.
+        _ => None,
     };
-    state.set_commands_probe(probe);
-    probe
+    match outcome {
+        Some(probe) => {
+            state.set_commands_probe(Some(probe));
+            Some(probe)
+        }
+        None => state.get_commands_probe(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -694,7 +714,17 @@ pub fn get_world_view(
     // Cache hit: same snapshot revision + radius + scale → return cached
     // bytes. `timestamp` alone is seconds-granularity and can repeat for two
     // consecutive 500 ms snapshot builds; `snapshot_seq` is monotonic.
-    if let Some(cache) = state.get_world_view_cache()
+    //
+    // The key check goes through the META probe first (2026-08-29 review)
+    // so a miss does not clone the ~700 KB base64 payload just to compare
+    // three integers. On a meta hit the full cache is fetched and its keys
+    // re-verified, since the single-entry cache can be replaced between the
+    // two lock acquisitions.
+    if let Some(meta) = state.world_view_cache_meta()
+        && meta.snapshot_seq == snapshot_seq
+        && meta.radius == radius
+        && meta.scale == scale
+        && let Some(cache) = state.get_world_view_cache()
         && cache.snapshot_seq == snapshot_seq
         && cache.radius == radius
         && cache.scale == scale

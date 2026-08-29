@@ -338,7 +338,15 @@ static ACTIVITY_ANCHOR: LazyLock<Instant> = LazyLock::new(Instant::now);
 ///
 /// Fits comfortably in a [`u64`] (wraps only after ~584 years of uptime).
 fn activity_elapsed_nanos() -> u64 {
-    ACTIVITY_ANCHOR.elapsed().as_nanos() as u64
+    // The stored sentinel `0` means "never stamped" (`last_command_at` /
+    // `mcp_activity_at` map 0 → None), so a real stamp must never BE 0.
+    // The anchor is a lazily-initialised `Instant::now()`: when the
+    // process's FIRST stamp happens to be the very call that initialises
+    // the anchor, `elapsed()` measures 0 (Windows timer granularity is
+    // ~100 ns) and the mark was silently dropped — surfaced by the
+    // 2026-08-30 test round as a flaky `test_activity_probes_monotonic`.
+    // Clamp to 1 ns; age arithmetic uses `saturating_duration_since`.
+    ACTIVITY_ANCHOR.elapsed().as_nanos().max(1) as u64
 }
 
 impl SharedState {
@@ -610,6 +618,21 @@ impl SharedState {
         f(&mut guard);
     }
 
+    /// Read-modify-write the config under ONE write-lock scope.
+    ///
+    /// The closure receives `&mut AppConfig` and may return any value; it
+    /// runs atomically with respect to other `update_config` /
+    /// `modify_config` callers. Prefer this over a
+    /// `read_config().clone()` → build candidate → `update_config` sequence
+    /// whenever the candidate must reflect the *current* config: the two
+    /// separate lock scopes of that shape let a concurrent writer be
+    /// clobbered by the whole-struct commit (2026-08-30 review —
+    /// `update_settings` raced exactly that way under HTTP multiplexing).
+    pub fn modify_config<R>(&self, f: impl FnOnce(&mut AppConfig) -> R) -> R {
+        let mut guard = self.config.write().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
+    }
+
     /// Read config under a read lock.
     ///
     /// Returns a [`RwLockReadGuard`] — keep the lock short.
@@ -871,16 +894,33 @@ impl SharedState {
         }
     }
 
-    /// Whether the snapshot updater is on its relaxed idle cadence at `now`.
+    /// Whether a verification step with the given `budget` must re-stamp
+    /// command activity *before* it starts polling.
     ///
-    /// True when no command has been dispatched within
-    /// [`Self::ACTIVITY_WINDOW`] — including the never-dispatched case.
-    /// Compound operations that sleep between their last dispatch and a
-    /// snapshot-dependent verification step (mining) use this to detect that
-    /// they must re-stamp activity before polling, or the relaxed cadence
-    /// would outlast the verification budget.
-    pub(crate) fn snapshot_cadence_idle(&self, now: Instant) -> bool {
-        !Self::within_activity_window(self.last_command_at(), now)
+    /// The mining/place/use verification budgets are
+    /// `snapshot_interval_ms + 250 ms`, but the updater only honors that
+    /// cadence while activity is inside [`Self::ACTIVITY_WINDOW`]. The
+    /// previous guard (`snapshot_cadence_idle`) only re-stamped when the
+    /// window had *already* expired — a 2.5 s hand-mine ended its sleep at
+    /// age ≈ 2.5 s (< window), skipped the re-stamp, and if the last fast
+    /// build had just happened the next rebuild waited out the full relaxed
+    /// 5 s interval: far past the verification budget, so a successful break
+    /// was reported as `MiningInterrupted("block still present")`
+    /// (2026-08-30 review P2, the narrowed remainder of the 1.4.2 P1).
+    ///
+    /// Re-stamp when `age + budget >= ACTIVITY_WINDOW`: by the time the
+    /// polling finishes, the window will have lapsed and the updater would
+    /// have gone idle mid-verification. `None` (no activity ever recorded)
+    /// counts as an infinite age and always re-stamps.
+    pub(crate) fn verification_needs_activity_restamp(
+        &self,
+        now: Instant,
+        budget: Duration,
+    ) -> bool {
+        let age = self
+            .last_command_at()
+            .map_or(Duration::MAX, |t| now.saturating_duration_since(t));
+        age.saturating_add(budget) >= Self::ACTIVITY_WINDOW
     }
 
     /// Record that a bot command was dispatched right now (monotonic).
@@ -1140,6 +1180,24 @@ impl SharedState {
     pub fn take_bot_thread_handle(&self) -> Option<std::thread::JoinHandle<()>> {
         let mut guard = self.bot_thread.lock().unwrap_or_else(|e| e.into_inner());
         guard.take()
+    }
+
+    /// Non-consuming probe: is a bot connection thread alive right now?
+    ///
+    /// Unlike [`Self::take_bot_thread_handle`] this leaves the handle in
+    /// place. The headless supervisor's quiet-wait uses it to re-check,
+    /// before consuming the config-restart flag, that no bot thread has
+    /// appeared since it entered the wait (2026-08-29 review — an agent
+    /// can call `connect_bot` while the supervisor sits in the quiet-wait;
+    /// a live thread then owns the flag per the M-10 single-ownership
+    /// rule).
+    pub(crate) fn bot_thread_running(&self) -> bool {
+        self.bot_thread
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|handle| !handle.is_finished())
+            .unwrap_or(false)
     }
 }
 
@@ -1678,24 +1736,27 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_cadence_idle_tracks_activity() {
+    fn test_activity_window_predicate_tracks_activity() {
         // Regression (2026-08-25 review): execute_mine_block re-stamps
         // command activity after a long mine sleep so the relaxed idle
         // snapshot cadence cannot outlast the mining verification budget.
-        // This pins the predicate that decides whether the restamp fires.
+        // This pins the pure window predicate behind that decision (the
+        // `snapshot_cadence_idle` wrapper it used to test was removed in
+        // the 2026-08-30 round when every call site moved to
+        // `verification_needs_activity_restamp`).
         let state = SharedState::new(AppConfig::default());
 
-        // Never dispatched → updater is on the relaxed cadence.
+        // Never dispatched → not within the window (idle cadence).
         assert!(
-            state.snapshot_cadence_idle(Instant::now()),
-            "no command ever → idle cadence"
+            !SharedState::within_activity_window(state.last_command_at(), Instant::now()),
+            "no command ever → outside the window"
         );
 
         // A fresh dispatch puts the updater back on the fast cadence.
         state.mark_command_activity();
         assert!(
-            !state.snapshot_cadence_idle(Instant::now()),
-            "just-dispatched → fast cadence"
+            SharedState::within_activity_window(state.last_command_at(), Instant::now()),
+            "just-dispatched → inside the window"
         );
 
         // The pure window check agrees with the accessor-based view for
@@ -1709,6 +1770,65 @@ mod tests {
             Some(now - SharedState::ACTIVITY_WINDOW - Duration::from_millis(1)),
             now
         ));
+    }
+
+    #[test]
+    fn test_verification_needs_activity_restamp_covers_near_window() {
+        // Regression (2026-08-30 review P2): the old restamp guard
+        // (`snapshot_cadence_idle`) fired only when the 3 s window had
+        // ALREADY expired. A 2.5 s hand-mine ended its sleep at age ≈ 2.5 s
+        // (< window), skipped the restamp, and a verification budget of
+        // ~750 ms then ran the window out mid-poll — the relaxed 5 s
+        // cadence outlasted the budget and a successful break was reported
+        // as MiningInterrupted("block still present"). The decision must be
+        // `age + budget >= ACTIVITY_WINDOW`.
+        let state = SharedState::new(AppConfig::default());
+        let budget = Duration::from_millis(750);
+
+        // Never dispatched → infinite age → must restamp.
+        assert!(
+            state.verification_needs_activity_restamp(Instant::now(), budget),
+            "no activity ever → restamp"
+        );
+
+        // Synthetic stamps: the field stores nanos since ACTIVITY_ANCHOR —
+        // the exact arithmetic `last_command_at` reads back. Last command at
+        // anchor+0.5 s, now = anchor+3.0 s → age 2.5 s.
+        state.last_command_at.store(
+            Duration::from_millis(500).as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        let now = *ACTIVITY_ANCHOR + Duration::from_millis(3_000);
+        // Age 2.5 s is still INSIDE the 3 s window (the old guard skipped
+        // the restamp in exactly this band), but age + budget = 3.25 s
+        // crosses it → must restamp.
+        assert!(
+            SharedState::within_activity_window(state.last_command_at(), now),
+            "precondition: age 2.5 s is inside the window (the case the old guard missed)"
+        );
+        assert!(
+            state.verification_needs_activity_restamp(now, budget),
+            "2.5 s age + 0.75 s budget must cross the 3 s window → restamp"
+        );
+
+        // A young command (age 0.5 s) with the same budget stays under the
+        // window even after the budget elapses → no restamp.
+        state.last_command_at.store(
+            Duration::from_millis(2_500).as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        assert!(
+            !state.verification_needs_activity_restamp(now, budget),
+            "0.5 s age + 0.75 s budget stays under the window → no restamp"
+        );
+
+        // End-to-end through the real accessor: a fresh dispatch + small
+        // budget must not restamp (the window easily outlives verification).
+        state.mark_command_activity();
+        assert!(
+            !state.verification_needs_activity_restamp(Instant::now(), budget),
+            "fresh dispatch → no restamp needed"
+        );
     }
 
     // -- last_error -----------------------------------------------------------

@@ -511,6 +511,28 @@ impl AppConfig {
             );
             config.reconnect_max_delay_ms = config.reconnect_initial_delay_ms;
         }
+
+        // F-8/validate() cross-field reconciliation (2026-08-30 review):
+        // HTTP on a non-loopback bind with auth DISABLED would fail the
+        // final validate(), and main.rs's last-resort fallback discarded
+        // the ENTIRE env config — including a pinned MINECRAFT_MCP_TOKEN,
+        // which silently regenerated as a random UUID and 401'd every
+        // existing client. The single offending field is corrected instead:
+        // auth is forced ON (the token then authenticates exactly as the
+        // operator configured it). Deliberate asymmetry: the update_settings
+        // MCP tool still HONESTLY REJECTS this same combination — there the
+        // caller explicitly asked for it and must see the error, while a
+        // process start must come up usable.
+        if config.mcp_transport == McpTransport::Http
+            && !is_loopback_bind_address(&config.mcp_address)
+            && !config.mcp_auth_enabled
+        {
+            tracing::warn!(
+                bind = %config.mcp_address,
+                "HTTP MCP server on a non-loopback bind requires authentication;                  forcing mcp_auth_enabled=true (set MINECRAFT_MCP_TOKEN to pin the token)"
+            );
+            config.mcp_auth_enabled = true;
+        }
         config
     }
 }
@@ -1347,6 +1369,44 @@ mod tests {
         assert_eq!(config.command_timeout_secs, defaults.command_timeout_secs);
         assert_eq!(config.fly_timeout_secs, defaults.fly_timeout_secs);
         // The resulting config must pass full validation too.
+        assert!(config.validate().is_ok());
+    }
+
+    /// 2026-08-30 review: HTTP on a non-loopback bind with auth DISABLED
+    /// used to fail the final validate() and make main.rs discard the
+    /// ENTIRE env config — including the pinned MINECRAFT_MCP_TOKEN (which
+    /// then regenerated as a random UUID and 401'd every client).
+    /// from_env now forces auth ON for exactly that combination and keeps
+    /// every other field, so the result validates and the token survives.
+    #[test]
+    fn test_from_env_forces_auth_on_for_non_loopback_http() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let pinned_token = "pinned-token-for-reconciliation-test";
+        let _guards = [
+            EnvGuard::set("MINECRAFT_MCP_TRANSPORT", "http"),
+            EnvGuard::set("MINECRAFT_MCP_MCP_ADDRESS", "0.0.0.0"),
+            EnvGuard::set("MINECRAFT_MCP_AUTH_ENABLED", "false"),
+            EnvGuard::set("MINECRAFT_MCP_TOKEN", pinned_token),
+        ];
+        let config = AppConfig::from_env();
+        assert_eq!(config.mcp_transport, McpTransport::Http);
+        assert_eq!(config.mcp_address, "0.0.0.0");
+        assert!(
+            config.mcp_auth_enabled,
+            "auth must be forced on for HTTP + non-loopback"
+        );
+        assert_eq!(
+            config.mcp_token, pinned_token,
+            "the pinned token must survive the reconciliation"
+        );
+        // The corrected config passes full validation (the old path
+        // discarded everything instead).
+        assert!(config.validate().is_ok());
+
+        // Loopback HTTP needs no correction.
+        let _loopback = EnvGuard::set("MINECRAFT_MCP_MCP_ADDRESS", "127.0.0.1");
+        let config = AppConfig::from_env();
+        assert!(!config.mcp_auth_enabled, "loopback binds stay opt-in");
         assert!(config.validate().is_ok());
     }
 

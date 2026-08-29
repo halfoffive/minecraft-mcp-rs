@@ -704,11 +704,13 @@ async fn test_command_timeout_responder_alive_but_slow() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Test 7: Auto-reconnect sequence simulation
+// Test 7: Online → offline → snapshot-reseed flow (formerly named
+// "auto-reconnect simulation"; it never exercised the reconnect loop —
+// renamed to say what it does, 2026-08-29 review)
 // ═══════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn test_auto_reconnect_sequence_simulation() {
+async fn test_online_offline_snapshot_reseed_flow() {
     let state = make_online_state();
     let (sender, mut receiver) = channel::create_command_channel(4, state.clone());
 
@@ -864,16 +866,57 @@ async fn test_all_query_tools_exist_and_work() {
     .unwrap();
     assert!(inventory.contains("held_item_slot"));
 
+    // 2026-08-30 review: the old assertions were `!string.is_empty()` on
+    // serialized JSON OBJECTS — always true, never a content check. The
+    // fixture's blocks/entities sit far from the player (100, 64, 200), so
+    // radius 1 must return an empty but well-formed view; radius 200 must
+    // see both seeded blocks.
     let nearby_blocks =
         minecraft_mcp_rs::mcp::tools_query::get_nearby_blocks(&state, 1, None, false, 500).unwrap();
-    assert!(!nearby_blocks.is_empty());
+    let parsed: serde_json::Value = serde_json::from_str(&nearby_blocks).unwrap();
+    assert_eq!(parsed["count"], 0, "no fixture block is within radius 1");
+    assert_eq!(parsed["blocks"], serde_json::json!([]));
+    assert_eq!(parsed["truncated"], false);
+    assert_eq!(parsed["total_matched"], 0);
+
+    // Positive case on a locally-extended snapshot (the shared fixture's
+    // blocks sit 200 blocks away, beyond the radius-100 runtime cap): a
+    // block adjacent to the player must show up with the exact fields.
+    let extended_state = make_online_state();
+    extended_state.modify_snapshot(|snap| {
+        snap.blocks.push(BlockEntry {
+            position: BlockPos::new(101, 64, 200),
+            block_type: "oak_planks".into(),
+            block_state: None,
+        });
+        snap.rebuild_block_index();
+    });
+    let nearby_one =
+        minecraft_mcp_rs::mcp::tools_query::get_nearby_blocks(&extended_state, 1, None, false, 500)
+            .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&nearby_one).unwrap();
+    assert_eq!(parsed["count"], 1, "the adjacent block is within radius 1");
+    assert_eq!(parsed["total_matched"], 1);
+    assert_eq!(parsed["blocks"][0]["block_type"], "oak_planks");
+    assert_eq!(
+        parsed["blocks"][0]["position"],
+        serde_json::json!({"x": 101, "y": 64, "z": 200})
+    );
 
     let nearby_entities =
         minecraft_mcp_rs::mcp::tools_query::get_nearby_entities(&state, 1).unwrap();
-    assert!(!nearby_entities.is_empty());
+    let parsed: serde_json::Value = serde_json::from_str(&nearby_entities).unwrap();
+    assert_eq!(parsed["count"], 0, "no fixture entity is within radius 1");
+    assert_eq!(parsed["entities"], serde_json::json!([]));
 
     let chunk_summary = minecraft_mcp_rs::mcp::tools_query::get_chunk_summary(&state).unwrap();
-    assert!(!chunk_summary.is_empty());
+    let parsed: serde_json::Value = serde_json::from_str(&chunk_summary).unwrap();
+    // get_chunk_summary returns the raw Vec<(i32, i32)> as a JSON array.
+    assert_eq!(
+        parsed,
+        serde_json::json!([[0, 0], [-1, 1]]),
+        "the fixture seeds exactly two chunk entries"
+    );
 
     let connected = minecraft_mcp_rs::mcp::tools_query::is_connected(&state).unwrap();
     assert_eq!(connected, r#"{"connected":true}"#);
@@ -1407,9 +1450,16 @@ fn test_update_settings_applies_valid_input() {
 #[tokio::test]
 async fn test_connect_bot_offline_spawns_connection() {
     let state = make_offline_state();
-    // Point at a port nothing listens on so the connection attempt fails
-    // fast (no real network dependency in tests).
-    state.update_config(|cfg| cfg.mc_port = 1);
+    // Bind-and-HOLD an ephemeral port so the connection attempt hits a
+    // port that is guaranteed unprivileged and (unlike the old hardcoded
+    // port 1) not subject to firewall/privilege filtering on CI sandboxes
+    // — 2026-08-29 review. 2026-08-30 review: the listener is kept ALIVE
+    // until the connection attempt has run; the old bind-and-drop left a
+    // TOCTOU window where another process could re-bind the released port
+    // and the test would then depend on a live server's reply timing.
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe listener binds");
+    let closed_port = probe.local_addr().expect("local addr").port();
+    state.update_config(|cfg| cfg.mc_port = closed_port);
     let (sender, _receiver) = channel::create_command_channel(4, state.clone());
     let slot: Arc<std::sync::Mutex<Option<channel::BotCommandReceiver>>> =
         Arc::new(std::sync::Mutex::new(None));
@@ -1439,6 +1489,8 @@ async fn test_connect_bot_offline_spawns_connection() {
         !state.is_connecting(),
         "connecting flag must be cleared after thread exit"
     );
+    // The connection attempt is over — the reserved port can go now.
+    drop(probe);
 }
 
 /// `disconnect_bot` requests a disconnect (idempotent offline no-op).

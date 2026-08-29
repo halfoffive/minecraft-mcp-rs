@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use azalea::pathfinder::goals::BlockPosGoal;
 use azalea::prelude::*;
@@ -15,6 +15,7 @@ use tracing::{debug, trace, warn};
 
 use crate::block_data::ItemStack;
 use crate::bot::ops::{CompoundOpExecutor, wait_for_block_present};
+use crate::bot::snapshot_updater::{RETENTION_CHUNK_FLOOR, block_within_chunk_radius};
 use crate::channel::{
     BotCommandReceiver, BotCommandSender, BotCommandWithResponder, ReceiverLease,
 };
@@ -93,8 +94,23 @@ pub(crate) trait BotActions {
     /// Switch to a hotbar slot (0–8).
     fn switch_hotbar_slot(&self, slot: u8);
 
+    /// Live selected hotbar slot (0-8), read directly from the client.
+    ///
+    /// The throttled snapshot's `SelfPlayer::held_item_slot` can lag the
+    /// just-switched slot by a whole idle interval; a handler that needs to
+    /// know what is actually in hand right now must use this (2026-08-30
+    /// review P2 — `handle_use_item_on_block` used to mix a live inventory
+    /// read with the snapshot's stale slot, misclassifying placement items).
+    fn selected_hotbar_slot(&self) -> u8;
+
     /// Drop items from an inventory slot (0-35).
-    fn drop_item(&self, slot: u8, count: u8);
+    ///
+    /// Returns [`BotError::ContainerAlreadyOpen`] when a container window is
+    /// open: the throw-click would target the container menu and eject *its*
+    /// items (2026-08-30 review — the same guard `swap_hotbar` has, but
+    /// reported as an error instead of a silent skip so the caller sees the
+    /// drop never happened rather than a misleading "server rejected").
+    fn drop_item(&self, slot: u8, count: u8) -> Result<(), BotError>;
 
     /// Swap the stack in `source_menu_slot` with the hotbar slot
     /// `target_hotbar_slot` (0-8) via a container swap-click.
@@ -313,13 +329,34 @@ impl BotActions for RealBotClient {
         self.client.set_selected_hotbar_slot(slot);
     }
 
-    fn drop_item(&self, slot: u8, count: u8) {
+    fn selected_hotbar_slot(&self) -> u8 {
+        self.client.selected_hotbar_slot()
+    }
+
+    fn drop_item(&self, slot: u8, count: u8) -> Result<(), BotError> {
         // Best-effort: issue a `Throw` click on the player's inventory menu
         // (id=0, no container UI required). The Player menu places the hotbar
         // at slots 36..=44 and the main inventory at 9..=35, so the logical
         // inventory slot (0-35) is mapped to its menu slot. `ThrowClick::Single`
         // drops one item per click (like pressing Q); we issue `count` clicks.
         use azalea_inventory::operations::ThrowClick;
+
+        // Same guard as `swap_hotbar`: the click is only valid against the
+        // player menu (window id 0). While a container is open the throw
+        // would act on the container menu and physically eject the
+        // container's items — an irreversible side effect (2026-08-30
+        // review). Refuse BEFORE touching the selected hotbar slot.
+        let inventory = self.client.get_inventory();
+        if inventory.id() != 0 {
+            warn!(
+                slot,
+                count,
+                window = inventory.id(),
+                "drop_item refused: a container window is open, \
+                 the throw-click would target the container menu"
+            );
+            return Err(BotError::ContainerAlreadyOpen);
+        }
 
         // `set_selected_hotbar_slot` panics on slot > 8, and dropping from a
         // main-inventory slot (9-35) doesn't need selection, so only select
@@ -337,7 +374,6 @@ impl BotActions for RealBotClient {
         } else {
             slot as u16
         };
-        let inventory = self.client.get_inventory();
         for _ in 0..count {
             inventory.click(ThrowClick::Single { slot: menu_slot });
         }
@@ -348,6 +384,7 @@ impl BotActions for RealBotClient {
         if switched_hotbar {
             self.client.set_selected_hotbar_slot(original_slot);
         }
+        Ok(())
     }
 
     fn swap_hotbar(&self, source_menu_slot: u16, target_hotbar_slot: u8) {
@@ -386,10 +423,14 @@ impl BotActions for RealBotClient {
         // azalea 0.15.1: entity_id_by_minecraft_id was renamed to
         // ecs_entity_by_minecraft_entity and takes a MinecraftEntityId.
         let eid = clamp_to_i32(entity_id);
+        // EntityNotFound (-32002 RESOURCE_NOT_FOUND), not Internal: an ECS
+        // lookup miss is "the entity is gone", which MCP clients branch on
+        // (2026-08-30 review — mirrors the executor-layer EntityNotFound
+        // mapping the F-34 round established).
         let entity = self
             .client
             .ecs_entity_by_minecraft_entity(azalea::world::MinecraftEntityId(eid))
-            .ok_or_else(|| BotError::Internal(format!("entity with id {} not found", entity_id)))?;
+            .ok_or(BotError::EntityNotFound(entity_id))?;
         self.client.attack(entity);
         Ok(())
     }
@@ -690,6 +731,16 @@ impl<B: BotActions> CommandExecutor<B> {
     pub(crate) async fn run_with_lease(&mut self, mut lease: ReceiverLease) {
         trace!("command executor loop started (leased receiver)");
 
+        // 2026-08-29 review: commands buffered while no executor held the
+        // receiver belong to a PREVIOUS session (or to the offline window);
+        // executing them here would leak session A's effects into session B
+        // with every responder already gone. Drain-and-reject up front so
+        // each stale sender gets an immediate honest Offline error.
+        let drained = lease.drain_stale("stale command from a previous session");
+        if drained > 0 {
+            warn!("drained {drained} stale cross-session command(s) at executor start");
+        }
+
         loop {
             let wrapped = lease.receiver_mut().recv().await;
             match wrapped {
@@ -838,6 +889,22 @@ impl<B: BotActions> CommandExecutor<B> {
 
     // ── Movement handlers ────────────────────────────────────────
 
+    /// Live bot position floored to a [`BlockPos`], falling back to the
+    /// throttled snapshot when the client has no position component yet
+    /// (offline or before the first sync).
+    ///
+    /// The F-25/M-4/R-12 pattern every movement result uses: a throttled
+    /// snapshot can lag a just-finished (or just-aborted) move by a whole
+    /// idle interval, and LLM clients misread that stale coordinate as
+    /// "did not arrive" — so the live `Position` component wins whenever it
+    /// is available.
+    fn live_blockpos(&self) -> BlockPos {
+        self.bot
+            .position()
+            .map(|[x, y, z]| BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32))
+            .unwrap_or_else(|| self.state.read_snapshot().self_player.position)
+    }
+
     async fn handle_move_to(&self, pos: BlockPos) -> Result<BotResult, BotError> {
         trace!(?pos, "MoveTo");
         match self.goto_with_margin(pos).await {
@@ -901,7 +968,13 @@ impl<B: BotActions> CommandExecutor<B> {
         // Leave a small margin for the executor to reply before the envelope
         // timeout in `BotCommandSender::send_command` abandons the response.
         let goto_window = timeout_dur.saturating_sub(MOVEMENT_REPLY_MARGIN);
-        let start = self.state.read_snapshot().self_player.position;
+        // P2 (2026-08-30 review): BOTH timeout-payload endpoints come from
+        // the live position. The old snapshot reads raced the idle-snapshot
+        // relaxation (≥5 s cadence): a move timing out >3 s after the last
+        // command reported `start`/`position` up to 5 s stale and
+        // under-counted `distance_moved` — the same drift the other
+        // movement results already avoid via `live_blockpos`.
+        let start = self.live_blockpos();
         // Route through `goto_with_deadline` so the explicit timeout (e.g.
         // the fly timeout) reaches the pathfinder's wait-for-completion loop
         // — not just the outer envelope (audit M-1).
@@ -914,7 +987,7 @@ impl<B: BotActions> CommandExecutor<B> {
             Ok(result) => GotoOutcome::Completed(result),
             Err(_) => {
                 self.bot.stop_pathfinding();
-                let current = self.state.read_snapshot().self_player.position;
+                let current = self.live_blockpos();
                 GotoOutcome::TimedOut {
                     start,
                     current,
@@ -990,12 +1063,7 @@ impl<B: BotActions> CommandExecutor<B> {
                 // zero-wait live position component — the throttled snapshot
                 // can lag a just-finished move by one interval (5 s when
                 // idle) — and fall back to the snapshot when unavailable.
-                let live_position = self.bot.position();
-                let end_pos = live_position
-                    .map(|[x, y, z]| {
-                        BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32)
-                    })
-                    .unwrap_or_else(|| self.state.read_snapshot().self_player.position);
+                let end_pos = self.live_blockpos();
 
                 Ok(BotResult {
                     success: true,
@@ -1094,6 +1162,21 @@ impl<B: BotActions> CommandExecutor<B> {
         // data — anything not in the index is genuinely unknown.
         let snapshot = self.state.read_snapshot();
         if !snapshot.block_index.contains_key(&pos) {
+            // Production snapshots filter air entries (L-4), so absence is
+            // ambiguous: the block was already mined (by us or someone
+            // else), or its chunk was never scanned / was pruned.
+            // Disambiguate with the retention bound (2026-08-29 review —
+            // both cases used to report the misleading ChunkNotLoaded):
+            // within max(chunk_scan_radius, 8) chunks of the player the
+            // snapshot is expected to see the block, so absence means the
+            // block is gone (BlockNotFound); outside that radius the world
+            // was genuinely never observed that far (ChunkNotLoaded).
+            let player = snapshot.self_player.position;
+            let retention =
+                (self.state.read_config().chunk_scan_radius as i32).max(RETENTION_CHUNK_FLOOR);
+            if block_within_chunk_radius(pos, (player.x >> 4, player.z >> 4), retention) {
+                return Err(BotError::BlockNotFound(pos));
+            }
             return Err(BotError::ChunkNotLoaded(pos));
         }
         self.bot.mine_block(&pos);
@@ -1217,7 +1300,28 @@ impl<B: BotActions> CommandExecutor<B> {
 
         // Server-side confirmation: poll the snapshot until a block appears
         // at `pos`. A timeout is an honest failure — never a fake success.
+        //
+        // The auto-approach above dispatches nothing, so a walk longer than
+        // the 3 s ACTIVITY_WINDOW lets the snapshot cadence relax to the
+        // 5 s idle interval — and the budget below (configured interval +
+        // 250 ms) would then poll a snapshot that only refreshes every 5 s,
+        // reporting an accepted placement as "did not appear". Re-stamp
+        // command activity (same fix as `execute_mine_block`'s Step-10
+        // verification) so the next tick (~50 ms) is on the fast cadence and
+        // the budget only has to cover one fast interval.
+        //
+        // 2026-08-30 review P2: the decision is `age + budget >= WINDOW`,
+        // not "already idle" — an approach that ends just inside the window
+        // would otherwise run it out mid-poll. Pinned by
+        // `test_verification_needs_activity_restamp_covers_near_window` in
+        // state.rs.
         let budget = Duration::from_millis(self.state.read_config().snapshot_interval_ms + 250);
+        if self
+            .state
+            .verification_needs_activity_restamp(Instant::now(), budget)
+        {
+            self.state.mark_command_activity();
+        }
         if wait_for_block_present(&self.state, pos, budget).await {
             return Ok(BotResult {
                 success: true,
@@ -1300,7 +1404,13 @@ impl<B: BotActions> CommandExecutor<B> {
         // previous held item (and an empty snapshot inventory read "empty"
         // while a container window was open).
         let held_entries = self.bot.inventory_entries();
-        let used_slot = item_slot.unwrap_or(snapshot.self_player.held_item_slot);
+        // The slot fallback MUST come from the live client (P2, 2026-08-30
+        // review): the snapshot's `held_item_slot` can lag a just-switched
+        // slot by a whole idle interval, and `held_entries` above is live —
+        // mixing the two indexed the right inventory with the wrong slot,
+        // misclassifying placement items (skipping verification for a held
+        // bucket, or attaching the occupancy gate to a non-placement item).
+        let used_slot = item_slot.unwrap_or_else(|| self.bot.selected_hotbar_slot());
         let used_item = held_entries
             .get(used_slot as usize)
             .and_then(|opt| opt.as_ref())
@@ -1377,7 +1487,25 @@ impl<B: BotActions> CommandExecutor<B> {
         if let Some(effect) = effect_pos
             && is_placement
         {
+            // The auto-approach above dispatches nothing, so a walk longer
+            // than the 3 s ACTIVITY_WINDOW lets the snapshot cadence relax
+            // to the 5 s idle interval — the verification budget below
+            // would then poll a 5 s-cadence snapshot and report an accepted
+            // interaction as "no effect observed". Re-stamp command
+            // activity (same fix as `execute_mine_block`'s Step-10
+            // verification) to put the updater back on the fast cadence.
+            //
+            // 2026-08-30 review P2: `age + budget >= WINDOW`, not "already
+            // idle" — same reasoning as the place_block site above. Pinned
+            // by `test_verification_needs_activity_restamp_covers_near_`
+            // `window` in state.rs.
             let budget = Duration::from_millis(self.state.read_config().snapshot_interval_ms + 250);
+            if self
+                .state
+                .verification_needs_activity_restamp(Instant::now(), budget)
+            {
+                self.state.mark_command_activity();
+            }
             if wait_for_block_present(&self.state, effect, budget).await {
                 return Ok(BotResult {
                     success: true,
@@ -1477,9 +1605,11 @@ impl<B: BotActions> CommandExecutor<B> {
     ///
     /// The previous implementation returned success unconditionally, so a
     /// drop that was silently rejected by the server (e.g. the slot was
-    /// already empty, or a container window was open and the click targeted
-    /// the wrong menu) still reported "Dropped N item(s)". We now read the
-    /// inventory before and after the click and report the truth.
+    /// already empty) still reported "Dropped N item(s)". We now read the
+    /// inventory before and after the click and report the truth. A drop
+    /// with a container window open is refused outright with
+    /// [`BotError::ContainerAlreadyOpen`] (2026-08-30 review) instead of
+    /// silently ejecting the container's items.
     async fn handle_drop_item(&self, slot: u8, count: u8) -> Result<BotResult, BotError> {
         trace!(slot, count, "DropItem");
         // A count of 0 means "drop nothing" — return early without touching the
@@ -1503,7 +1633,11 @@ impl<B: BotActions> CommandExecutor<B> {
             .map(|stack| stack.count)
             .unwrap_or(0);
 
-        self.bot.drop_item(slot, count);
+        // Refuse before touching anything when a container window is open
+        // (P2, 2026-08-30 review): the throw-click would target the
+        // container menu and eject the container's items. The guard lives
+        // in `RealBotClient::drop_item`; the error propagates verbatim.
+        self.bot.drop_item(slot, count)?;
 
         // Give the server a moment to apply the click and send the
         // container-content packets back.
@@ -1524,11 +1658,15 @@ impl<B: BotActions> CommandExecutor<B> {
         // Report honestly instead of faking success if the read ever comes
         // back empty.
         if after.is_empty() && !before.is_empty() {
+            // 2026-08-29 review: honest failure. The stack left the slot but
+            // a container window is open — the click may have been swallowed
+            // by the container menu (shift-click moved it INTO the container)
+            // instead of throwing it on the ground. Claiming "Dropped N
+            // item(s)" with `success: true` contradicted `verified: false`.
             return Ok(BotResult {
-                success: true,
+                success: false,
                 message: format!(
-                    "Dropped {} item(s) from slot {} (container window open; drop may not apply until the container is closed)",
-                    count, slot
+                    "Slot {slot} emptied while a container window is open — the stack may have been moved into the container instead of dropped; close the container and retry"
                 ),
                 data: Some(serde_json::json!({"verified": false, "container_window_open": true})),
             });
@@ -1548,6 +1686,18 @@ impl<B: BotActions> CommandExecutor<B> {
                     "Drop did not change inventory slot {slot}: the slot is already empty"
                 ),
                 data: Some(serde_json::json!({"verified": false, "removed": 0})),
+            })
+        } else if removed > 0 {
+            // 2026-08-30 review: a PARTIAL drop (e.g. 3 of 5 thrown) used to
+            // fall into the "server rejected the click" branch below, whose
+            // "did not change" wording contradicted the `removed` data. Some
+            // items did leave the slot — report exactly how many.
+            Ok(BotResult {
+                success: false,
+                message: format!(
+                    "Partially dropped from slot {slot}: {removed} of {count} item(s) left the slot; the rest may still be there (server applied only some of the throw clicks)"
+                ),
+                data: Some(serde_json::json!({"verified": false, "removed": removed})),
             })
         } else {
             // The server rejected the click or the slot count did not drop.
@@ -1743,6 +1893,15 @@ impl<B: BotActions> CommandExecutor<B> {
 
     fn handle_take_from_container(&self, slot: u8, count: u8) -> Result<BotResult, BotError> {
         trace!(slot, count, "TakeFromContainer");
+        // 2026-08-30 review: the container-open check must come FIRST. The
+        // old order probed the live inventory before it — `InventoryFull` is
+        // computed from the player-inventory slots, but with NO container
+        // open it fired (misleadingly) even though the real problem was the
+        // missing container.
+        let container_open = self.state.has_container_open();
+        if !container_open {
+            return Err(BotError::ContainerNotOpen);
+        }
         // F6-3: fail fast if the player inventory has no free slots. This
         // prevents shift-clicking a container stack that would be dropped
         // or lost. The check reads the inventory LIVE from the currently
@@ -1773,7 +1932,11 @@ impl<B: BotActions> CommandExecutor<B> {
                 data: None,
             })
         } else {
-            Err(BotError::Internal("no container is currently open".into()))
+            // Dedicated runtime-state variant (-32010): the parameters were
+            // fine, the state is wrong — MCP clients branch on it (L-9).
+            // This executor-side fallback is reachable when the container
+            // closes between the MCP layer's pre-check and this dispatch.
+            Err(BotError::ContainerNotOpen)
         }
     }
 
@@ -1800,7 +1963,11 @@ impl<B: BotActions> CommandExecutor<B> {
                 data: None,
             })
         } else {
-            Err(BotError::Internal("no container is currently open".into()))
+            // Dedicated runtime-state variant (-32010): the parameters were
+            // fine, the state is wrong — MCP clients branch on it (L-9).
+            // This executor-side fallback is reachable when the container
+            // closes between the MCP layer's pre-check and this dispatch.
+            Err(BotError::ContainerNotOpen)
         }
     }
 
@@ -2065,9 +2232,23 @@ impl<B: BotActions> CommandExecutor<B> {
         // attempt. Retry exactly once before declaring an obstacle; a
         // TimedOut already spent the full movement window, so it is never
         // retried (retrying would double the latency for no benefit).
+        //
+        // 2026-08-29 review: the retry used to run a FULL fresh
+        // goto_with_margin window (command_timeout − 1 s), so a first
+        // attempt that failed after >0.7 s pushed the total wall time past
+        // send_command's command_timeout envelope — the channel layer then
+        // answered a bare CommandTimeout and the structured
+        // {reached, obstacle, retried} result was dropped (the same failure
+        // M-5/F-1 fixed for collect_items and mining). The retry now gets
+        // only the REMAINING movement window (first-attempt wall time +
+        // retry delay subtracted), keeping the total inside the envelope,
+        // and is skipped when less than 2 s of window is left — too small
+        // to hold a meaningful pathfinding attempt plus the reply margin.
+        let started = Instant::now();
         let mut retried = false;
+        let mut last = self.goto_with_margin(target).await;
         loop {
-            match self.goto_with_margin(target).await {
+            match last {
                 GotoOutcome::TimedOut {
                     start,
                     current,
@@ -2091,12 +2272,7 @@ impl<B: BotActions> CommandExecutor<B> {
                     // reported an "obstacle". Falls back to the snapshot
                     // when the position component is unavailable (offline /
                     // before the first sync). Mirrors `handle_walk_direction`.
-                    let live_position = self.bot.position();
-                    let current_pos = live_position
-                        .map(|[x, y, z]| {
-                            BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32)
-                        })
-                        .unwrap_or_else(|| self.state.read_snapshot().self_player.position);
+                    let current_pos = self.live_blockpos();
 
                     // Reached when the bot ends within one block of the target
                     // on every axis (the same margin the previous logic used).
@@ -2107,10 +2283,26 @@ impl<B: BotActions> CommandExecutor<B> {
                     if !reached && !retried {
                         // First attempt stopped short (Ok-but-unreached or a
                         // pathfinder error). Give the world a beat and retry
-                        // once before declaring an obstacle.
-                        retried = true;
-                        tokio::time::sleep(SMART_MOVE_RETRY_DELAY).await;
-                        continue;
+                        // once — bounded by the REMAINING movement window so
+                        // the total never exceeds the command envelope. With
+                        // no budget left, skip the retry and report the first
+                        // attempt honestly (the `Completed` outcome proves
+                        // the first attempt finished inside its window, so
+                        // `started.elapsed()` is strictly below it).
+                        let window =
+                            Duration::from_secs(self.state.read_config().command_timeout_secs)
+                                .saturating_sub(MOVEMENT_REPLY_MARGIN);
+                        let remaining = window
+                            .saturating_sub(started.elapsed())
+                            .saturating_sub(SMART_MOVE_RETRY_DELAY);
+                        if remaining >= 2 * MOVEMENT_REPLY_MARGIN {
+                            retried = true;
+                            tokio::time::sleep(SMART_MOVE_RETRY_DELAY).await;
+                            last = self
+                                .goto_with_margin_with_timeout(target, Some(remaining.as_secs()))
+                                .await;
+                            continue;
+                        }
                     }
 
                     let reason = if reached { "reached" } else { "obstacle" };
@@ -2775,7 +2967,7 @@ mod tests {
         BlockEntry, EntityEntry, InventorySlot, MaterialTier, SelfPlayer, ToolType,
     };
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
     // ═══════════════════════════════════════════════════════════════
     // MockBotClient
@@ -2840,7 +3032,6 @@ mod tests {
         /// Value returned by `player_inventory_occupied_slots` (F6-3).
         /// Default 0 (inventory has free slots).
         player_inventory_occupied: AtomicUsize,
-        position: Mutex<BlockPos>,
         /// Precise position reported by `BotActions::position`. `None`
         /// (default) mirrors a client whose position component is missing,
         /// so handlers fall back to the snapshot — existing tests keep their
@@ -2849,6 +3040,10 @@ mod tests {
         live_position: Mutex<Option<[f64; 3]>>,
         stop_pathfinding_calls: AtomicUsize,
         swap_hotbar_calls: Mutex<Vec<(u16, u8)>>,
+        /// Live selected hotbar slot tracked by `switch_hotbar_slot`,
+        /// mirroring the client's selected-slot state for the
+        /// [`BotActions::selected_hotbar_slot`] accessor. Default 0.
+        selected_slot: AtomicU8,
     }
 
     impl MockCallLog {
@@ -2879,10 +3074,10 @@ mod tests {
                 inventory_calls: AtomicUsize::new(0),
                 inventory: Mutex::new(Vec::new()),
                 player_inventory_occupied: AtomicUsize::new(0),
-                position: Mutex::new(BlockPos::new(0, 64, 0)),
                 live_position: Mutex::new(None),
                 stop_pathfinding_calls: AtomicUsize::new(0),
                 swap_hotbar_calls: Mutex::new(Vec::new()),
+                selected_slot: AtomicU8::new(0),
             }
         }
     }
@@ -2961,7 +3156,6 @@ mod tests {
                 });
             }
             if self.log.goto_succeeds.load(Ordering::SeqCst) {
-                *self.log.position.lock().unwrap() = *pos;
                 if self.log.goto_updates_snapshot.load(Ordering::SeqCst)
                     && let Some(state) = self.log.snapshot_for_goto.lock().unwrap().clone()
                 {
@@ -3005,12 +3199,21 @@ mod tests {
 
         fn switch_hotbar_slot(&self, slot: u8) {
             self.log.hotbar_switch_calls.lock().unwrap().push(slot);
+            // Track the live selected slot the way the real client does, so
+            // `selected_hotbar_slot` reports what is actually in hand.
+            self.log.selected_slot.store(slot, Ordering::SeqCst);
         }
 
-        fn drop_item(&self, slot: u8, count: u8) {
+        fn selected_hotbar_slot(&self) -> u8 {
+            self.log.selected_slot.load(Ordering::SeqCst)
+        }
+
+        fn drop_item(&self, slot: u8, count: u8) -> Result<(), BotError> {
             self.log.drop_item_calls.lock().unwrap().push((slot, count));
             // Simulate the server applying the throw-click so drop
             // verification sees a reduced stack (mirrors a real drop).
+            // (The mock has no container-window state, so the
+            // ContainerAlreadyOpen guard is RealBotClient-only.)
             let mut inv = self.log.inventory.lock().unwrap();
             if let Some(Some(stack)) = inv.get_mut(slot as usize) {
                 stack.count = stack.count.saturating_sub(count);
@@ -3018,6 +3221,7 @@ mod tests {
                     inv[slot as usize] = None;
                 }
             }
+            Ok(())
         }
 
         fn stop_pathfinding(&self) {
@@ -3389,6 +3593,9 @@ mod tests {
         state.set_online(true);
         let mock = MockBotClient::new();
         mock.log.goto_hangs.store(true, Ordering::SeqCst);
+        // Live position the handler must report (floored) instead of the
+        // snapshot's (0, 64, 0).
+        *mock.log.live_position.lock().unwrap() = Some([70.6, 64.0, 30.4]);
         let log = mock.log().clone();
         let executor = CommandExecutor::new(mock, Arc::clone(&state), receiver, None);
         let handle = spawn_executor(executor);
@@ -3403,6 +3610,25 @@ mod tests {
         assert_eq!(data["target"], serde_json::json!([100, 64, 200]));
         assert!(data["distance_moved"].is_number());
         assert!(br.message.contains("timed out"), "message: {}", br.message);
+        // P2 (2026-08-30 review): the timeout payload's endpoints come from
+        // the LIVE position, not the throttled snapshot. The bot never moved
+        // (goto hangs), so both endpoints must equal the floored live
+        // coordinate and the moved distance must be 0.
+        assert_eq!(
+            data["position"],
+            serde_json::json!([70, 64, 30]),
+            "current position must come from the live component"
+        );
+        assert_eq!(
+            data["start"],
+            serde_json::json!([70, 64, 30]),
+            "start position must come from the live component"
+        );
+        assert_eq!(
+            data["distance_moved"],
+            serde_json::json!(0.0),
+            "a hanging goto moved nothing"
+        );
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -3994,6 +4220,61 @@ mod tests {
 
         drop(sender);
         handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_drop_item_partial_drop_reports_honestly() {
+        // 2026-08-30 review: a partial drop (3 of 5 requested left the slot)
+        // used to fall into the "server rejected the click" branch whose
+        // "did not change" wording contradicted the removed data. The mock
+        // drop removes only what the stack holds, so a 3-stack with a
+        // 5-request produces exactly that partial outcome.
+        let (executor, sender, _state, log) = make_executor();
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            inv.resize(36, None);
+            inv[0] = Some(ItemStack {
+                item_id: "dirt".into(),
+                count: 3,
+            });
+        }
+        let handle = spawn_executor(executor);
+
+        let result = send_and_await(&sender, BotCommand::DropItem(0, 5)).await;
+        let br = result.expect("partial drop returns a result, not an error");
+        assert!(!br.success, "a partial drop must not claim success");
+        assert!(
+            br.message.contains("Partially dropped"),
+            "message must say 'Partially dropped': {}",
+            br.message
+        );
+        assert!(
+            !br.message.contains("rejected"),
+            "message must not claim a rejection: {}",
+            br.message
+        );
+        let data = br.data.expect("partial drop must carry data");
+        assert_eq!(data["removed"], 3);
+        assert_eq!(data["verified"], false);
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_take_from_container_without_container_reports_not_open() {
+        // 2026-08-30 review: the container-open check must precede the
+        // inventory-full probe. With NO container open (and the player
+        // inventory artificially full), the old order returned the
+        // misleading InventoryFull instead of ContainerNotOpen.
+        let (executor, _sender, _state, log) = make_executor();
+        log.player_inventory_occupied.store(36, Ordering::SeqCst);
+
+        let result = executor.handle_take_from_container(5, 1);
+        assert!(
+            matches!(result, Err(BotError::ContainerNotOpen)),
+            "no container open must report ContainerNotOpen, got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -4613,21 +4894,49 @@ mod tests {
 
     /// Sanity counterpart to `test_break_block_loaded_chunk_not_rejected`:
     /// when the block is genuinely unknown (no entry in the block
-    /// index), the pre-check must still return `ChunkNotLoaded`. This
-    /// guards against the new check becoming a no-op.
+    /// index), the pre-check must still reject. 2026-08-29 review: the
+    /// rejection is now split by the retention bound — an absent block
+    /// WITHIN the retained area is reported as `BlockNotFound` (it is
+    /// gone, e.g. already mined), one OUTSIDE as `ChunkNotLoaded` (the
+    /// world was never observed that far).
     #[tokio::test]
     async fn test_break_block_unknown_block_still_rejected() {
         let (executor, sender, state, _log) = make_executor();
         let handle = spawn_executor(executor);
 
-        // Empty snapshot: nothing is loaded.
+        // Empty snapshot: nothing is loaded. The player sits at the
+        // origin, so (100, 64, 100) — chunk (6, 6) — is INSIDE the
+        // retention radius (floor 8 chunks): absence means the block is
+        // gone, not that the world is unobserved.
         state.update_snapshot(crate::types::WorldSnapshot::default());
 
         let pos = BlockPos::new(100, 64, 100);
         let result = send_and_await(&sender, BotCommand::BreakBlock(pos)).await;
         assert!(
+            matches!(result, Err(BotError::BlockNotFound(p)) if p == pos),
+            "expected BlockNotFound for a gone block inside the retention radius, got: {:?}",
+            result
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_break_block_outside_retention_reports_chunk_not_loaded() {
+        // 2026-08-29 review: a block far outside the retention bound
+        // (chunk (62, 62) vs the player's (0, 0), floor 8 chunks) was
+        // never observed — ChunkNotLoaded stays the honest answer.
+        let (executor, sender, state, _log) = make_executor();
+        let handle = spawn_executor(executor);
+
+        state.update_snapshot(crate::types::WorldSnapshot::default());
+
+        let pos = BlockPos::new(1000, 64, 1000);
+        let result = send_and_await(&sender, BotCommand::BreakBlock(pos)).await;
+        assert!(
             matches!(result, Err(BotError::ChunkNotLoaded(p)) if p == pos),
-            "expected ChunkNotLoaded for an unknown block, got: {:?}",
+            "expected ChunkNotLoaded for a block outside the retention radius, got: {:?}",
             result
         );
 
@@ -4958,9 +5267,12 @@ mod tests {
             count: 1,
         }];
         state.update_snapshot(snapshot);
-        // The handler reads the LIVE inventory (M-11). Keep the mock
-        // inventory in sync with the snapshot's self_player inventory so
-        // production and test semantics match.
+        // The handler reads the LIVE inventory (M-11) and — since the
+        // 2026-08-30 review — the LIVE selected slot. Keep both mock-side
+        // facts in sync with the snapshot's self_player inventory so
+        // production and test semantics match: the bot is actually holding
+        // slot 2.
+        executor.bot.switch_hotbar_slot(2);
         {
             let mut inv = log.inventory.lock().unwrap();
             *inv = vec![None; 9];
@@ -4982,6 +5294,60 @@ mod tests {
 
         drop(sender);
         handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_use_item_on_block_uses_live_selected_slot() {
+        // P2 (2026-08-30 review): with `item_slot` absent the handler must
+        // resolve the used slot from the LIVE client state, not the throttled
+        // snapshot's `held_item_slot`. The stale-slot mix indexed the right
+        // (live) inventory with the wrong slot and misclassified the used
+        // item — which gates the M-6 placement pre-checks and R-9
+        // verification.
+        let (executor, _sender, state, log) = make_executor();
+        let mut snapshot = make_populated_snapshot_defaults();
+        // Stale snapshot: claims slot 0 is held and "stone" sits there.
+        snapshot.self_player.held_item_slot = 0;
+        snapshot.self_player.inventory = vec![InventorySlot {
+            slot_index: 0,
+            item_id: "stone".into(),
+            count: 1,
+        }];
+        state.update_snapshot(snapshot);
+        // Live state: slot 3 is selected and holds the bucket (the snapshot
+        // does not know about either fact).
+        executor.bot.switch_hotbar_slot(3);
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            *inv = vec![None; 9];
+            inv[0] = Some(ItemStack {
+                item_id: "stone".into(),
+                count: 1,
+            });
+            inv[3] = Some(ItemStack {
+                item_id: "water_bucket".into(),
+                count: 1,
+            });
+        }
+
+        let pos = BlockPos::new(5, 65, 5);
+        let result = executor.handle_use_item_on_block(pos, None, None).await;
+        let br = result.expect("expected Ok(BotResult)");
+        assert!(
+            br.message.contains("water_bucket"),
+            "message must name the LIVE held item: {}",
+            br.message
+        );
+        assert!(
+            !br.message.contains("stone"),
+            "message must not name the stale snapshot item: {}",
+            br.message
+        );
+        assert!(
+            br.message.contains("slot 3"),
+            "message must report the live slot: {}",
+            br.message
+        );
     }
 
     #[tokio::test]
@@ -5243,7 +5609,7 @@ mod tests {
 
         let result = send_and_await(&sender, BotCommand::TakeFromContainer(3, 10)).await;
         assert!(result.is_err());
-        assert!(matches!(result, Err(BotError::Internal(_))));
+        assert!(matches!(result, Err(BotError::ContainerNotOpen)));
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -5256,7 +5622,7 @@ mod tests {
 
         let result = send_and_await(&sender, BotCommand::PutIntoContainer(5, 8)).await;
         assert!(result.is_err());
-        assert!(matches!(result, Err(BotError::Internal(_))));
+        assert!(matches!(result, Err(BotError::ContainerNotOpen)));
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -5267,12 +5633,21 @@ mod tests {
         // F6-3: with all 36 player-inventory slots occupied (read live
         // from the open menu), the take must fail fast with InventoryFull
         // instead of shift-clicking a stack that would be dropped.
+        //
+        // 2026-08-30 review: the container-open check now PRECEDES the
+        // inventory-full probe — an InventoryFull with no container open
+        // was misleading. In this unit-test environment no container can
+        // be open (a real ContainerHandle cannot be fabricated), so the
+        // handler honestly reports ContainerNotOpen; the InventoryFull
+        // branch itself is only reachable with a real open container.
+        // test_take_from_container_without_container_reports_not_open pins
+        // the ordering explicitly.
         let (executor, sender, _state, log) = make_executor();
         log.player_inventory_occupied.store(36, Ordering::SeqCst);
         let handle = spawn_executor(executor);
 
         let result = send_and_await(&sender, BotCommand::TakeFromContainer(3, 10)).await;
-        assert!(matches!(result, Err(BotError::InventoryFull)));
+        assert!(matches!(result, Err(BotError::ContainerNotOpen)));
 
         drop(sender);
         handle.await.expect("executor should finish");
@@ -5292,7 +5667,7 @@ mod tests {
 
         let result = send_and_await(&sender, BotCommand::TakeFromContainer(3, 10)).await;
         assert!(
-            matches!(&result, Err(BotError::Internal(msg)) if msg.contains("no container")),
+            matches!(&result, Err(BotError::ContainerNotOpen)),
             "guard must not fire with a free slot; got: {result:?}"
         );
 
@@ -5623,6 +5998,47 @@ mod tests {
         drop(sender);
         handle.await.expect("executor should finish");
         assert_eq!(log.goto_calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_smart_move_retry_skipped_when_budget_exhausted() {
+        // 2026-08-29 review: with command_timeout_secs=1 the movement window
+        // is 1s − 1s margin = 0, so after the first attempt fails there is
+        // no budget left for a meaningful retry. The old code retried with
+        // a full fresh window anyway, pushing the total past the command
+        // envelope until the channel answered a bare CommandTimeout and the
+        // structured result was dropped. Now the retry is skipped: the
+        // honest obstacle report comes back within the envelope and only
+        // ONE goto call is made.
+        let (executor, sender, state, log) = make_executor();
+        state.update_config(|cfg| cfg.command_timeout_secs = 1);
+        log.goto_failures_remaining.store(1, Ordering::SeqCst);
+        let handle = spawn_executor(executor);
+
+        let target = BlockPos::new(5, 64, 5);
+        let result = send_and_await(&sender, BotCommand::SmartMove(target)).await;
+        let br = result.expect("expected Ok(BotResult), not a channel CommandTimeout");
+        assert!(!br.success, "expected success == false: {br:?}");
+        let data = br.data.expect("data present");
+        assert_eq!(data.get("reached"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            data.get("retried"),
+            Some(&serde_json::json!(false)),
+            "no second attempt was affordable"
+        );
+        assert_eq!(
+            data.get("reason"),
+            Some(&serde_json::json!("obstacle")),
+            "first attempt failure reported honestly"
+        );
+
+        drop(sender);
+        handle.await.expect("executor should finish");
+        assert_eq!(
+            log.goto_calls.lock().unwrap().len(),
+            1,
+            "retry must be skipped when the movement window is exhausted"
+        );
     }
 
     #[tokio::test]

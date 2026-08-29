@@ -621,7 +621,17 @@ impl CompoundOpExecutor {
                     // the updater back on the fast cadence, so the next tick
                     // (~50 ms) carries the broken state and the budget only
                     // has to cover one fast interval.
-                    if executor.state.snapshot_cadence_idle(Instant::now()) {
+                    //
+                    // 2026-08-30 review P2: the decision is
+                    // `age + budget >= ACTIVITY_WINDOW`, not "already idle" —
+                    // a 2.5 s hand-mine ends its sleep INSIDE the window, but
+                    // the budget would then run it out mid-poll. Predicate
+                    // pinned by `test_verification_needs_activity_restamp_`
+                    // `covers_near_window` in state.rs.
+                    if executor
+                        .state
+                        .verification_needs_activity_restamp(Instant::now(), verification_budget)
+                    {
                         executor.state.mark_command_activity();
                     }
 
@@ -909,8 +919,15 @@ impl CompoundOpExecutor {
                         }
                     };
                     if !result.success {
-                        state =
-                            op.advance(state, OperationEvent::Failed(BotError::ContainerTimeout));
+                        // 2026-08-29 review: keep the executor's real reason
+                        // (ContainerAlreadyOpen / ChunkNotLoaded / the
+                        // structured verification failure) instead of
+                        // replacing every non-success with ContainerTimeout
+                        // — same honest-report shape as execute_place_block.
+                        state = op.advance(
+                            state,
+                            OperationEvent::Failed(BotError::Internal(result.message)),
+                        );
                         continue;
                     }
                     state = op.advance(state, OperationEvent::ContainerOpened);
@@ -998,7 +1015,17 @@ impl CompoundOpExecutor {
         while !matches!(state, OperationState::Completed | OperationState::Failed(_)) {
             match op.current_action(&state) {
                 Some(BotCommand::EquipTool(t)) => {
-                    let result = executor.dispatch(BotCommand::EquipTool(t)).await?;
+                    // Task 2.6 convention: dispatch errors feed the state
+                    // machine (advance Failed) instead of bypassing it with
+                    // `?` — every other arm does this; the guard test
+                    // counts the pattern.
+                    let result = match executor.dispatch(BotCommand::EquipTool(t)).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            state = op.advance(state, OperationEvent::Failed(e));
+                            continue;
+                        }
+                    };
                     if !result.success {
                         state = op.advance(
                             state,
@@ -1180,7 +1207,15 @@ mod tests {
             });
         }
 
-        fn drop_item(&self, _slot: u8, _count: u8) {}
+        fn drop_item(&self, _slot: u8, _count: u8) -> Result<(), BotError> {
+            Ok(())
+        }
+
+        fn selected_hotbar_slot(&self) -> u8 {
+            // Mirror the snapshot's held slot so ops-level flows that read
+            // the live slot stay consistent with the simulated world.
+            self.state.read_snapshot().self_player.held_item_slot
+        }
 
         fn start_use_item(&self) {}
 
@@ -1215,13 +1250,17 @@ mod tests {
                 }
             };
             let best = best_tool_for_block(&block_type);
+            // 2026-08-30 review: cobweb-class blocks accept the alternative
+            // tool (shears alongside the sword primary) at the same vanilla
+            // speed, so the mock must let them mine too.
+            let alt = crate::block_data::alt_tool_for_block(&block_type);
             let held_parses_to_best = {
                 let held_slot = self.state.read_snapshot().self_player.held_item_slot;
                 let inv = self.mock.inventory.lock().unwrap();
                 inv.get(held_slot as usize)
                     .and_then(|opt| opt.as_ref())
                     .and_then(|stack| material_from_item_name(&stack.item_id))
-                    .map(|(t, _)| t == best)
+                    .map(|(t, _)| t == best || Some(t) == alt)
                     .unwrap_or(false)
             };
             if best != ToolType::Hand && !held_parses_to_best {
@@ -2377,14 +2416,16 @@ mod tests {
         let src = include_str!("ops.rs");
         let marker = "state = op.advance(state, OperationEvent::Failed(e));";
         let occurrences = src.matches(marker).count();
-        // Expect 7 dispatch arms — 3 in `execute_mine_block` (MoveTo,
+        // Expect 8 dispatch arms — 3 in `execute_mine_block` (MoveTo,
         // EquipTool, BreakBlock), 2 in `execute_place_block` (MoveTo,
-        // PlaceBlock), and 2 in `execute_open_container` (MoveTo,
-        // OpenContainer). If it ever drops below 7, an arm was
-        // reverted to `?`.
+        // PlaceBlock), 2 in `execute_open_container` (MoveTo,
+        // OpenContainer), and 1 in `execute_equip_tool` (EquipTool —
+        // converted from `?` to the advance pattern in the 2026-08-29
+        // review round; the old `>= 7` floor let that arm silently
+        // revert). If it ever drops below 8, an arm was reverted to `?`.
         assert!(
-            occurrences >= 7,
-            "expected at least 7 occurrences of the dispatch-err \
+            occurrences >= 8,
+            "expected at least 8 occurrences of the dispatch-err \
              `state.advance(Failed(e))` pattern (one per dispatch arm \
              across `execute_mine_block`, `execute_place_block`, and \
              `execute_open_container`), found {occurrences}. A future \

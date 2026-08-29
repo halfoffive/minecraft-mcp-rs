@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::channel::{BotCommandSender, ReceiverSlot};
-#[cfg(test)]
 use crate::config::AppConfig;
 use crate::config::McpTransport;
 use crate::error::BotError;
@@ -220,13 +219,106 @@ fn language_to_str(language: Language) -> &'static str {
 /// bot reconnect when connected/connecting; changes to
 /// `mcp_transport`/`mcp_address`/`mcp_port` take effect on process restart.
 /// Works offline.
+///
+/// Atomicity (2026-08-30 review): the read-modify-validate-commit runs
+/// inside ONE config write-lock scope (`SharedState::modify_config`), so
+/// a concurrent `update_settings` can no longer be clobbered by the
+/// whole-struct commit.
 pub fn update_settings(
     state: &Arc<SharedState>,
     input: UpdateSettingsInput,
 ) -> Result<String, BotError> {
-    let old = state.read_config().clone();
-    let mut candidate = old.clone();
     let mut applied = serde_json::Map::new();
+    let mut new_language: Option<Language> = None;
+
+    let (connection_fields_changed, transport_restart_fields_changed) =
+        state.modify_config(|cfg| -> Result<(bool, bool), BotError> {
+            let old = cfg.clone();
+            let (candidate, lang) = merge_input_into_candidate(&old, input, &mut applied)?;
+            new_language = lang;
+
+            // Validate BEFORE any global side effect: the old order called
+            // i18n::set() inside the loop above, so a REJECTED update had
+            // already flipped the UI language globally while leaving the
+            // config unchanged.
+            candidate.validate().map_err(BotError::InvalidParams)?;
+
+            // No file persistence: MINECRAFT_MCP_* environment variables
+            // are the configuration source, so runtime updates live in
+            // memory only. Connection fields changed → the bot must
+            // reconnect to honour them.
+            let connection_changed = old.mc_address != candidate.mc_address
+                || old.mc_port != candidate.mc_port
+                || old.ai_username != candidate.ai_username;
+            let transport_changed = applied.contains_key("mcp_transport")
+                || applied.contains_key("mcp_address")
+                || applied.contains_key("mcp_port");
+
+            // Commit the validated candidate inside the same lock scope.
+            *cfg = candidate;
+            Ok((connection_changed, transport_changed))
+        })?;
+
+    if let Some(language) = new_language {
+        // Next-frame effect in UI mode; harmless in headless mode.
+        crate::i18n::set(language);
+    }
+
+    let mut reconnect_triggered = false;
+    if connection_fields_changed {
+        if state.is_online() || state.is_connecting() {
+            // Online/connecting: the CONNECT LOOP owns the restart flag
+            // (single-ownership rule, M-10). request_config_restart +
+            // request_disconnect tear the running session down; the connect
+            // loop's checkpoint consumes the flag, clears the disconnect
+            // request, resets the cancel token and reconnects in-place with
+            // the fresh config. The bot thread never exits, so the headless
+            // supervisor keeps polling the same handle and must NOT consume
+            // the flag — otherwise it could spawn a second bot thread while
+            // the old loop reconnects (two azalea sessions → kick loop).
+            state.request_config_restart();
+            state.request_disconnect();
+            reconnect_triggered = true;
+        } else {
+            // Offline: nobody is connected, so the new config is already
+            // applied for the next Connect. The restart flag is set for the
+            // HEADLESS supervisor, which consumes it only when no bot thread
+            // exists (spawn.rs quiet-wait / next-action) and respawns the
+            // bot. In UI mode it is stale by design: `connect()`'s entry
+            // cleanup discards it (L-22) so a later explicit Disconnect is
+            // never converted into a surprise reconnect.
+            state.request_config_restart();
+        }
+    }
+
+    let mut response = serde_json::Map::new();
+    response.insert("applied".into(), json!(applied));
+    response.insert("reconnect_triggered".into(), json!(reconnect_triggered));
+    if transport_restart_fields_changed {
+        response.insert(
+            "note".into(),
+            json!("mcp_transport/mcp_address/mcp_port changes take effect on process restart"),
+        );
+    }
+
+    serde_json::to_string(&response)
+        .map_err(|e| BotError::Internal(format!("failed to serialize response: {e}")))
+}
+
+/// Merge the provided [`UpdateSettingsInput`] fields into a candidate built
+/// from `old`, returning the candidate plus the language to activate (if the
+/// language changed). Pure with respect to [`SharedState`] — no locks, no
+/// global side effects; validation is the caller's responsibility.
+///
+/// Extracted from `update_settings` (2026-08-30 review) so the whole
+/// read-modify-validate-commit can run inside a single config write-lock
+/// scope.
+fn merge_input_into_candidate(
+    old: &AppConfig,
+    input: UpdateSettingsInput,
+    applied: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<(AppConfig, Option<Language>), BotError> {
+    let mut candidate = old.clone();
 
     if let Some(v) = input.mc_address
         && v != candidate.mc_address
@@ -338,70 +430,7 @@ pub fn update_settings(
             new_language = Some(language);
         }
     }
-
-    // Validate BEFORE any global side effect: the old order called
-    // i18n::set() inside the loop above, so a REJECTED update had already
-    // flipped the UI language globally while leaving the config unchanged.
-    candidate.validate().map_err(BotError::InvalidParams)?;
-
-    // Commit the validated candidate to the live in-memory config before any
-    // reconnect/restart side effects use it downstream.
-    state.update_config(|cfg| *cfg = candidate.clone());
-
-    if let Some(language) = new_language {
-        // Next-frame effect in UI mode; harmless in headless mode.
-        crate::i18n::set(language);
-    }
-
-    // No file persistence: MINECRAFT_MCP_* environment variables are the
-    // configuration source, so runtime updates live in memory only.
-    // Connection fields changed → the bot must reconnect to honour them.
-    let connection_fields_changed = old.mc_address != candidate.mc_address
-        || old.mc_port != candidate.mc_port
-        || old.ai_username != candidate.ai_username;
-    let transport_restart_fields_changed = applied.contains_key("mcp_transport")
-        || applied.contains_key("mcp_address")
-        || applied.contains_key("mcp_port");
-
-    let mut reconnect_triggered = false;
-    if connection_fields_changed {
-        if state.is_online() || state.is_connecting() {
-            // Online/connecting: the CONNECT LOOP owns the restart flag
-            // (single-ownership rule, M-10). request_config_restart +
-            // request_disconnect tear the running session down; the connect
-            // loop's checkpoint consumes the flag, clears the disconnect
-            // request, resets the cancel token and reconnects in-place with
-            // the fresh config. The bot thread never exits, so the headless
-            // supervisor keeps polling the same handle and must NOT consume
-            // the flag — otherwise it could spawn a second bot thread while
-            // the old loop reconnects (two azalea sessions → kick loop).
-            state.request_config_restart();
-            state.request_disconnect();
-            reconnect_triggered = true;
-        } else {
-            // Offline: nobody is connected, so the new config is already
-            // applied for the next Connect. The restart flag is set for the
-            // HEADLESS supervisor, which consumes it only when no bot thread
-            // exists (spawn.rs quiet-wait / next-action) and respawns the
-            // bot. In UI mode it is stale by design: `connect()`'s entry
-            // cleanup discards it (L-22) so a later explicit Disconnect is
-            // never converted into a surprise reconnect.
-            state.request_config_restart();
-        }
-    }
-
-    let mut response = serde_json::Map::new();
-    response.insert("applied".into(), json!(applied));
-    response.insert("reconnect_triggered".into(), json!(reconnect_triggered));
-    if transport_restart_fields_changed {
-        response.insert(
-            "note".into(),
-            json!("mcp_transport/mcp_address/mcp_port changes take effect on process restart"),
-        );
-    }
-
-    serde_json::to_string(&response)
-        .map_err(|e| BotError::Internal(format!("failed to serialize response: {e}")))
+    Ok((candidate, new_language))
 }
 
 // ── connect_bot ────────────────────────────────────────────────────────────

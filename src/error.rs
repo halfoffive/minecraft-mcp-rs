@@ -140,7 +140,14 @@ impl Display for BotError {
             } => {
                 write!(f, "Command `{command}` timed out after {timeout_secs}s")
             }
-            BotError::BlockNotFound(pos) => write!(f, "Block not found at {pos}"),
+            // "not observed" rather than "not found": production snapshots
+            // never carry air entries (L-4), so absence is ambiguous — the
+            // block was already mined, or its cell was never seen within the
+            // retention radius (2026-08-30 review).
+            BotError::BlockNotFound(pos) => write!(
+                f,
+                "Block not observed at {pos} (already mined, or never seen by the bot)"
+            ),
             BotError::EntityNotFound(id) => write!(f, "Entity not found with id {id}"),
             BotError::ChunkNotLoaded(pos) => write!(f, "Chunk not loaded at {pos}"),
             BotError::ToolNotFound {
@@ -490,7 +497,10 @@ mod tests {
             z: -20,
         };
         let err = BotError::BlockNotFound(pos);
-        assert_eq!(err.to_string(), format!("Block not found at {pos}"));
+        assert_eq!(
+            err.to_string(),
+            format!("Block not observed at {pos} (already mined, or never seen by the bot)")
+        );
     }
 
     #[test]

@@ -37,7 +37,7 @@ The bot targets **Minecraft Java Edition 1.21.11** (via azalea 0.15.1).
 >
 > | Minecraft server version / MC 服务器版本 | minecraft-mcp-rs version / 工具版本 |
 > |---|---|
-> | 1.21.11 | 1.4.2 |
+> | 1.21.11 | 1.4.3 |
 >
 > Pick the minecraft-mcp-rs version that matches your Minecraft server, and re-check this table before every upgrade. / 请选择与你的 Minecraft 服务器版本匹配的 minecraft-mcp-rs 版本，并在每次升级前重新核对此表。
 
@@ -215,8 +215,8 @@ binary is downloaded on demand and cached):
 无需 Rust 工具链——预编译二进制已发布到 npm，支持 Windows x64/arm64、macOS arm64 和 Linux x64/arm64。直接运行（各平台的二进制按需下载并缓存）：
 
 ```bash
-npx -y minecraft-mcp-rs@1.4.2 --headless --stdio
-bunx minecraft-mcp-rs@1.4.2 --headless --stdio
+npx -y minecraft-mcp-rs@1.4.3 --headless --stdio
+bunx minecraft-mcp-rs@1.4.3 --headless --stdio
 ```
 
 or install globally:
@@ -237,7 +237,7 @@ headless and exits when the MCP client disconnects):
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs@1.4.2", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@1.4.3", "--headless", "--stdio"]
     }
   }
 }
@@ -428,10 +428,13 @@ variable is present:
 | `MINECRAFT_MCP_LANGUAGE` | `language` | system locale / 系统语言 |
 
 > **Security note:** plain HTTP + a non-loopback `mcp_address` with
-> `mcp_auth_enabled=false` is rejected at startup (`AppConfig::validate`).
-> To expose the MCP server beyond localhost, enable Bearer auth.
+> `mcp_auth_enabled=false` cannot start as-is: `from_env` forces auth ON for
+> that combination (keeping every other variable, including a pinned
+> `MINECRAFT_MCP_TOKEN`), and an explicit `update_settings` request of the
+> same kind is rejected. To expose the MCP server beyond localhost, enable
+> Bearer auth and pin a token.
 >
-> **安全提示:** `mcp_address` 为非回环地址、HTTP 传输且未启用鉴权的组合会在启动时被拒绝。如需将 MCP 服务暴露到本机之外，请启用 Bearer Token 鉴权。
+> **安全提示:** `mcp_address` 为非回环地址、HTTP 传输且未启用鉴权的组合无法原样启动：`from_env` 会针对该组合强制开启鉴权（其余变量——含已固定的 `MINECRAFT_MCP_TOKEN`——全部保留），而通过 `update_settings` 显式提交同样组合则会被拒绝。如需将 MCP 服务暴露到本机之外，请启用 Bearer Token 鉴权并固定 Token。
 
 Malformed variable values log a warning and keep the default — startup never
 fails because of an environment typo. Semantically invalid values that parse

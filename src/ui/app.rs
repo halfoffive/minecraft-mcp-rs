@@ -55,8 +55,12 @@ pub struct MinecraftApp {
     /// Local edit buffers for the settings panel.  Initialised from
     /// [`SharedState`] config on first frame.
     edit_config: Option<EditConfig>,
-    /// Cached language from the last frame; lets us avoid a per-frame
-    /// `read_config` acquisition just to synchronise `i18n::current()`.
+    /// Cached language from the last frame; lets us skip the
+    /// [`crate::i18n::set`] write when the language is unchanged. (The
+    /// config itself is still read every frame for other consumers —
+    /// corrected 2026-08-29: the old doc claimed it avoided the per-frame
+    /// `read_config` acquisition, which `sync_language_from_config` never
+    /// actually skipped.)
     last_language: Language,
     /// Texture handle for the world-view preview panel. Persisted across
     /// frames so we don't re-upload the same PNG every redraw.
@@ -143,6 +147,32 @@ pub struct EditConfigDirty {
     pub mcp_transport: bool,
 }
 
+impl EditConfigDirty {
+    /// Whether ANY field has been locally edited since the last apply.
+    ///
+    /// The MCP Config panel shows its pending-edits hint while this is
+    /// true: the copyable JSON is generated from the edit buffers, so it
+    /// can include values Connect has not applied yet (2026-08-29 review).
+    pub(crate) fn any(&self) -> bool {
+        self.mc_address
+            || self.mc_port
+            || self.ai_username
+            || self.mcp_address
+            || self.mcp_port
+            || self.task_name
+            || self.chunk_scan_radius
+            || self.block_perception_radius
+            || self.snapshot_interval_ms
+            || self.reconnect_initial_delay_ms
+            || self.reconnect_max_delay_ms
+            || self.command_timeout_secs
+            || self.fly_timeout_secs
+            || self.mcp_token
+            || self.mcp_auth_enabled
+            || self.mcp_transport
+    }
+}
+
 impl From<&AppConfig> for EditConfig {
     fn from(cfg: &AppConfig) -> Self {
         Self {
@@ -182,68 +212,81 @@ impl EditConfig {
     /// config untouched so the user can correct the invalid field. On
     /// success all dirty flags are cleared.
     pub(crate) fn apply(&mut self, state: &SharedState) -> Result<(), String> {
-        // Build the candidate config from a clone of the current values, then
-        // validate before taking the write lock. The window between read and
-        // write is benign here because `apply` is the sole UI writer of config
-        // (invoked only from the UI thread on Connect click).
-        let mut new_config = state.read_config().clone();
-        if self.dirty.mc_address {
-            new_config.mc_address = self.mc_address.clone();
-        }
-        if self.dirty.mc_port {
-            new_config.mc_port = self.mc_port;
-        }
-        if self.dirty.ai_username {
-            new_config.ai_username = self.ai_username.clone();
-        }
-        if self.dirty.mcp_address {
-            new_config.mcp_address = self.mcp_address.clone();
-        }
-        if self.dirty.mcp_port {
-            new_config.mcp_port = self.mcp_port;
-        }
-        if self.dirty.task_name {
-            new_config.task_name = self.task_name.clone();
-        }
-        if self.dirty.chunk_scan_radius {
-            new_config.chunk_scan_radius = self.chunk_scan_radius;
-        }
-        if self.dirty.block_perception_radius {
-            new_config.block_perception_radius = self.block_perception_radius;
-        }
-        if self.dirty.snapshot_interval_ms {
-            new_config.snapshot_interval_ms = self.snapshot_interval_ms;
-        }
-        if self.dirty.reconnect_initial_delay_ms {
-            new_config.reconnect_initial_delay_ms = self.reconnect_initial_delay_ms;
-        }
-        if self.dirty.reconnect_max_delay_ms {
-            new_config.reconnect_max_delay_ms = self.reconnect_max_delay_ms;
-        }
-        if self.dirty.command_timeout_secs {
-            new_config.command_timeout_secs = self.command_timeout_secs;
-        }
-        if self.dirty.fly_timeout_secs {
-            new_config.fly_timeout_secs = self.fly_timeout_secs;
-        }
-        if self.dirty.mcp_token {
-            new_config.mcp_token = self.mcp_token.clone();
-        }
-        if self.dirty.mcp_auth_enabled {
-            new_config.mcp_auth_enabled = self.mcp_auth_enabled;
-        }
-        if self.dirty.mcp_transport {
-            new_config.mcp_transport = self.mcp_transport;
-        }
-
-        new_config.validate()?;
-        state.update_config(|cfg| {
-            *cfg = new_config;
-        });
+        // Build and validate a candidate first so a rejected edit never
+        // touches the live config.
+        let mut candidate = state.read_config().clone();
+        self.merge_dirty_into(&mut candidate);
+        candidate.validate()?;
+        // Commit ONLY the dirty fields under the write lock. The old
+        // whole-struct replace had a read-modify-write window in which a
+        // concurrent `update_settings` call (MCP server thread — not just
+        // the UI, as the previous comment claimed) was silently reverted;
+        // merging inside the closure leaves every non-dirty field at its
+        // live value even if an agent changed it between the clone above
+        // and this commit (2026-08-29 review). A change landing inside
+        // that millisecond window can still invalidate the candidate the
+        // validation saw; the window is one UI-click wide and the next
+        // validate or env reload catches it.
+        state.update_config(|cfg| self.merge_dirty_into(cfg));
         // Only a successful apply clears the dirty flags — a rejected edit
         // must keep them so the user can correct the invalid field.
         self.dirty = EditConfigDirty::default();
         Ok(())
+    }
+
+    /// Writes ONLY the dirty fields onto `cfg`.
+    ///
+    /// Shared by [`Self::apply`]'s validate-candidate step and its final
+    /// commit under the config write lock, so both paths merge identically.
+    fn merge_dirty_into(&self, cfg: &mut AppConfig) {
+        if self.dirty.mc_address {
+            cfg.mc_address = self.mc_address.clone();
+        }
+        if self.dirty.mc_port {
+            cfg.mc_port = self.mc_port;
+        }
+        if self.dirty.ai_username {
+            cfg.ai_username = self.ai_username.clone();
+        }
+        if self.dirty.mcp_address {
+            cfg.mcp_address = self.mcp_address.clone();
+        }
+        if self.dirty.mcp_port {
+            cfg.mcp_port = self.mcp_port;
+        }
+        if self.dirty.task_name {
+            cfg.task_name = self.task_name.clone();
+        }
+        if self.dirty.chunk_scan_radius {
+            cfg.chunk_scan_radius = self.chunk_scan_radius;
+        }
+        if self.dirty.block_perception_radius {
+            cfg.block_perception_radius = self.block_perception_radius;
+        }
+        if self.dirty.snapshot_interval_ms {
+            cfg.snapshot_interval_ms = self.snapshot_interval_ms;
+        }
+        if self.dirty.reconnect_initial_delay_ms {
+            cfg.reconnect_initial_delay_ms = self.reconnect_initial_delay_ms;
+        }
+        if self.dirty.reconnect_max_delay_ms {
+            cfg.reconnect_max_delay_ms = self.reconnect_max_delay_ms;
+        }
+        if self.dirty.command_timeout_secs {
+            cfg.command_timeout_secs = self.command_timeout_secs;
+        }
+        if self.dirty.fly_timeout_secs {
+            cfg.fly_timeout_secs = self.fly_timeout_secs;
+        }
+        if self.dirty.mcp_token {
+            cfg.mcp_token = self.mcp_token.clone();
+        }
+        if self.dirty.mcp_auth_enabled {
+            cfg.mcp_auth_enabled = self.mcp_auth_enabled;
+        }
+        if self.dirty.mcp_transport {
+            cfg.mcp_transport = self.mcp_transport;
+        }
     }
 
     /// Re-syncs every field the user has NOT locally edited (dirty flag
@@ -312,9 +355,10 @@ impl EditConfig {
 /// Single writer for `i18n::current()` on the UI path (M-9).
 ///
 /// Called once per frame from [`App`::ui]: it synchronises the active i18n
-/// language with the persisted [`AppConfig::language`] and caches the
-/// last-seen language so the per-frame `read_config` acquisition is skipped
-/// once the language is stable.
+/// language with the persisted [`AppConfig::language`]. The cached
+/// last-seen language gates the `i18n::set` call (the read_config
+/// acquisition itself still happens every frame — only the redundant
+/// global write is skipped).
 ///
 /// The settings panel's Language dropdown binds DIRECTLY to
 /// `config.language` (no edit-buffer copy) and the `update_settings` MCP
@@ -482,8 +526,9 @@ impl App for MinecraftApp {
         // `i18n::current()` (M-9): the settings panel and the
         // `update_settings` MCP tool both write `config.language`, and this
         // per-frame sync applies the change on the next frame. The cached
-        // `last_language` avoids a `read_config` RwLock acquisition every
-        // frame once the language is stable.
+        // `last_language` skips the redundant `i18n::set` write once the
+        // language is stable (the read_config acquisition still happens
+        // every frame).
         sync_language_from_config(&self.state, &mut self.last_language);
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -623,6 +668,55 @@ mod tests {
         edit.sync_untouched_from(&state.read_config().clone());
         assert_eq!(edit.mcp_port, 9100);
         assert_eq!(edit.snapshot_interval_ms, 777);
+    }
+
+    /// 2026-08-29 review: `apply` commits ONLY the dirty fields under the
+    /// config write lock. A stale non-dirty buffer value (a missed sync —
+    /// the analogue of the agent writing `update_settings` between the
+    /// UI's config read and its commit) must never overwrite the live
+    /// value. The old whole-struct replace passed this test only because
+    /// its candidate was re-cloned from the live config; under a real
+    /// concurrent writer it reverted the agent's change, which a
+    /// single-threaded test cannot race deterministically — this pins the
+    /// merge-only-dirty contract the fix commits to.
+    #[test]
+    fn test_edit_config_apply_merges_only_dirty_fields() {
+        let state = SharedState::new(AppConfig::default());
+        let mut edit = EditConfig::from(&state.read_config().clone());
+
+        // The buffer carries a stale token (sync missed it) that is NOT
+        // dirty, plus one genuinely dirty field.
+        edit.mcp_token = "stale-buffer-token".into();
+        assert!(!edit.dirty.mcp_token);
+        edit.mc_port = 9100;
+        edit.dirty.mc_port = true;
+
+        // Concurrent agent write to the same non-dirty field.
+        state.update_config(|cfg| cfg.mcp_token = "agent-token".into());
+
+        edit.apply(&state).expect("valid edit should apply");
+
+        let cfg = state.read_config().clone();
+        assert_eq!(cfg.mc_port, 9100, "dirty field must apply");
+        assert_eq!(
+            cfg.mcp_token, "agent-token",
+            "non-dirty live value must survive the commit"
+        );
+    }
+
+    /// `EditConfigDirty::any()` reflects the first dirty flag and clears
+    /// with them — the MCP Config panel's pending-hint gate.
+    #[test]
+    fn test_edit_config_dirty_any() {
+        let mut dirty = EditConfigDirty::default();
+        assert!(!dirty.any());
+        dirty.mcp_token = true;
+        assert!(dirty.any());
+        dirty.mcp_token = false;
+        dirty.task_name = true;
+        assert!(dirty.any());
+        dirty = EditConfigDirty::default();
+        assert!(!dirty.any());
     }
 
     /// F-5: every edit-buffer field (one case per field) must survive the

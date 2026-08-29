@@ -166,9 +166,13 @@ impl SnapshotBuilder {
 
         for b in self.old.blocks {
             let chunk = (b.position.x >> 4, b.position.z >> 4);
-            if self.dirty_chunk_index.contains_key(&chunk)
-                && (self.dirty_blocks.contains(&b.position) || self.dirty_chunks.contains(&chunk))
-            {
+            // The dirty_chunk_index probe here was redundant (2026-08-30
+            // review): both `mark_block_dirty` and `mark_chunk_dirty`
+            // insert the block's/whole chunk into the index, so every
+            // chunk touched by `dirty_blocks` or `dirty_chunks` is
+            // guaranteed a key — the membership tests below imply it.
+            // Pinned by test_dirty_chunk_index_covers_dirty_regions.
+            if self.dirty_blocks.contains(&b.position) || self.dirty_chunks.contains(&chunk) {
                 continue;
             }
             blocks.push(b);
@@ -340,6 +344,40 @@ mod tests {
     }
 
     // ── SnapshotBuilder tests ───────────────────────────────
+
+    #[test]
+    fn test_dirty_chunk_index_covers_dirty_regions() {
+        // 2026-08-30 review invariant: every chunk touched by a dirty
+        // block, and every fully-dirty chunk, has a key in the index —
+        // which is what lets SnapshotBuilder::build skip the redundant
+        // `dirty_chunk_index.contains_key` probe.
+        let mut tracker = DirtyTracker::new();
+        tracker.mark_block_dirty(BlockPos::new(5, 64, 7)); // chunk (0, 0)
+        tracker.mark_block_dirty(BlockPos::new(-3, 64, -20)); // chunk (-1, -2)
+        tracker.mark_chunk_dirty((9, 9));
+        // The index must be probed BEFORE take_dirty_sets: the take clears
+        // it (that is exactly how SnapshotBuilder receives all three sets
+        // consistently — cloned together at construction).
+        let (blocks, chunks, index_keys) = {
+            let keys: std::collections::HashSet<_> =
+                tracker.dirty_chunk_index().keys().copied().collect();
+            let (blocks, chunks) = tracker.take_dirty_sets();
+            (blocks, chunks, keys)
+        };
+        for pos in &blocks {
+            let chunk = (pos.x >> 4, pos.z >> 4);
+            assert!(
+                index_keys.contains(&chunk),
+                "chunk {chunk:?} of dirty block {pos:?} must be indexed"
+            );
+        }
+        for chunk in &chunks {
+            assert!(
+                index_keys.contains(chunk),
+                "fully-dirty chunk {chunk:?} must be indexed"
+            );
+        }
+    }
 
     #[test]
     fn test_builder_no_changes_copies_all() {

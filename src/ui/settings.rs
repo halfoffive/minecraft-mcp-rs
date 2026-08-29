@@ -1,8 +1,9 @@
 //! Settings panel: editable [`AppConfig`](crate::config::AppConfig) fields
 //! + Connect / Disconnect buttons.
 //!
-//! All config fields are rendered as editable widgets (text inputs for strings,
-//! [`DragValue`] for numbers).  Edits accumulate in [`EditConfig`] which is
+//! The connection-relevant fields are rendered as editable widgets (text
+//! inputs for strings, [`DragValue`] for numbers; `task_name` currently has
+//! no control and is only settable via the `update_settings` MCP tool).  Edits accumulate in [`EditConfig`] which is
 //! persisted to [`SharedState`] when the user clicks **Connect**.  The
 //! **Disconnect** button sets the bot offline.
 //!

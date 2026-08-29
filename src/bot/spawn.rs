@@ -182,12 +182,16 @@ pub fn spawn_bot_connection(
 ///
 /// Ordering matters:
 /// 1. A cancelled shutdown token wins — the process is exiting.
-/// 2. A pending config restart is consumed next (the flag is taken so a
+/// 2. A live bot thread short-circuits to `WaitMore` (2026-08-30 review):
+///    its connect loop owns the config-restart flag (M-10) and the
+///    connecting/online flags are already held, so neither a flag
+///    consumption nor a second spawn may happen.
+/// 3. A pending config restart is consumed next (the flag is taken so a
 ///    second call in the same decision round cannot double-consume it).
-/// 3. Otherwise spawn a connection when the bot is idle (offline, not
+/// 4. Otherwise spawn a connection when the bot is idle (offline, not
 ///    connecting, and no explicit disconnect was requested — `disconnect_bot`
 ///    must not be undone by an automatic respawn).
-/// 4. Everything else is `WaitMore`.
+/// 5. Everything else is `WaitMore`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadlessAction {
     /// Spawn the bot connection (bot idle, no pending restart or shutdown).
@@ -205,6 +209,18 @@ pub enum HeadlessAction {
 pub fn headless_next_action(state: &SharedState) -> HeadlessAction {
     if state.shutdown_token().is_cancelled() {
         return HeadlessAction::Shutdown;
+    }
+    // 2026-08-30 review (P3): a thread can appear between the quiet-wait's
+    // `ThreadAppeared` step and this call (agent calls `connect_bot` while
+    // the supervisor loop is turning around) — re-check BEFORE consuming
+    // the restart flag. While a thread lives its connect loop owns the
+    // flag (M-10 single ownership); consuming it here silently kills an
+    // online `update_settings` restart and leaves the bot offline. A live
+    // thread also implies the connecting/online flags are held, so
+    // `WaitMore` routes the supervisor to the handle-polling wait without
+    // a second spawn.
+    if state.bot_thread_running() {
+        return HeadlessAction::WaitMore;
     }
     if state.take_config_restart() {
         state.clear_disconnect_request();
@@ -258,6 +274,48 @@ pub(crate) fn inner_wait_step(
         // flag (no bot thread exists).
         None => InnerWaitOutcome::ThreadGone,
     }
+}
+
+/// Outcome of one [`quiet_wait_step`] poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuietWaitOutcome {
+    /// The shutdown token is cancelled — exit the supervisor.
+    Shutdown,
+    /// No bot thread appeared and the config-restart flag was consumed —
+    /// the outer loop respawns with the fresh config.
+    Restart,
+    /// A bot thread appeared while we waited (e.g. the agent called
+    /// `connect_bot`) — step back to the handle-polling wait WITHOUT
+    /// consuming the restart flag.
+    ThreadAppeared,
+    /// Nothing happened — keep waiting quietly.
+    KeepWaiting,
+}
+
+/// Decide one step of the supervisor's quiet-wait loop (the loop that runs
+/// when NO bot thread exists).
+///
+/// This is the ONLY place the supervisor consumes the config-restart flag —
+/// but it must re-check for a live bot thread first (2026-08-29 review): a
+/// thread can appear while the wait is in progress (agent calls
+/// `connect_bot` → `spawn_bot_connection` → `store_bot_thread_handle`), and
+/// the step-2 wait had already handed the handle off, so polling only the
+/// shutdown token here would miss it. If a live thread exists, the connect
+/// loop inside it owns the restart flag (M-10 single-ownership rule) — the
+/// old code consumed it anyway, silently killing an online config restart
+/// and leaving the bot offline until the agent acted again.
+pub(crate) fn quiet_wait_step(state: &SharedState) -> QuietWaitOutcome {
+    if state.shutdown_token().is_cancelled() {
+        return QuietWaitOutcome::Shutdown;
+    }
+    if state.bot_thread_running() {
+        return QuietWaitOutcome::ThreadAppeared;
+    }
+    if state.take_config_restart() {
+        state.clear_disconnect_request();
+        return QuietWaitOutcome::Restart;
+    }
+    QuietWaitOutcome::KeepWaiting
 }
 
 /// Initial backoff before retrying a FAILED bot-thread spawn (report M-8).
@@ -403,17 +461,22 @@ pub fn headless_supervisor(
         //       fail-fast must not spin the connection loop. Only here,
         //       with NO bot thread alive, does the supervisor consume the
         //       config-restart flag (single-ownership rule, M-10); the
-        //       outer loop then respawns via headless_next_action.
+        //       outer loop then respawns via headless_next_action. The
+        //       step re-checks for a live thread first: `connect_bot` may
+        //       have spawned one while we waited (QuietWaitOutcome::
+        //       ThreadAppeared) — the flag stays untouched for that
+        //       thread's connect loop.
         loop {
-            if state.shutdown_token().is_cancelled() {
-                break_outer = true;
-                break;
+            match quiet_wait_step(&state) {
+                QuietWaitOutcome::Shutdown => {
+                    break_outer = true;
+                    break;
+                }
+                QuietWaitOutcome::Restart | QuietWaitOutcome::ThreadAppeared => break,
+                QuietWaitOutcome::KeepWaiting => {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
             }
-            if state.take_config_restart() {
-                state.clear_disconnect_request();
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(250));
         }
         if break_outer {
             break;
@@ -636,6 +699,49 @@ mod tests {
         assert_eq!(headless_next_action(&state), HeadlessAction::WaitMore);
     }
 
+    /// 2026-08-30 review (P3): a thread appearing between the quiet-wait's
+    /// `ThreadAppeared` step and the next `headless_next_action` call must
+    /// NOT lose the config-restart flag to the supervisor — the fresh
+    /// thread's connect loop owns it (M-10 single ownership). The old code
+    /// consumed the flag unconditionally: the agent got
+    /// `reconnect_triggered: true` from `update_settings`, but the bot
+    /// stayed offline because the connect loop never saw the flag.
+    #[test]
+    fn test_next_action_thread_appeared_keeps_restart_flag() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let state = SharedState::new(AppConfig::default());
+
+        // A live, non-finished bot thread handle, stored the way
+        // `spawn_bot_connection` does.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !stop_clone.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        state.store_bot_thread_handle(handle);
+
+        // Agent changed connection settings while the (new) bot was online.
+        state.request_config_restart();
+
+        assert_eq!(
+            headless_next_action(&state),
+            HeadlessAction::WaitMore,
+            "a live thread short-circuits to WaitMore"
+        );
+        assert!(
+            state.take_config_restart(),
+            "restart flag must stay set for the connect loop (M-10)"
+        );
+
+        // Cleanup: stop the helper thread so the test process exits cleanly.
+        stop.store(true, Ordering::Relaxed);
+        let handle = state.take_bot_thread_handle().expect("handle stored");
+        let _ = join_with_timeout(handle, Duration::from_secs(2));
+    }
+
     // ── M-10 regression: single ownership of the restart flag ───────────
 
     /// Regression for audit M-10: while a bot thread is alive, the
@@ -702,5 +808,120 @@ mod tests {
         );
         // No thread at all is also "gone" (nothing to wait on).
         assert_eq!(inner_wait_step(&state, None), InnerWaitOutcome::ThreadGone);
+    }
+
+    /// RED (2026-08-29 review): the quiet-wait consumes the config-restart
+    /// flag "only when NO bot thread exists". A thread can appear while the
+    /// wait is in progress (agent calls `connect_bot`), and with only the
+    /// shutdown token + flag being polled the wait never noticed it — it
+    /// consumed the flag an online `update_settings` had left for the
+    /// connect loop, silently killing the restart. `quiet_wait_step` must
+    /// re-check for a live thread BEFORE consuming the flag.
+    #[test]
+    fn test_quiet_wait_step_thread_appeared_keeps_restart_flag() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let state = SharedState::new(AppConfig::default());
+
+        // A live, non-finished bot thread handle (stored, as
+        // `spawn_bot_connection` would).
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !stop_clone.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        state.store_bot_thread_handle(handle);
+
+        // Agent changed connection settings while the (new) bot was online.
+        state.request_config_restart();
+
+        assert_eq!(
+            quiet_wait_step(&state),
+            QuietWaitOutcome::ThreadAppeared,
+            "a live thread must step the quiet-wait back to the handle-polling wait"
+        );
+        assert!(
+            state.take_config_restart(),
+            "restart flag must stay set for the connect loop (M-10 single ownership)"
+        );
+
+        // Once the thread finishes, the quiet-wait owns the flag again.
+        stop.store(true, Ordering::Relaxed);
+        let handle = state.take_bot_thread_handle().expect("handle stored");
+        for _ in 0..200 {
+            if handle.is_finished() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(handle.is_finished(), "parked thread should exit promptly");
+        state.request_config_restart();
+        assert_eq!(
+            quiet_wait_step(&state),
+            QuietWaitOutcome::Restart,
+            "with no live thread the quiet-wait consumes the restart flag"
+        );
+        assert!(
+            !state.take_config_restart(),
+            "Restart outcome must have consumed the flag"
+        );
+    }
+
+    /// No thread and no restart flag → keep waiting.
+    #[test]
+    fn test_quiet_wait_step_no_thread_no_flag_keeps_waiting() {
+        let state = SharedState::new(AppConfig::default());
+        assert_eq!(quiet_wait_step(&state), QuietWaitOutcome::KeepWaiting);
+        assert!(
+            !state.take_config_restart(),
+            "KeepWaiting must not consume the restart flag"
+        );
+    }
+
+    /// Shutdown wins over everything else in the quiet-wait.
+    #[test]
+    fn test_quiet_wait_step_shutdown() {
+        let state = SharedState::new(AppConfig::default());
+        state.trigger_shutdown();
+        assert_eq!(quiet_wait_step(&state), QuietWaitOutcome::Shutdown);
+    }
+
+    /// `bot_thread_running` probes without consuming the stored handle.
+    #[test]
+    fn test_bot_thread_running_three_states() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let state = SharedState::new(AppConfig::default());
+        assert!(
+            !state.bot_thread_running(),
+            "no handle stored → not running"
+        );
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !stop_clone.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        state.store_bot_thread_handle(handle);
+        assert!(state.bot_thread_running(), "live handle → running");
+
+        stop.store(true, Ordering::Relaxed);
+        let handle = state.take_bot_thread_handle().expect("handle still stored");
+        for _ in 0..200 {
+            if handle.is_finished() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(handle.is_finished());
+        // The take() above removed the handle, so store it back to probe
+        // the finished state through the accessor.
+        state.store_bot_thread_handle(handle);
+        assert!(!state.bot_thread_running(), "finished handle → not running");
+        let _ = state.take_bot_thread_handle();
     }
 }

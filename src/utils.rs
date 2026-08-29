@@ -8,6 +8,8 @@
 //! before it reaches the snapshot and the MCP `get_bot_status` /
 //! `get_world_view` payloads.
 
+use std::time::{Duration, Instant};
+
 /// Naive CamelCase → snake_case conversion.
 ///
 /// Inserts `_` before each uppercase letter (except at the start) and
@@ -38,15 +40,17 @@ pub fn to_snake_case(s: &str) -> String {
     result
 }
 
-/// Case-insensitive ASCII substring search (single allocation for the
-/// lowercased needle, none per haystack).
+/// Case-insensitive ASCII substring search (no allocations at all).
 ///
-/// `needle` must already be lowercased. `haystack` is scanned byte-wise with
-/// a non-allocating ASCII-folding comparison, so filtering thousands of
-/// blocks by `block_type` no longer allocates one lowercase `String` per
-/// block (see `get_nearby_blocks`). Non-ASCII bytes are compared verbatim —
-/// block/item ids are pure ASCII, so this is safe for them; for non-ASCII
-/// input the comparison is byte-exact rather than case-insensitive.
+/// Both `haystack` and `needle` are scanned byte-wise with a
+/// non-allocating ASCII-folding comparison — the needle does NOT need to be
+/// pre-lowercased (an earlier revision of this doc claimed it did; the
+/// implementation folds both sides, and no caller pre-lowercases it).
+/// Filtering thousands of blocks by `block_type` therefore allocates
+/// nothing (see `get_nearby_blocks`). Non-ASCII bytes are compared
+/// verbatim — block/item ids are pure ASCII, so this is safe for them; for
+/// non-ASCII input the comparison is byte-exact rather than
+/// case-insensitive.
 pub fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
@@ -63,6 +67,19 @@ pub fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
             .zip(needle_bytes)
             .all(|(h, n)| h.eq_ignore_ascii_case(n))
     })
+}
+
+/// Backdate an `Instant` by `ago`, saturating at the clock origin.
+///
+/// `Instant - Duration` is a *panicking* subtraction: the Linux/macOS
+/// monotonic clocks are boot-relative, so backdating 3600 s on a machine
+/// with less than one hour of uptime panics — `BotState::default` used to
+/// kill the bot connection thread exactly there (2026-08-30 review P1).
+/// Callers use the backdate to make a throttle fire on the first tick; when
+/// the backdate cannot be represented, the `Instant::now()` fallback merely
+/// delays the first build by one throttle interval instead of panicking.
+pub(crate) fn backdate_instant(ago: Duration) -> Instant {
+    Instant::now().checked_sub(ago).unwrap_or_else(Instant::now)
 }
 
 /// Fold a raw horizontal look angle (radians) into Minecraft's canonical
@@ -199,6 +216,32 @@ mod tests {
         // ASCII, but the helper must not panic or allocate on them.
         assert!(contains_ascii_case_insensitive("石stone", "stone"));
         assert!(!contains_ascii_case_insensitive("石", "石石"));
+    }
+
+    // ── backdate_instant (2026-08-30 review P1) ──────────────────
+
+    /// The backdate must land strictly before `now` when representable, and
+    /// a raw `Instant - Duration` underflow (boot-relative clocks on a fresh
+    /// Linux/macOS boot) must saturate instead of panicking. The underflow
+    /// branch itself is time-of-day dependent — Windows `Instant` carries a
+    /// large boot offset and can represent even the 100-year backdate — so
+    /// the test asserts only the portable contract: never panics, never in
+    /// the future, representable backdates move the point backwards.
+    #[test]
+    fn test_backdate_instant_saturates_without_panic() {
+        let now = Instant::now();
+        // A representable backdate lands strictly before now.
+        let back = backdate_instant(Duration::from_secs(3600));
+        assert!(back < now, "3600 s backdate must be in the past");
+        // A deliberately huge backdate would panic a raw subtraction on
+        // boot-relative monotonic clocks; here it must saturate to ~now.
+        let century = backdate_instant(Duration::from_secs(60 * 60 * 24 * 365 * 100));
+        assert!(
+            century <= Instant::now(),
+            "saturated backdate is never in the future"
+        );
+        // Zero backdate is "now" (within scheduler jitter).
+        assert!(backdate_instant(Duration::ZERO) <= Instant::now());
     }
 
     // ── normalize_yaw ─────────────────────────────────────────────

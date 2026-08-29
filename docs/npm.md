@@ -10,13 +10,13 @@ Run on demand — `npx` downloads the matching platform binary the first time
 and caches it for later runs:
 
 ```bash
-npx -y minecraft-mcp-rs@1.4.2 --headless --stdio
+npx -y minecraft-mcp-rs@1.4.3 --headless --stdio
 ```
 
 Using [Bun](https://bun.sh)? `bunx` does the same without the `-y` prompt:
 
 ```bash
-bunx minecraft-mcp-rs@1.4.2 --headless --stdio
+bunx minecraft-mcp-rs@1.4.3 --headless --stdio
 ```
 
 `--headless` runs without the desktop window and exits the process when the
@@ -31,7 +31,7 @@ Add this to your MCP client config:
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs@1.4.2", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@1.4.3", "--headless", "--stdio"]
     }
   }
 }
@@ -44,7 +44,7 @@ Bun users: swap `"command"` to `bunx` and drop `-y`:
   "mcpServers": {
     "minecraft": {
       "command": "bunx",
-      "args": ["minecraft-mcp-rs@1.4.2", "--headless", "--stdio"]
+      "args": ["minecraft-mcp-rs@1.4.3", "--headless", "--stdio"]
     }
   }
 }

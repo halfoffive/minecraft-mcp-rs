@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use axum::{
     Router,
     extract::{Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{Next, from_fn_with_state},
     response::{IntoResponse, Response},
 };
@@ -126,7 +126,7 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Lightweight status poll for long-running operations (fly_to / mining / collect_items): connected, bot_busy, position (block + precise), yaw, health, hunger, gamemode, snapshot age. Reads the cached snapshot by default (no forced refresh) and reports connected:false while offline instead of erroring.",
+        description = "Lightweight status poll for long-running operations (fly_to / mining / collect_items): connected, bot_busy, position (block + precise), yaw, health, hunger, gamemode, snapshot_timestamp (epoch ms of the snapshot the data came from). Reads the cached snapshot by default (no forced refresh) and reports connected:false while offline instead of erroring.",
         annotations(read_only_hint = true)
     )]
     async fn get_bot_status(
@@ -762,8 +762,12 @@ async fn headless_idle_watchdog(state: Arc<SharedState>, started_at: Instant) {
 
 /// Extract the Bearer token from an `Authorization` header value.
 ///
-/// Returns `Some(token)` only when the header starts with `Bearer ` (case-sensitive
-/// per RFC 6750). The returned token is trimmed of surrounding whitespace.
+/// Returns `Some(token)` only when the header starts with the exact spelling
+/// `Bearer `. Case sensitivity is a deliberate strictness choice here, NOT an
+/// RFC requirement: RFC 6750 §2.1 transmits the scheme as `Bearer`, but
+/// HTTP auth-scheme matching itself is case-insensitive (RFC 7235 §2.1), so
+/// a client sending `bearer` is technically RFC-valid — it just gets a 401
+/// from us. The returned token is trimmed of surrounding whitespace.
 fn extract_bearer_token(header: &str) -> Option<&str> {
     header.strip_prefix("Bearer ").map(str::trim)
 }
@@ -809,8 +813,13 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 /// Reads the expected token from `state.config().mcp_token` on every request so
 /// configuration changes take effect immediately.
 fn is_bearer_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
+    // Fail-closed for an empty configured token (2026-08-30 review): the
+    // middleware's `is_request_authorized` already rejects that
+    // misconfiguration, but this helper's own contract must not be
+    // fail-open — a future caller bypassing the middleware would otherwise
+    // authenticate every request with an empty expected token.
     if expected_token.is_empty() {
-        return true;
+        return false;
     }
     headers
         .get("Authorization")
@@ -864,7 +873,13 @@ async fn bearer_auth_middleware(
     if authorized {
         next.run(request).await
     } else {
-        (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
+        // RFC 6750 section 3: a 401 for a protected Bearer resource SHOULD
+        // carry the WWW-Authenticate challenge so clients know the scheme.
+        let mut response = (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        response
     }
 }
 
@@ -887,6 +902,51 @@ async fn shutdown_signal(token: CancellationToken, headless: bool) {
         _ = token.cancelled() => {}
         _ = tokio::signal::ctrl_c(), if headless => {
             info!("Ctrl+C received — shutting down MCP HTTP server");
+        }
+    }
+}
+
+/// Resolve the MCP HTTP bind address.
+///
+/// An IP literal parses directly. A hostname (validate() allows
+/// `localhost`) is resolved through the OS resolver so the configured name
+/// decides the bound family — the old code coerced any non-IP spelling
+/// (i.e. `localhost`) to IPv4 127.0.0.1, which silently diverged from the
+/// configured value on hosts where `localhost` resolves to `::1`
+/// (2026-08-29 review). Unresolvable names fall back to 127.0.0.1 with a
+/// warning, keeping the historical behaviour instead of failing startup.
+pub async fn resolve_bind_addr(address: &str, port: u16) -> SocketAddr {
+    if let Ok(ip) = address.parse::<std::net::IpAddr>() {
+        return SocketAddr::new(ip, port);
+    }
+    match tokio::net::lookup_host((address, port)).await {
+        Ok(mut addrs) => match addrs.next() {
+            Some(resolved) => {
+                tracing::debug!(
+                    address,
+                    port,
+                    resolved = %resolved,
+                    "resolved MCP bind address by hostname"
+                );
+                resolved
+            }
+            None => {
+                tracing::warn!(
+                    address,
+                    port,
+                    "hostname resolved to no addresses, falling back to 127.0.0.1"
+                );
+                SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port)
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                address,
+                port,
+                error = %e,
+                "failed to resolve mcp_address as IP or hostname, falling back to 127.0.0.1"
+            );
+            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port)
         }
     }
 }
@@ -1110,6 +1170,37 @@ mod tests {
         }
     }
 
+    /// 2026-08-29 review: an IP literal passes through unchanged.
+    #[tokio::test]
+    async fn test_resolve_bind_addr_ip_passthrough() {
+        let addr = resolve_bind_addr("127.0.0.5", 9100).await;
+        assert_eq!(addr.ip().to_string(), "127.0.0.5");
+        assert_eq!(addr.port(), 9100);
+        let addr = resolve_bind_addr("::1", 8080).await;
+        assert!(addr.is_ipv6());
+        assert_eq!(addr.port(), 8080);
+    }
+
+    /// `localhost` resolves through the OS resolver to SOME loopback
+    /// address (127.0.0.1 or ::1, platform-dependent) instead of being
+    /// coerced to IPv4.
+    #[tokio::test]
+    async fn test_resolve_bind_addr_localhost_resolves_loopback() {
+        let addr = resolve_bind_addr("localhost", 25580).await;
+        assert!(addr.ip().is_loopback(), "got: {addr}");
+        assert_eq!(addr.port(), 25580);
+    }
+
+    /// An unresolvable name falls back to 127.0.0.1 (warn-logged) instead
+    /// of failing startup — the historical behaviour.
+    #[tokio::test]
+    async fn test_resolve_bind_addr_unresolvable_falls_back() {
+        // The space makes this name invalid for every resolver, so the
+        // lookup errors immediately without a network round-trip.
+        let addr = resolve_bind_addr("not a hostname!", 25581).await;
+        assert_eq!(addr.to_string(), "127.0.0.1:25581");
+    }
+
     /// F-3(b): drive `tools/call` through the real JSON-RPC transport —
     /// happy path and an unknown-tool -32602.
     #[tokio::test]
@@ -1179,6 +1270,16 @@ mod tests {
             .await
             .expect("router call");
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        // RFC 6750 section 3 (2026-08-30 review): the 401 must carry the
+        // Bearer challenge so clients learn the expected scheme.
+        assert_eq!(
+            unauthorized
+                .headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer"),
+            "401 must carry WWW-Authenticate: Bearer"
+        );
         let bytes = axum::body::to_bytes(unauthorized.into_body(), 1024)
             .await
             .expect("body readable");

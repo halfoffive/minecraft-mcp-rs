@@ -160,26 +160,31 @@ impl BotCommandSender {
 
         trace!(command = ?cmd, "sending bot command");
 
-        if self.tx.send(wrapped).await.is_err() {
-            error!("bot command channel closed — receiver dropped");
-            return Err(BotError::Offline("bot command channel closed".into()));
-        }
-
-        // The caller-supplied envelope is used verbatim (L-18-prep); the
-        // `Duration` (not a raw u64) supports sub-second timeouts like
-        // 200ms without truncation.
+        // The envelope covers the SEND leg too (2026-08-30 review): with a
+        // bounded queue and a wedged (or absent) receiver, `tx.send().await`
+        // blocks on back-pressure indefinitely OUTSIDE the timeout — the
+        // caller hung past its envelope with no CommandTimeout ever firing.
+        // The exchange future wraps send → response so the whole round-trip
+        // is bounded. On a send-leg timeout the command was never queued
+        // (unlike a recv-leg timeout, which is not cancellation — see the
+        // F-10 note on `send_command`).
         let timeout_secs = timeout_dur.as_secs();
-        match timeout(timeout_dur, rx).await {
+        let exchange = async {
+            if self.tx.send(wrapped).await.is_err() {
+                error!("bot command channel closed — receiver dropped");
+                return Err(BotError::Offline("bot command channel closed".into()));
+            }
+            rx.await.map_err(|_| {
+                warn!(command = ?cmd, "bot command responder dropped without reply");
+                BotError::Offline("bot command responder dropped without reply".into())
+            })
+        };
+        match timeout(timeout_dur, exchange).await {
             Ok(Ok(result)) => {
                 debug!(command = ?cmd, ?result, "bot command completed");
                 result
             }
-            Ok(Err(_)) => {
-                warn!(command = ?cmd, "bot command responder dropped without reply");
-                Err(BotError::Offline(
-                    "bot command responder dropped without reply".into(),
-                ))
-            }
+            Ok(Err(err)) => Err(err),
             Err(_) => {
                 error!(command = ?cmd, timeout_secs, "bot command timed out");
                 Err(BotError::CommandTimeout {
@@ -307,6 +312,39 @@ impl ReceiverLease {
             .as_mut()
             .expect("ReceiverLease missing receiver — invariant violated")
     }
+
+    /// Drain every command currently buffered in the channel, replying to
+    /// each sender with an honest [`BotError::Offline`] instead of executing
+    /// it (2026-08-29 review).
+    ///
+    /// Commands that were sent while no executor held the receiver (the bot
+    /// was offline, or the previous session's executor was aborted
+    /// mid-flight) sit in the mpsc buffer with their responders already
+    /// gone-or-timing-out. When a NEW session's executor leases the
+    /// receiver, executing those stale commands would leak session A's
+    /// effects into session B (responses lost either way). Draining at
+    /// lease start discards them deterministically and answers every
+    /// sender immediately.
+    ///
+    /// Returns the number of drained commands. Note the millisecond window
+    /// between `set_online(true)` (in the spawn handler) and this drain: a
+    /// command sent there is drained with the same honest Offline error,
+    /// which the client can retry.
+    pub(crate) fn drain_stale(&mut self, reason: &str) -> usize {
+        let mut drained = 0;
+        while let Ok(wrapped) = self.receiver_mut().try_recv() {
+            let BotCommandWithResponder {
+                command,
+                respond_to,
+            } = wrapped;
+            tracing::debug!(command = ?command, "discarding stale cross-session command");
+            let _ = respond_to.send(Err(BotError::Offline(format!(
+                "{reason}; reconnect and retry"
+            ))));
+            drained += 1;
+        }
+        drained
+    }
 }
 
 impl Drop for ReceiverLease {
@@ -395,6 +433,50 @@ mod tests {
     /// When the receiver drops the oneshot sender without responding,
     /// the caller should get `BotError::Offline` (channel closed — distinct
     /// from a real timeout, which would yield `CommandTimeout`).
+    /// RED (2026-08-29 review): commands buffered while no executor held
+    /// the receiver belong to a previous session. `ReceiverLease::
+    /// drain_stale` must discard them and answer every sender with an
+    /// immediate honest Offline error instead of letting the new session's
+    /// executor run them with responses lost.
+    #[tokio::test]
+    async fn test_drain_stale_replies_offline_and_empties_queue() {
+        let slot: ReceiverSlot = Arc::new(Mutex::new(None));
+        let state = make_state();
+        let (sender, rx) = create_command_channel(4, Arc::clone(&state));
+        *slot.lock().unwrap() = Some(rx);
+
+        let mut lease = ReceiverLease::take(&slot).expect("lease taken");
+        assert!(slot.lock().unwrap().is_none());
+
+        // Buffer two stale commands: the senders block on the oneshot
+        // reply (no executor is running yet).
+        let mut r1 = tokio::spawn({
+            let sender = sender.clone();
+            async move { sender.send_command(BotCommand::Jump).await }
+        });
+        let mut r2 = tokio::spawn(async move { sender.send_command(BotCommand::Jump).await });
+        // Let both sends land in the buffer.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let drained = lease.drain_stale("stale command from a previous session");
+        assert_eq!(drained, 2, "both buffered commands must be drained");
+
+        // Every drained sender gets an immediate honest Offline error.
+        for r in [&mut r1, &mut r2] {
+            let result = r.await.expect("sender task finished");
+            assert!(
+                matches!(&result, Err(BotError::Offline(msg)) if msg.contains("stale command")),
+                "expected honest Offline error, got: {result:?}"
+            );
+        }
+
+        // The queue is empty — the executor loop would start clean.
+        assert!(
+            lease.receiver_mut().try_recv().is_err(),
+            "no command may survive the drain"
+        );
+    }
+
     #[tokio::test]
     async fn test_offline_when_responder_dropped() {
         let (sender, mut receiver) = create_command_channel(10, make_state());
@@ -417,6 +499,59 @@ mod tests {
         }
 
         responder.await.expect("responder task should complete");
+    }
+
+    /// 2026-08-30 review: the timeout envelope must cover the SEND leg. A
+    /// bounded queue with NO receiver polling blocks `tx.send().await` on
+    /// back-pressure — the old code placed the send OUTSIDE the
+    /// `tokio::time::timeout`, so the caller hung indefinitely instead of
+    /// getting CommandTimeout. Fill a capacity-1 queue (nothing ever
+    /// receives) and watch a 200 ms envelope fire.
+    #[tokio::test]
+    async fn test_send_leg_is_inside_the_timeout_envelope() {
+        let state = make_state();
+        let (sender, mut receiver) = create_command_channel(1, Arc::clone(&state));
+
+        // The receiver stays owned here but is NEVER polled: the queue
+        // parks full. A cloned sender (spawned tasks need 'static) fills
+        // the queue's single slot with a long-envelope send.
+        let filler_sender = sender.clone();
+        let filler = tokio::spawn(async move {
+            filler_sender
+                .send_command_with_timeout(BotCommand::Jump, Duration::from_secs(30))
+                .await
+        });
+
+        // Give the filler a moment to occupy the queue slot, then the next
+        // send must block on back-pressure and hit its envelope.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let started = std::time::Instant::now();
+        let result = sender
+            .send_command_with_timeout(BotCommand::Jump, Duration::from_millis(200))
+            .await;
+        let elapsed = started.elapsed();
+
+        match result {
+            Err(BotError::CommandTimeout { timeout_secs, .. }) => {
+                assert_eq!(timeout_secs, 0, "200 ms envelope rounds to 0 secs");
+            }
+            other => panic!("expected CommandTimeout from a full queue, got: {other:?}"),
+        }
+        assert!(
+            elapsed >= Duration::from_millis(180),
+            "timeout must not fire early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the send leg must be bounded by the envelope, not hang: {elapsed:?}"
+        );
+
+        // Unblock the filler: drain the parked command and drop it
+        // IMMEDIATELY (its responder dies with it, so the filler observes
+        // Offline instead of hanging on its own 30 s envelope).
+        drop(receiver.recv().await.expect("parked command"));
+        let _ = filler.await.expect("filler task should complete");
     }
 
     // ── CommandTimeout — responder alive but slow ─────────────
@@ -943,23 +1078,48 @@ mod tests {
     /// pre-fix `as_secs(0.2) = 0` truncation is gone).
     #[tokio::test]
     async fn test_subsecond_timeout_not_truncated() {
-        // Build a state whose `command_timeout_secs` is 1 (smallest u64),
-        // then patch the timeout path through `sender.timeout()` to use
-        // a fractional duration. We do this by using a custom helper
-        // because `command_timeout_secs` is a u64 field. The important
-        // invariant is that `sender.timeout()` returns a Duration that
-        // is not 0 when the config field is 1 — i.e. `as_secs_f64()` of
-        // the config-derived Duration matches the value the user set.
+        // 2026-08-29 review rewrite: the old body only set
+        // command_timeout_secs=1 and asserted `sender.timeout() == 1s` —
+        // it never exercised a sub-second envelope at all (the config
+        // field is u64 seconds, so send_command cannot produce one; only
+        // `send_command_with_timeout` can). Send through a 200 ms envelope
+        // with a receiver that never replies: the send must fail with
+        // CommandTimeout after roughly 200 ms, not instantly (a 0-second
+        // truncation) and not after the full 1 s config envelope.
         let state = make_state();
         state.update_config(|cfg| cfg.command_timeout_secs = 1);
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
-        let dur = sender.timeout();
-        assert_eq!(dur, Duration::from_secs(1));
-        // The Debug representation of the duration is `1s` (not `0s`),
-        // which would have been the truncated value if the old
-        // `Duration::from_secs_f64` round-trip had been lossy.
-        assert_eq!(format!("{dur:?}"), "1s");
+        // Hold the receiver alive but never answer.
+        let holder = tokio::spawn(async move {
+            // Keep the command buffered until the envelope fires.
+            let _command = receiver.recv().await;
+            // Hold the wrapped command (and its responder) for 1 s so the
+            // sender's envelope — not a responder drop — decides.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+
+        let started = std::time::Instant::now();
+        let result = sender
+            .send_command_with_timeout(BotCommand::Jump, Duration::from_millis(200))
+            .await;
+        let elapsed = started.elapsed();
+
+        match result {
+            Err(BotError::CommandTimeout { timeout_secs, .. }) => {
+                assert_eq!(timeout_secs, 0, "200 ms envelope rounds to 0 secs");
+            }
+            other => panic!("expected CommandTimeout, got: {other:?}"),
+        }
+        assert!(
+            elapsed >= Duration::from_millis(180),
+            "envelope must not be truncated to 0 (elapsed {elapsed:?})"
+        );
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "explicit envelope must win over the 1 s config (elapsed {elapsed:?})"
+        );
+        holder.abort();
     }
 
     // ── ReceiverLease retry (P1-#9) ──────────────────────────
@@ -968,33 +1128,35 @@ mod tests {
     /// still be alive when the new `Event::Spawn` fires. `take_with_retry`
     /// must poll the slot briefly and observe the receiver land there once
     /// the old lease drops.
+    ///
+    /// 2026-08-29 review rewrite: the old body simulated the drop by
+    /// inserting a brand-new receiver from a DIFFERENT channel, which
+    /// proves only "poll until the slot is non-empty" — not the actual
+    /// hand-off invariant (the SAME receiver returns via lease Drop and
+    /// the new executor acquires it). The task now drops the real lease.
     #[tokio::test(flavor = "current_thread")]
     async fn test_receiver_lease_take_retries_during_reconnect() {
         let slot: ReceiverSlot = Arc::new(Mutex::new(None));
 
-        // Simulate a previous executor that has leased the receiver.
-        // Place a fresh receiver into the slot first, then take it
-        // through `take` so the slot is empty (matching the in-between
-        // reconnect window).
+        // A previous executor has leased the receiver: place it in the
+        // slot, take it out through `take`, and remember WHICH receiver
+        // the lease holds.
         let (tx, rx) = create_command_channel(4, make_state());
-        drop(tx);
+        let tx = Arc::new(tx);
         *slot.lock().unwrap() = Some(rx);
-        let _first_lease = ReceiverLease::take(&slot).expect("first take succeeds");
+        let first_lease = ReceiverLease::take(&slot).expect("first take succeeds");
         assert!(
             slot.lock().unwrap().is_none(),
             "slot must be empty after first lease"
         );
 
-        // The new Spawn fires while the first lease is still alive.
-        // Spawn a task that drops the first lease after 20ms — within
-        // the 100ms retry window.
-        let first_slot = Arc::clone(&slot);
+        // The new Spawn fires while the first lease is still alive. The
+        // background task drops the REAL lease after 20 ms — within the
+        // 100 ms retry window — which returns the same receiver to the
+        // slot via `ReceiverLease::drop`.
         let drop_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            // Manually release the first lease by replacing the slot's
-            // receiver (simulating `Drop`).
-            let (_tx, rx) = create_command_channel(4, make_state());
-            *first_slot.lock().unwrap() = Some(rx);
+            drop(first_lease);
         });
 
         // The retry loop should eventually find the receiver and return
@@ -1002,10 +1164,22 @@ mod tests {
         // immediately.
         let lease = ReceiverLease::take_with_retry(&slot).await;
         drop_task.await.unwrap();
-        assert!(
-            lease.is_some(),
-            "take_with_retry should have observed the receiver"
-        );
+        let lease = lease.expect("take_with_retry should have observed the receiver");
+
+        // The re-acquired receiver is the SAME channel: a command sent by
+        // the original sender reaches the new executor (drop(tx) below
+        // would close a foreign channel instead).
+        let mut lease = lease;
+        let probe = tokio::spawn(async move { tx.send_command(BotCommand::Jump).await });
+        let wrapped = lease
+            .receiver_mut()
+            .recv()
+            .await
+            .expect("original channel still flows through the re-acquired lease");
+        assert!(matches!(wrapped.command, BotCommand::Jump));
+        // Answer so the probe sender finishes cleanly.
+        let _ = wrapped.respond_to.send(Ok(make_result(true, "ok")));
+        probe.await.expect("probe task finished").expect("send ok");
     }
 
     /// If the slot stays empty for the full 100ms retry window,
