@@ -5,8 +5,8 @@ MCP server that controls a Minecraft bot (azalea) — prebuilt native binaries.
 ## Usage
 
 ```bash
-npx -y minecraft-mcp-rs@1.4.3-rc.2 --headless --stdio
-bunx minecraft-mcp-rs@1.4.3-rc.2 --headless --stdio
+npx -y minecraft-mcp-rs@1.4.3 --headless --stdio
+bunx minecraft-mcp-rs@1.4.3 --headless --stdio
 ```
 
 > This package supports **Minecraft Java Edition 1.21.11 only**. Other Minecraft versions are not supported — see the [root README](https://github.com/halfoffive/minecraft-mcp-rs#readme) for the version compatibility table.
@@ -25,7 +25,7 @@ For Claude Desktop / Cursor, add to your MCP client config:
   "mcpServers": {
     "minecraft": {
       "command": "npx",
-      "args": ["-y", "minecraft-mcp-rs@1.4.3-rc.2", "--headless", "--stdio"]
+      "args": ["-y", "minecraft-mcp-rs@1.4.3", "--headless", "--stdio"]
     }
   }
 }
