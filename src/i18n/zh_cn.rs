@@ -127,6 +127,9 @@ pub(crate) fn lookup(key: TextKey) -> &'static str {
         TextKey::WorldView => "世界视图：",
         TextKey::Refresh => "刷新",
         TextKey::RefreshTooltip => "以半径8、缩放2重新渲染当前快照",
+        TextKey::ConfigPendingHint => {
+            "部分设置存在未应用的修改 —— 在点击「连接」之前，下方 JSON 可能与当前运行配置不一致。"
+        }
         TextKey::WorldViewPlaceholder => "暂无缓存的截图 — 点击「刷新」渲染当前快照。",
     }
 }
