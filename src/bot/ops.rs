@@ -1250,13 +1250,17 @@ mod tests {
                 }
             };
             let best = best_tool_for_block(&block_type);
+            // 2026-08-30 review: cobweb-class blocks accept the alternative
+            // tool (shears alongside the sword primary) at the same vanilla
+            // speed, so the mock must let them mine too.
+            let alt = crate::block_data::alt_tool_for_block(&block_type);
             let held_parses_to_best = {
                 let held_slot = self.state.read_snapshot().self_player.held_item_slot;
                 let inv = self.mock.inventory.lock().unwrap();
                 inv.get(held_slot as usize)
                     .and_then(|opt| opt.as_ref())
                     .and_then(|stack| material_from_item_name(&stack.item_id))
-                    .map(|(t, _)| t == best)
+                    .map(|(t, _)| t == best || Some(t) == alt)
                     .unwrap_or(false)
             };
             if best != ToolType::Hand && !held_parses_to_best {
