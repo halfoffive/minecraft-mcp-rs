@@ -1017,23 +1017,48 @@ mod tests {
     /// pre-fix `as_secs(0.2) = 0` truncation is gone).
     #[tokio::test]
     async fn test_subsecond_timeout_not_truncated() {
-        // Build a state whose `command_timeout_secs` is 1 (smallest u64),
-        // then patch the timeout path through `sender.timeout()` to use
-        // a fractional duration. We do this by using a custom helper
-        // because `command_timeout_secs` is a u64 field. The important
-        // invariant is that `sender.timeout()` returns a Duration that
-        // is not 0 when the config field is 1 — i.e. `as_secs_f64()` of
-        // the config-derived Duration matches the value the user set.
+        // 2026-08-29 review rewrite: the old body only set
+        // command_timeout_secs=1 and asserted `sender.timeout() == 1s` —
+        // it never exercised a sub-second envelope at all (the config
+        // field is u64 seconds, so send_command cannot produce one; only
+        // `send_command_with_timeout` can). Send through a 200 ms envelope
+        // with a receiver that never replies: the send must fail with
+        // CommandTimeout after roughly 200 ms, not instantly (a 0-second
+        // truncation) and not after the full 1 s config envelope.
         let state = make_state();
         state.update_config(|cfg| cfg.command_timeout_secs = 1);
-        let (sender, _receiver) = create_command_channel(4, Arc::clone(&state));
+        let (sender, mut receiver) = create_command_channel(4, Arc::clone(&state));
 
-        let dur = sender.timeout();
-        assert_eq!(dur, Duration::from_secs(1));
-        // The Debug representation of the duration is `1s` (not `0s`),
-        // which would have been the truncated value if the old
-        // `Duration::from_secs_f64` round-trip had been lossy.
-        assert_eq!(format!("{dur:?}"), "1s");
+        // Hold the receiver alive but never answer.
+        let holder = tokio::spawn(async move {
+            // Keep the command buffered until the envelope fires.
+            let _command = receiver.recv().await;
+            // Hold the wrapped command (and its responder) for 1 s so the
+            // sender's envelope — not a responder drop — decides.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+
+        let started = std::time::Instant::now();
+        let result = sender
+            .send_command_with_timeout(BotCommand::Jump, Duration::from_millis(200))
+            .await;
+        let elapsed = started.elapsed();
+
+        match result {
+            Err(BotError::CommandTimeout { timeout_secs, .. }) => {
+                assert_eq!(timeout_secs, 0, "200 ms envelope rounds to 0 secs");
+            }
+            other => panic!("expected CommandTimeout, got: {other:?}"),
+        }
+        assert!(
+            elapsed >= Duration::from_millis(180),
+            "envelope must not be truncated to 0 (elapsed {elapsed:?})"
+        );
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "explicit envelope must win over the 1 s config (elapsed {elapsed:?})"
+        );
+        holder.abort();
     }
 
     // ── ReceiverLease retry (P1-#9) ──────────────────────────
@@ -1042,33 +1067,35 @@ mod tests {
     /// still be alive when the new `Event::Spawn` fires. `take_with_retry`
     /// must poll the slot briefly and observe the receiver land there once
     /// the old lease drops.
+    ///
+    /// 2026-08-29 review rewrite: the old body simulated the drop by
+    /// inserting a brand-new receiver from a DIFFERENT channel, which
+    /// proves only "poll until the slot is non-empty" — not the actual
+    /// hand-off invariant (the SAME receiver returns via lease Drop and
+    /// the new executor acquires it). The task now drops the real lease.
     #[tokio::test(flavor = "current_thread")]
     async fn test_receiver_lease_take_retries_during_reconnect() {
         let slot: ReceiverSlot = Arc::new(Mutex::new(None));
 
-        // Simulate a previous executor that has leased the receiver.
-        // Place a fresh receiver into the slot first, then take it
-        // through `take` so the slot is empty (matching the in-between
-        // reconnect window).
+        // A previous executor has leased the receiver: place it in the
+        // slot, take it out through `take`, and remember WHICH receiver
+        // the lease holds.
         let (tx, rx) = create_command_channel(4, make_state());
-        drop(tx);
+        let tx = Arc::new(tx);
         *slot.lock().unwrap() = Some(rx);
-        let _first_lease = ReceiverLease::take(&slot).expect("first take succeeds");
+        let first_lease = ReceiverLease::take(&slot).expect("first take succeeds");
         assert!(
             slot.lock().unwrap().is_none(),
             "slot must be empty after first lease"
         );
 
-        // The new Spawn fires while the first lease is still alive.
-        // Spawn a task that drops the first lease after 20ms — within
-        // the 100ms retry window.
-        let first_slot = Arc::clone(&slot);
+        // The new Spawn fires while the first lease is still alive. The
+        // background task drops the REAL lease after 20 ms — within the
+        // 100 ms retry window — which returns the same receiver to the
+        // slot via `ReceiverLease::drop`.
         let drop_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            // Manually release the first lease by replacing the slot's
-            // receiver (simulating `Drop`).
-            let (_tx, rx) = create_command_channel(4, make_state());
-            *first_slot.lock().unwrap() = Some(rx);
+            drop(first_lease);
         });
 
         // The retry loop should eventually find the receiver and return
@@ -1076,10 +1103,24 @@ mod tests {
         // immediately.
         let lease = ReceiverLease::take_with_retry(&slot).await;
         drop_task.await.unwrap();
-        assert!(
-            lease.is_some(),
-            "take_with_retry should have observed the receiver"
-        );
+        let lease = lease.expect("take_with_retry should have observed the receiver");
+
+        // The re-acquired receiver is the SAME channel: a command sent by
+        // the original sender reaches the new executor (drop(tx) below
+        // would close a foreign channel instead).
+        let mut lease = lease;
+        let probe = tokio::spawn(async move {
+            tx.send_command(BotCommand::Jump).await
+        });
+        let wrapped = lease
+            .receiver_mut()
+            .recv()
+            .await
+            .expect("original channel still flows through the re-acquired lease");
+        assert!(matches!(wrapped.command, BotCommand::Jump));
+        // Answer so the probe sender finishes cleanly.
+        let _ = wrapped.respond_to.send(Ok(make_result(true, "ok")));
+        probe.await.expect("probe task finished").expect("send ok");
     }
 
     /// If the slot stays empty for the full 100ms retry window,
