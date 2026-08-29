@@ -1,6 +1,6 @@
 {
   "name": "@minecraft-mcp-rs/minecraft-mcp-rs-windows-arm64",
-  "version": "1.4.2",
+  "version": "1.4.3-rc.1",
   "description": "Windows arm64 binary for minecraft-mcp-rs",
   "license": "MIT",
   "repository": {

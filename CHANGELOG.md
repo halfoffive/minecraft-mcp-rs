@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3-rc.1] - 2026-08-29
+
 ### Fixed
 
 - **`place_block` / `use_item_on_block` verification no longer races the
