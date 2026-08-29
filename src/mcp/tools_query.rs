@@ -694,7 +694,17 @@ pub fn get_world_view(
     // Cache hit: same snapshot revision + radius + scale → return cached
     // bytes. `timestamp` alone is seconds-granularity and can repeat for two
     // consecutive 500 ms snapshot builds; `snapshot_seq` is monotonic.
-    if let Some(cache) = state.get_world_view_cache()
+    //
+    // The key check goes through the META probe first (2026-08-29 review)
+    // so a miss does not clone the ~700 KB base64 payload just to compare
+    // three integers. On a meta hit the full cache is fetched and its keys
+    // re-verified, since the single-entry cache can be replaced between the
+    // two lock acquisitions.
+    if let Some(meta) = state.world_view_cache_meta()
+        && meta.snapshot_seq == snapshot_seq
+        && meta.radius == radius
+        && meta.scale == scale
+        && let Some(cache) = state.get_world_view_cache()
         && cache.snapshot_seq == snapshot_seq
         && cache.radius == radius
         && cache.scale == scale

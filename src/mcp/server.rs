@@ -126,7 +126,7 @@ impl McpBotServer {
     }
 
     #[tool(
-        description = "Lightweight status poll for long-running operations (fly_to / mining / collect_items): connected, bot_busy, position (block + precise), yaw, health, hunger, gamemode, snapshot age. Reads the cached snapshot by default (no forced refresh) and reports connected:false while offline instead of erroring.",
+        description = "Lightweight status poll for long-running operations (fly_to / mining / collect_items): connected, bot_busy, position (block + precise), yaw, health, hunger, gamemode, snapshot_timestamp (epoch ms of the snapshot the data came from). Reads the cached snapshot by default (no forced refresh) and reports connected:false while offline instead of erroring.",
         annotations(read_only_hint = true)
     )]
     async fn get_bot_status(

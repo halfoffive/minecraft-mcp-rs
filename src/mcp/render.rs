@@ -935,6 +935,7 @@ pub fn base64_encode(data: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::types::{BlockEntry, BlockPos, EntityEntry, GameMode, SelfPlayer, WorldSnapshot};
+    use image::GenericImageView;
 
     /// PNG magic bytes — every PNG file starts with `\x89PNG\r\n\x1a\n`.
     const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4E, 0x47];
@@ -1008,10 +1009,16 @@ mod tests {
         let snap = snapshot_with_surroundings();
         let small = render_topdown(&snap, 1).expect("render should succeed");
         let large = render_topdown(&snap, 8).expect("render should succeed");
-        // Larger radius → more pixels → larger encoded PNG (typically).
-        // We can't assert exact sizes because PNG compression varies, but
-        // the larger image should encode more pixel data.
-        assert!(large.len() > small.len() || large.len() >= 8);
+        // 2026-08-29 review: the old assertion (`large.len() > small.len()
+        // || large.len() >= 8`) could never fail — every valid PNG is at
+        // least 8 bytes (the magic number alone), so the second disjunct
+        // was always true and the radius scaling was never actually
+        // verified. Decode both PNGs and assert the exact dimensions:
+        // `render_topdown` produces a (2r+1) × (2r+1) image.
+        let small_img = image::load_from_memory(&small).expect("small PNG decodes");
+        let large_img = image::load_from_memory(&large).expect("large PNG decodes");
+        assert_eq!(small_img.dimensions(), (3, 3), "radius 1 → 3×3 px");
+        assert_eq!(large_img.dimensions(), (17, 17), "radius 8 → 17×17 px");
     }
 
     #[test]
