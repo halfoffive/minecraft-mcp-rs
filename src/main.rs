@@ -21,14 +21,13 @@
 //!
 //! Shared state is accessed lock-free by all threads.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use minecraft_mcp_rs::channel;
 use minecraft_mcp_rs::config::{AppConfig, McpTransport};
 use minecraft_mcp_rs::logging::init_logging;
-use minecraft_mcp_rs::mcp::server::{serve_http, serve_stdio};
+use minecraft_mcp_rs::mcp::server::{resolve_bind_addr, serve_http, serve_stdio};
 use minecraft_mcp_rs::state::SharedState;
 use minecraft_mcp_rs::ui::app::MinecraftApp;
 
@@ -170,14 +169,13 @@ fn main() {
                             let config = state_for_mcp.read_config();
                             (config.mcp_port, config.mcp_address.clone())
                         };
-                        let ip: IpAddr = mcp_address.parse().unwrap_or_else(|_| {
-                            tracing::warn!(
-                                address = %mcp_address,
-                                "failed to parse mcp_address as IP, falling back to 127.0.0.1"
-                            );
-                            IpAddr::V4(Ipv4Addr::LOCALHOST)
-                        });
-                        let addr = SocketAddr::new(ip, port);
+                        // 2026-08-29 review: the address is resolved (IP
+                        // literal passthrough, hostname via the OS
+                        // resolver, loopback fallback) in the MCP layer so
+                        // the configured spelling decides the bound family
+                        // — the old inline parse coerced "localhost" to
+                        // IPv4 127.0.0.1.
+                        let addr = resolve_bind_addr(&mcp_address, port).await;
                         serve_http(
                             state_for_mcp.clone(),
                             sender_for_mcp,

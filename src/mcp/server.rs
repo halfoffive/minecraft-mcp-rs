@@ -891,6 +891,51 @@ async fn shutdown_signal(token: CancellationToken, headless: bool) {
     }
 }
 
+/// Resolve the MCP HTTP bind address.
+///
+/// An IP literal parses directly. A hostname (validate() allows
+/// `localhost`) is resolved through the OS resolver so the configured name
+/// decides the bound family — the old code coerced any non-IP spelling
+/// (i.e. `localhost`) to IPv4 127.0.0.1, which silently diverged from the
+/// configured value on hosts where `localhost` resolves to `::1`
+/// (2026-08-29 review). Unresolvable names fall back to 127.0.0.1 with a
+/// warning, keeping the historical behaviour instead of failing startup.
+pub async fn resolve_bind_addr(address: &str, port: u16) -> SocketAddr {
+    if let Ok(ip) = address.parse::<std::net::IpAddr>() {
+        return SocketAddr::new(ip, port);
+    }
+    match tokio::net::lookup_host((address, port)).await {
+        Ok(mut addrs) => match addrs.next() {
+            Some(resolved) => {
+                tracing::debug!(
+                    address,
+                    port,
+                    resolved = %resolved,
+                    "resolved MCP bind address by hostname"
+                );
+                resolved
+            }
+            None => {
+                tracing::warn!(
+                    address,
+                    port,
+                    "hostname resolved to no addresses, falling back to 127.0.0.1"
+                );
+                SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port)
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                address,
+                port,
+                error = %e,
+                "failed to resolve mcp_address as IP or hostname, falling back to 127.0.0.1"
+            );
+            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port)
+        }
+    }
+}
+
 /// Start the MCP server on the streamable HTTP transport.
 ///
 /// Binds a TCP listener on `addr` (expected to be loopback), mounts the rmcp
@@ -1108,6 +1153,37 @@ mod tests {
                 "{name} registered description must contain the Creative-mode hint, got: {description}"
             );
         }
+    }
+
+    /// 2026-08-29 review: an IP literal passes through unchanged.
+    #[tokio::test]
+    async fn test_resolve_bind_addr_ip_passthrough() {
+        let addr = resolve_bind_addr("127.0.0.5", 9100).await;
+        assert_eq!(addr.ip().to_string(), "127.0.0.5");
+        assert_eq!(addr.port(), 9100);
+        let addr = resolve_bind_addr("::1", 8080).await;
+        assert!(addr.is_ipv6());
+        assert_eq!(addr.port(), 8080);
+    }
+
+    /// `localhost` resolves through the OS resolver to SOME loopback
+    /// address (127.0.0.1 or ::1, platform-dependent) instead of being
+    /// coerced to IPv4.
+    #[tokio::test]
+    async fn test_resolve_bind_addr_localhost_resolves_loopback() {
+        let addr = resolve_bind_addr("localhost", 25580).await;
+        assert!(addr.ip().is_loopback(), "got: {addr}");
+        assert_eq!(addr.port(), 25580);
+    }
+
+    /// An unresolvable name falls back to 127.0.0.1 (warn-logged) instead
+    /// of failing startup — the historical behaviour.
+    #[tokio::test]
+    async fn test_resolve_bind_addr_unresolvable_falls_back() {
+        // The space makes this name invalid for every resolver, so the
+        // lookup errors immediately without a network round-trip.
+        let addr = resolve_bind_addr("not a hostname!", 25581).await;
+        assert_eq!(addr.to_string(), "127.0.0.1:25581");
     }
 
     /// F-3(b): drive `tools/call` through the real JSON-RPC transport —
