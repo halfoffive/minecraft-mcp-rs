@@ -338,7 +338,15 @@ static ACTIVITY_ANCHOR: LazyLock<Instant> = LazyLock::new(Instant::now);
 ///
 /// Fits comfortably in a [`u64`] (wraps only after ~584 years of uptime).
 fn activity_elapsed_nanos() -> u64 {
-    ACTIVITY_ANCHOR.elapsed().as_nanos() as u64
+    // The stored sentinel `0` means "never stamped" (`last_command_at` /
+    // `mcp_activity_at` map 0 → None), so a real stamp must never BE 0.
+    // The anchor is a lazily-initialised `Instant::now()`: when the
+    // process's FIRST stamp happens to be the very call that initialises
+    // the anchor, `elapsed()` measures 0 (Windows timer granularity is
+    // ~100 ns) and the mark was silently dropped — surfaced by the
+    // 2026-08-30 test round as a flaky `test_activity_probes_monotonic`.
+    // Clamp to 1 ns; age arithmetic uses `saturating_duration_since`.
+    ACTIVITY_ANCHOR.elapsed().as_nanos().max(1) as u64
 }
 
 impl SharedState {
@@ -608,6 +616,21 @@ impl SharedState {
     pub fn update_config(&self, f: impl FnOnce(&mut AppConfig)) {
         let mut guard = self.config.write().unwrap_or_else(|e| e.into_inner());
         f(&mut guard);
+    }
+
+    /// Read-modify-write the config under ONE write-lock scope.
+    ///
+    /// The closure receives `&mut AppConfig` and may return any value; it
+    /// runs atomically with respect to other `update_config` /
+    /// `modify_config` callers. Prefer this over a
+    /// `read_config().clone()` → build candidate → `update_config` sequence
+    /// whenever the candidate must reflect the *current* config: the two
+    /// separate lock scopes of that shape let a concurrent writer be
+    /// clobbered by the whole-struct commit (2026-08-30 review —
+    /// `update_settings` raced exactly that way under HTTP multiplexing).
+    pub fn modify_config<R>(&self, f: impl FnOnce(&mut AppConfig) -> R) -> R {
+        let mut guard = self.config.write().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
     }
 
     /// Read config under a read lock.
