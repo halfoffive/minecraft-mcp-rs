@@ -621,7 +621,17 @@ impl CompoundOpExecutor {
                     // the updater back on the fast cadence, so the next tick
                     // (~50 ms) carries the broken state and the budget only
                     // has to cover one fast interval.
-                    if executor.state.snapshot_cadence_idle(Instant::now()) {
+                    //
+                    // 2026-08-30 review P2: the decision is
+                    // `age + budget >= ACTIVITY_WINDOW`, not "already idle" —
+                    // a 2.5 s hand-mine ends its sleep INSIDE the window, but
+                    // the budget would then run it out mid-poll. Predicate
+                    // pinned by `test_verification_needs_activity_restamp_`
+                    // `covers_near_window` in state.rs.
+                    if executor
+                        .state
+                        .verification_needs_activity_restamp(Instant::now(), verification_budget)
+                    {
                         executor.state.mark_command_activity();
                     }
 

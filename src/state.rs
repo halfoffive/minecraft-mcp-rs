@@ -883,6 +883,35 @@ impl SharedState {
         !Self::within_activity_window(self.last_command_at(), now)
     }
 
+    /// Whether a verification step with the given `budget` must re-stamp
+    /// command activity *before* it starts polling.
+    ///
+    /// The mining/place/use verification budgets are
+    /// `snapshot_interval_ms + 250 ms`, but the updater only honors that
+    /// cadence while activity is inside [`Self::ACTIVITY_WINDOW`]. The
+    /// previous guard (`snapshot_cadence_idle`) only re-stamped when the
+    /// window had *already* expired — a 2.5 s hand-mine ended its sleep at
+    /// age ≈ 2.5 s (< window), skipped the re-stamp, and if the last fast
+    /// build had just happened the next rebuild waited out the full relaxed
+    /// 5 s interval: far past the verification budget, so a successful break
+    /// was reported as `MiningInterrupted("block still present")`
+    /// (2026-08-30 review P2, the narrowed remainder of the 1.4.2 P1).
+    ///
+    /// Re-stamp when `age + budget >= ACTIVITY_WINDOW`: by the time the
+    /// polling finishes, the window will have lapsed and the updater would
+    /// have gone idle mid-verification. `None` (no activity ever recorded)
+    /// counts as an infinite age and always re-stamps.
+    pub(crate) fn verification_needs_activity_restamp(
+        &self,
+        now: Instant,
+        budget: Duration,
+    ) -> bool {
+        let age = self
+            .last_command_at()
+            .map_or(Duration::MAX, |t| now.saturating_duration_since(t));
+        age.saturating_add(budget) >= Self::ACTIVITY_WINDOW
+    }
+
     /// Record that a bot command was dispatched right now (monotonic).
     ///
     /// Called by the command executor on every dispatch; the snapshot
@@ -1727,6 +1756,65 @@ mod tests {
             Some(now - SharedState::ACTIVITY_WINDOW - Duration::from_millis(1)),
             now
         ));
+    }
+
+    #[test]
+    fn test_verification_needs_activity_restamp_covers_near_window() {
+        // Regression (2026-08-30 review P2): the old restamp guard
+        // (`snapshot_cadence_idle`) fired only when the 3 s window had
+        // ALREADY expired. A 2.5 s hand-mine ended its sleep at age ≈ 2.5 s
+        // (< window), skipped the restamp, and a verification budget of
+        // ~750 ms then ran the window out mid-poll — the relaxed 5 s
+        // cadence outlasted the budget and a successful break was reported
+        // as MiningInterrupted("block still present"). The decision must be
+        // `age + budget >= ACTIVITY_WINDOW`.
+        let state = SharedState::new(AppConfig::default());
+        let budget = Duration::from_millis(750);
+
+        // Never dispatched → infinite age → must restamp.
+        assert!(
+            state.verification_needs_activity_restamp(Instant::now(), budget),
+            "no activity ever → restamp"
+        );
+
+        // Synthetic stamps: the field stores nanos since ACTIVITY_ANCHOR —
+        // the exact arithmetic `last_command_at` reads back. Last command at
+        // anchor+0.5 s, now = anchor+3.0 s → age 2.5 s.
+        state.last_command_at.store(
+            Duration::from_millis(500).as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        let now = *ACTIVITY_ANCHOR + Duration::from_millis(3_000);
+        // Age 2.5 s is still INSIDE the 3 s window (the old guard skipped
+        // the restamp in exactly this band), but age + budget = 3.25 s
+        // crosses it → must restamp.
+        assert!(
+            SharedState::within_activity_window(state.last_command_at(), now),
+            "precondition: age 2.5 s is inside the window (the case the old guard missed)"
+        );
+        assert!(
+            state.verification_needs_activity_restamp(now, budget),
+            "2.5 s age + 0.75 s budget must cross the 3 s window → restamp"
+        );
+
+        // A young command (age 0.5 s) with the same budget stays under the
+        // window even after the budget elapses → no restamp.
+        state.last_command_at.store(
+            Duration::from_millis(2_500).as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+        assert!(
+            !state.verification_needs_activity_restamp(now, budget),
+            "0.5 s age + 0.75 s budget stays under the window → no restamp"
+        );
+
+        // End-to-end through the real accessor: a fresh dispatch + small
+        // budget must not restamp (the window easily outlives verification).
+        state.mark_command_activity();
+        assert!(
+            !state.verification_needs_activity_restamp(Instant::now(), budget),
+            "fresh dispatch → no restamp needed"
+        );
     }
 
     // -- last_error -----------------------------------------------------------

@@ -1302,16 +1302,22 @@ impl<B: BotActions> CommandExecutor<B> {
         // 5 s idle interval — and the budget below (configured interval +
         // 250 ms) would then poll a snapshot that only refreshes every 5 s,
         // reporting an accepted placement as "did not appear". Re-stamp
-        // command activity when idle (same fix as `execute_mine_block`'s
-        // Step-10 verification) so the next tick (~50 ms) is on the fast
-        // cadence and the budget only has to cover one fast interval. The
-        // flow itself is not unit-tested (tokio paused-time cannot advance
-        // the std `Instant` stamps); the predicate is pinned by
-        // `test_snapshot_cadence_idle_tracks_activity` in state.rs.
-        if self.state.snapshot_cadence_idle(Instant::now()) {
+        // command activity (same fix as `execute_mine_block`'s Step-10
+        // verification) so the next tick (~50 ms) is on the fast cadence and
+        // the budget only has to cover one fast interval.
+        //
+        // 2026-08-30 review P2: the decision is `age + budget >= WINDOW`,
+        // not "already idle" — an approach that ends just inside the window
+        // would otherwise run it out mid-poll. Pinned by
+        // `test_verification_needs_activity_restamp_covers_near_window` in
+        // state.rs.
+        let budget = Duration::from_millis(self.state.read_config().snapshot_interval_ms + 250);
+        if self
+            .state
+            .verification_needs_activity_restamp(Instant::now(), budget)
+        {
             self.state.mark_command_activity();
         }
-        let budget = Duration::from_millis(self.state.read_config().snapshot_interval_ms + 250);
         if wait_for_block_present(&self.state, pos, budget).await {
             return Ok(BotResult {
                 success: true,
@@ -1482,14 +1488,20 @@ impl<B: BotActions> CommandExecutor<B> {
             // to the 5 s idle interval — the verification budget below
             // would then poll a 5 s-cadence snapshot and report an accepted
             // interaction as "no effect observed". Re-stamp command
-            // activity when idle (same fix as `execute_mine_block`'s
-            // Step-10 verification) to put the updater back on the fast
-            // cadence. Predicate pinned by
-            // `test_snapshot_cadence_idle_tracks_activity` in state.rs.
-            if self.state.snapshot_cadence_idle(Instant::now()) {
+            // activity (same fix as `execute_mine_block`'s Step-10
+            // verification) to put the updater back on the fast cadence.
+            //
+            // 2026-08-30 review P2: `age + budget >= WINDOW`, not "already
+            // idle" — same reasoning as the place_block site above. Pinned
+            // by `test_verification_needs_activity_restamp_covers_near_`
+            // `window` in state.rs.
+            let budget = Duration::from_millis(self.state.read_config().snapshot_interval_ms + 250);
+            if self
+                .state
+                .verification_needs_activity_restamp(Instant::now(), budget)
+            {
                 self.state.mark_command_activity();
             }
-            let budget = Duration::from_millis(self.state.read_config().snapshot_interval_ms + 250);
             if wait_for_block_present(&self.state, effect, budget).await {
                 return Ok(BotResult {
                     success: true,
