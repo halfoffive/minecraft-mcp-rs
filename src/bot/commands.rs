@@ -94,6 +94,15 @@ pub(crate) trait BotActions {
     /// Switch to a hotbar slot (0–8).
     fn switch_hotbar_slot(&self, slot: u8);
 
+    /// Live selected hotbar slot (0-8), read directly from the client.
+    ///
+    /// The throttled snapshot's `SelfPlayer::held_item_slot` can lag the
+    /// just-switched slot by a whole idle interval; a handler that needs to
+    /// know what is actually in hand right now must use this (2026-08-30
+    /// review P2 — `handle_use_item_on_block` used to mix a live inventory
+    /// read with the snapshot's stale slot, misclassifying placement items).
+    fn selected_hotbar_slot(&self) -> u8;
+
     /// Drop items from an inventory slot (0-35).
     ///
     /// Returns [`BotError::ContainerAlreadyOpen`] when a container window is
@@ -318,6 +327,10 @@ impl BotActions for RealBotClient {
 
     fn switch_hotbar_slot(&self, slot: u8) {
         self.client.set_selected_hotbar_slot(slot);
+    }
+
+    fn selected_hotbar_slot(&self) -> u8 {
+        self.client.selected_hotbar_slot()
     }
 
     fn drop_item(&self, slot: u8, count: u8) -> Result<(), BotError> {
@@ -1364,7 +1377,13 @@ impl<B: BotActions> CommandExecutor<B> {
         // previous held item (and an empty snapshot inventory read "empty"
         // while a container window was open).
         let held_entries = self.bot.inventory_entries();
-        let used_slot = item_slot.unwrap_or(snapshot.self_player.held_item_slot);
+        // The slot fallback MUST come from the live client (P2, 2026-08-30
+        // review): the snapshot's `held_item_slot` can lag a just-switched
+        // slot by a whole idle interval, and `held_entries` above is live —
+        // mixing the two indexed the right inventory with the wrong slot,
+        // misclassifying placement items (skipping verification for a held
+        // bucket, or attaching the occupancy gate to a non-placement item).
+        let used_slot = item_slot.unwrap_or_else(|| self.bot.selected_hotbar_slot());
         let used_item = held_entries
             .get(used_slot as usize)
             .and_then(|opt| opt.as_ref())
@@ -2899,7 +2918,7 @@ mod tests {
         BlockEntry, EntityEntry, InventorySlot, MaterialTier, SelfPlayer, ToolType,
     };
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
     // ═══════════════════════════════════════════════════════════════
     // MockBotClient
@@ -2973,6 +2992,10 @@ mod tests {
         live_position: Mutex<Option<[f64; 3]>>,
         stop_pathfinding_calls: AtomicUsize,
         swap_hotbar_calls: Mutex<Vec<(u16, u8)>>,
+        /// Live selected hotbar slot tracked by `switch_hotbar_slot`,
+        /// mirroring the client's selected-slot state for the
+        /// [`BotActions::selected_hotbar_slot`] accessor. Default 0.
+        selected_slot: AtomicU8,
     }
 
     impl MockCallLog {
@@ -3007,6 +3030,7 @@ mod tests {
                 live_position: Mutex::new(None),
                 stop_pathfinding_calls: AtomicUsize::new(0),
                 swap_hotbar_calls: Mutex::new(Vec::new()),
+                selected_slot: AtomicU8::new(0),
             }
         }
     }
@@ -3129,6 +3153,13 @@ mod tests {
 
         fn switch_hotbar_slot(&self, slot: u8) {
             self.log.hotbar_switch_calls.lock().unwrap().push(slot);
+            // Track the live selected slot the way the real client does, so
+            // `selected_hotbar_slot` reports what is actually in hand.
+            self.log.selected_slot.store(slot, Ordering::SeqCst);
+        }
+
+        fn selected_hotbar_slot(&self) -> u8 {
+            self.log.selected_slot.load(Ordering::SeqCst)
         }
 
         fn drop_item(&self, slot: u8, count: u8) -> Result<(), BotError> {
@@ -5113,9 +5144,12 @@ mod tests {
             count: 1,
         }];
         state.update_snapshot(snapshot);
-        // The handler reads the LIVE inventory (M-11). Keep the mock
-        // inventory in sync with the snapshot's self_player inventory so
-        // production and test semantics match.
+        // The handler reads the LIVE inventory (M-11) and — since the
+        // 2026-08-30 review — the LIVE selected slot. Keep both mock-side
+        // facts in sync with the snapshot's self_player inventory so
+        // production and test semantics match: the bot is actually holding
+        // slot 2.
+        executor.bot.switch_hotbar_slot(2);
         {
             let mut inv = log.inventory.lock().unwrap();
             *inv = vec![None; 9];
@@ -5137,6 +5171,60 @@ mod tests {
 
         drop(sender);
         handle.await.expect("executor should finish");
+    }
+
+    #[tokio::test]
+    async fn test_use_item_on_block_uses_live_selected_slot() {
+        // P2 (2026-08-30 review): with `item_slot` absent the handler must
+        // resolve the used slot from the LIVE client state, not the throttled
+        // snapshot's `held_item_slot`. The stale-slot mix indexed the right
+        // (live) inventory with the wrong slot and misclassified the used
+        // item — which gates the M-6 placement pre-checks and R-9
+        // verification.
+        let (executor, _sender, state, log) = make_executor();
+        let mut snapshot = make_populated_snapshot_defaults();
+        // Stale snapshot: claims slot 0 is held and "stone" sits there.
+        snapshot.self_player.held_item_slot = 0;
+        snapshot.self_player.inventory = vec![InventorySlot {
+            slot_index: 0,
+            item_id: "stone".into(),
+            count: 1,
+        }];
+        state.update_snapshot(snapshot);
+        // Live state: slot 3 is selected and holds the bucket (the snapshot
+        // does not know about either fact).
+        executor.bot.switch_hotbar_slot(3);
+        {
+            let mut inv = log.inventory.lock().unwrap();
+            *inv = vec![None; 9];
+            inv[0] = Some(ItemStack {
+                item_id: "stone".into(),
+                count: 1,
+            });
+            inv[3] = Some(ItemStack {
+                item_id: "water_bucket".into(),
+                count: 1,
+            });
+        }
+
+        let pos = BlockPos::new(5, 65, 5);
+        let result = executor.handle_use_item_on_block(pos, None, None).await;
+        let br = result.expect("expected Ok(BotResult)");
+        assert!(
+            br.message.contains("water_bucket"),
+            "message must name the LIVE held item: {}",
+            br.message
+        );
+        assert!(
+            !br.message.contains("stone"),
+            "message must not name the stale snapshot item: {}",
+            br.message
+        );
+        assert!(
+            br.message.contains("slot 3"),
+            "message must report the live slot: {}",
+            br.message
+        );
     }
 
     #[tokio::test]

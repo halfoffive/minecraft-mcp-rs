@@ -1201,6 +1201,12 @@ mod tests {
             Ok(())
         }
 
+        fn selected_hotbar_slot(&self) -> u8 {
+            // Mirror the snapshot's held slot so ops-level flows that read
+            // the live slot stay consistent with the simulated world.
+            self.state.read_snapshot().self_player.held_item_slot
+        }
+
         fn start_use_item(&self) {}
 
         fn chat(&self, _message: &str) {}
