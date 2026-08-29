@@ -307,6 +307,36 @@ impl ReceiverLease {
             .as_mut()
             .expect("ReceiverLease missing receiver — invariant violated")
     }
+
+    /// Drain every command currently buffered in the channel, replying to
+    /// each sender with an honest [`BotError::Offline`] instead of executing
+    /// it (2026-08-29 review).
+    ///
+    /// Commands that were sent while no executor held the receiver (the bot
+    /// was offline, or the previous session's executor was aborted
+    /// mid-flight) sit in the mpsc buffer with their responders already
+    /// gone-or-timing-out. When a NEW session's executor leases the
+    /// receiver, executing those stale commands would leak session A's
+    /// effects into session B (responses lost either way). Draining at
+    /// lease start discards them deterministically and answers every
+    /// sender immediately.
+    ///
+    /// Returns the number of drained commands. Note the millisecond window
+    /// between `set_online(true)` (in the spawn handler) and this drain: a
+    /// command sent there is drained with the same honest Offline error,
+    /// which the client can retry.
+    pub(crate) fn drain_stale(&mut self, reason: &str) -> usize {
+        let mut drained = 0;
+        while let Ok(wrapped) = self.receiver_mut().try_recv() {
+            let BotCommandWithResponder { command, respond_to } = wrapped;
+            tracing::debug!(command = ?command, "discarding stale cross-session command");
+            let _ = respond_to.send(Err(BotError::Offline(format!(
+                "{reason}; reconnect and retry"
+            ))));
+            drained += 1;
+        }
+        drained
+    }
 }
 
 impl Drop for ReceiverLease {
@@ -395,6 +425,50 @@ mod tests {
     /// When the receiver drops the oneshot sender without responding,
     /// the caller should get `BotError::Offline` (channel closed — distinct
     /// from a real timeout, which would yield `CommandTimeout`).
+    /// RED (2026-08-29 review): commands buffered while no executor held
+    /// the receiver belong to a previous session. `ReceiverLease::
+    /// drain_stale` must discard them and answer every sender with an
+    /// immediate honest Offline error instead of letting the new session's
+    /// executor run them with responses lost.
+    #[tokio::test]
+    async fn test_drain_stale_replies_offline_and_empties_queue() {
+        let slot: ReceiverSlot = Arc::new(Mutex::new(None));
+        let state = make_state();
+        let (sender, rx) = create_command_channel(4, Arc::clone(&state));
+        *slot.lock().unwrap() = Some(rx);
+
+        let mut lease = ReceiverLease::take(&slot).expect("lease taken");
+        assert!(slot.lock().unwrap().is_none());
+
+        // Buffer two stale commands: the senders block on the oneshot
+        // reply (no executor is running yet).
+        let mut r1 = tokio::spawn({
+            let sender = sender.clone();
+            async move { sender.send_command(BotCommand::Jump).await }
+        });
+        let mut r2 = tokio::spawn(async move { sender.send_command(BotCommand::Jump).await });
+        // Let both sends land in the buffer.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let drained = lease.drain_stale("stale command from a previous session");
+        assert_eq!(drained, 2, "both buffered commands must be drained");
+
+        // Every drained sender gets an immediate honest Offline error.
+        for r in [&mut r1, &mut r2] {
+            let result = r.await.expect("sender task finished");
+            assert!(
+                matches!(&result, Err(BotError::Offline(msg)) if msg.contains("stale command")),
+                "expected honest Offline error, got: {result:?}"
+            );
+        }
+
+        // The queue is empty — the executor loop would start clean.
+        assert!(
+            lease.receiver_mut().try_recv().is_err(),
+            "no command may survive the drain"
+        );
+    }
+
     #[tokio::test]
     async fn test_offline_when_responder_dropped() {
         let (sender, mut receiver) = create_command_channel(10, make_state());

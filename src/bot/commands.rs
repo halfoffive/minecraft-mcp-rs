@@ -691,6 +691,16 @@ impl<B: BotActions> CommandExecutor<B> {
     pub(crate) async fn run_with_lease(&mut self, mut lease: ReceiverLease) {
         trace!("command executor loop started (leased receiver)");
 
+        // 2026-08-29 review: commands buffered while no executor held the
+        // receiver belong to a PREVIOUS session (or to the offline window);
+        // executing them here would leak session A's effects into session B
+        // with every responder already gone. Drain-and-reject up front so
+        // each stale sender gets an immediate honest Offline error.
+        let drained = lease.drain_stale("stale command from a previous session");
+        if drained > 0 {
+            warn!("drained {drained} stale cross-session command(s) at executor start");
+        }
+
         loop {
             let wrapped = lease.receiver_mut().recv().await;
             match wrapped {
