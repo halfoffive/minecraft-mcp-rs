@@ -2,7 +2,10 @@
 # every committed lockfile - the root one plus the vendored patches
 # (patches/rmcp, patches/rsa), which carry their own Cargo.lock files.
 #
-# Blocking gate. Known-unfixable findings are triaged in ./.cargo/audit.toml
+# The run FAILS on untriaged findings (no continue-on-error) but nothing
+# gates on it for merges: there is no pull_request trigger and no required
+# status check, so it stays advisory for the review process (AGENTS.md).
+# Known-unfixable findings are triaged in ./.cargo/audit.toml
 # (each entry documents the blocking dependency and its revisit condition);
 # each directory may carry its own .cargo/audit.toml - the Audit step runs
 # with that directory as its working directory, and cargo-audit discovers
@@ -13,7 +16,10 @@ on:
   push:
     paths:
       - 'Cargo.lock'
-      - 'audit.toml'
+      # The triage file lives at .cargo/audit.toml (cargo-audit's discovery
+      # path) — a root-level 'audit.toml' entry was a dead path (2026-08-30
+      # review): editing the ignore list never triggered the workflow.
+      - '.cargo/audit.toml'
       - 'patches/*/Cargo.lock'
       - '.github/workflows/audit.yml'
   schedule:

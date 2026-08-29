@@ -111,7 +111,13 @@ impl SnapshotUpdater {
     pub(crate) fn schedule_retry_after_failure(&self) {
         let rewind =
             Duration::from_millis(self.interval_ms).saturating_sub(SNAPSHOT_BUILD_RETRY_DELAY);
-        *self.last_update.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now() - rewind;
+        // The backdate MUST saturate (P1, 2026-08-30 review): a huge
+        // `snapshot_interval_ms` combined with a boot-relative monotonic
+        // clock (Linux/macOS, young uptime) would panic a raw subtraction.
+        // The saturation fallback delays the retry by a full interval
+        // instead — degraded but safe.
+        *self.last_update.lock().unwrap_or_else(|e| e.into_inner()) =
+            crate::utils::backdate_instant(rewind);
     }
 
     // ── Main tick handler ───────────────────────────────────
@@ -790,7 +796,9 @@ mod tests {
         SnapshotUpdater::new(
             Arc::new(SharedState::new(AppConfig::default())),
             Arc::new(Mutex::new(DirtyTracker::new())),
-            Arc::new(Mutex::new(Instant::now() - Duration::from_secs(3600))),
+            Arc::new(Mutex::new(crate::utils::backdate_instant(
+                Duration::from_secs(3600),
+            ))),
             500,
         )
     }
@@ -1081,7 +1089,9 @@ mod tests {
         let updater = SnapshotUpdater::new(
             Arc::new(SharedState::new(AppConfig::default())),
             Arc::new(Mutex::new(DirtyTracker::new())),
-            Arc::new(Mutex::new(Instant::now() - Duration::from_millis(100))),
+            Arc::new(Mutex::new(crate::utils::backdate_instant(
+                Duration::from_millis(100),
+            ))),
             200, // interval: 200ms, elapsed: 100ms → throttled
         );
         assert!(!updater.check_and_update_timer());
@@ -1092,7 +1102,9 @@ mod tests {
         let updater = SnapshotUpdater::new(
             Arc::new(SharedState::new(AppConfig::default())),
             Arc::new(Mutex::new(DirtyTracker::new())),
-            Arc::new(Mutex::new(Instant::now() - Duration::from_millis(600))),
+            Arc::new(Mutex::new(crate::utils::backdate_instant(
+                Duration::from_millis(600),
+            ))),
             500, // interval: 500ms, elapsed: 600ms → allowed
         );
         assert!(updater.check_and_update_timer());

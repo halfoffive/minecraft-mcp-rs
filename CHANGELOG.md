@@ -105,6 +105,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reconnect loop); the offline-connect test binds and drops an ephemeral
   port instead of hardcoding port 1.
 
+### Fixed (2026-08-30 review round)
+
+- **P1 — `Instant` backdate underflow no longer kills the bot thread on a
+  freshly booted Linux/macOS machine.** `BotState::default` backdated the
+  snapshot timer by 3600 s with a raw `Instant - Duration`, which *panics*
+  on underflow; the Linux/macOS monotonic clocks are boot-relative, so on
+  any machine with less than one hour of uptime every connect attempt died
+  before reaching the server (the `ClearGuard` only cleared the connecting
+  flag — a silent "cannot connect" until uptime passed the hour). All five
+  backdate sites now saturate via `utils::backdate_instant`.
+- **P2 — `drop_item` refuses while a container window is open.**
+  `RealBotClient::drop_item` had no `inventory.id() != 0` guard, so with a
+  chest open `DropItem(10, 1)` physically ejected the *chest's* slot 10
+  onto the ground before verification could report anything. The throw is
+  now refused with `ContainerAlreadyOpen` (an honest error, not
+  `swap_hotbar`'s silent skip) — a wire-visible new error surface.
+- **P2 — `use_item_on_block` resolves the held slot from the live
+  client.** The handler mixed the live inventory (M-11) with the throttled
+  snapshot's `held_item_slot`: a stale slot misclassified the used item and
+  with it the M-6 occupancy pre-check and R-9 placement verification (a
+  held bucket could skip verification and fake success).
+  `BotActions::selected_hotbar_slot()` is the new live accessor.
+- **P2 — movement timeout results carry live coordinates.**
+  `goto_with_margin_with_timeout` read both timeout-payload endpoints from
+  the throttled snapshot, so a move timing out >3 s after the last command
+  reported positions up to 5 s stale with under-counted `distance_moved`.
+  All movement results now share one `live_blockpos` helper.
+- **P2 — the verification re-stamp covers the just-inside-window band.**
+  The three post-action restamps fired only when the 3 s window had
+  already expired; a 2.5 s hand-mine ended inside it, skipped the
+  re-stamp, and its verification budget then ran the window out mid-poll —
+  the narrowed remainder of the 1.4.2 P1. The new
+  `SharedState::verification_needs_activity_restamp(now, budget)` decides
+  on `age + budget >= ACTIVITY_WINDOW`.
+- **P2 — the material round-trip property actually runs now.** The
+  generator never produced any of the 31 accepted names, so the assertion
+  never executed and the 2026-08-29 `golden_` oracle fix pinned a dead
+  branch. Known names are mixed into the strategy, an exhaustive test
+  round-trips all 31, and the dead branch had been hiding a second alias:
+  Wood parses from `wooden_`, not the Debug-derived `wood_`.
+- **P3 — `update_settings` commits under one write-lock scope** via the
+  new `SharedState::modify_config` (two concurrent calls raced; the later
+  whole-struct commit clobbered the earlier one). The probe cache writes
+  only on a definitive outcome (a `Ok(_)` no longer caches `Some(true)`
+  without reading `BotResult::success`, and the unknown branch no longer
+  resurrects a cleared probe). `get_nearby_blocks(top_only)` re-counts
+  `total_matched` after the air-drop and column dedup.
+- **P3 — eleven blocks are fully tabled** (`exposed_cut_copper`,
+  `waxed_copper_block`, `smooth_sandstone_stairs`, `red_sandstone_slab`,
+  `amethyst_cluster`, `suspicious_gravel`, `iron_bars`, `cauldron`,
+  `lodestone`, `iron_chain`, `lightning_rod` — all values verified against
+  the azalea-generated 1.21.11 tag/behavior data; note `chain` was renamed
+  `iron_chain` in this version). A new `ALT_TOOL_FOR_BLOCK` accepts shears
+  for cobweb (same vanilla break speed as the sword primary).
+- **P3 — mining_calc prices under-tier tools per vanilla.** A correct
+  tool below the block's harvest level keeps its material speed in the
+  100-tick branch (wood pickaxe on iron_ore: 7.5 s, not 15 s) — vanilla
+  gates only the tick branch on the level. Production-unreachable (the
+  harvest gate refuses first) but the model doc now tells the truth.
+- **P3 — honest errors**: partial `drop_item` results report
+  "Partially dropped: N of M" instead of "server rejected the click";
+  `take_from_container` checks the container-open gate before the
+  inventory-full probe; `attack_entity`'s ECS miss returns
+  `EntityNotFound` (-32002) instead of `Internal`; `BlockNotFound`'s
+  message says "not observed (already mined, or never seen)".
+- **P3 — command envelope covers the send leg**: a full bounded queue
+  with a wedged receiver blocked `tx.send().await` indefinitely outside
+  the timeout. The S-4 failure-mode semantics are unchanged.
+- **P3 — HTTP + non-loopback + auth-disabled env combos force auth ON**
+  in `from_env` instead of tripping the whole-config fallback that
+  discarded a pinned `MINECRAFT_MCP_TOKEN` (regenerating a random UUID
+  and 401-ing every client). An explicit `update_settings` of the same
+  combination is still honestly rejected.
+- **P3 — bearer helper fail-closed and RFC-accurate**:
+  `is_bearer_authorized` rejects an empty configured token; the 401
+  carries `WWW-Authenticate: Bearer` (RFC 6750 §3); the "case-sensitive
+  per RFC 6750" comment corrected (RFC 7235 scheme matching is
+  case-insensitive; the strict spelling is a deliberate choice).
+- **P3 — the headless `headless_next_action` re-checks
+  `bot_thread_running`** before consuming the config-restart flag, the
+  same M-10 guard `quiet_wait_step` got in the 2026-08-29 round (the
+  ThreadAppeared → next-action window still lost an online restart).
+- **P3 — CI/test hygiene**: audit.yml's paths filter listed a root
+  `audit.toml` that does not exist (the real one is `.cargo/audit.toml`);
+  release.yml gains a tag↔Cargo.toml version consistency guard (a
+  mismatched tag used to publish GitHub Release vA with npm version B);
+  the integration radius-1 assertions parse the JSON instead of asserting
+  a non-empty string on an object (always true), and the closed-port
+  probe holds its listener through the connect attempt (TOCTOU);
+  sync-versions.mjs now covers the `minecraft-mcp-rs@x.y.z` pins in
+  npm/README.md; a `activity_elapsed_nanos` clamp kills the flaky
+  process-first-mark stamp loss; doc drift fixed in utils.rs / app.rs /
+  settings.rs / ops.rs / i18n test arrays (ConfigPendingHint was the
+  77th key, missing from both).
+
 ## [1.4.2] - 2026-08-28
 
 ### Fixed

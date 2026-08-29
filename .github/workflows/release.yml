@@ -107,6 +107,22 @@ jobs:
               exit 1 ;;
           esac
 
+      # 2026-08-30 review: a pushed vX.Y.Z tag was trusted verbatim — no
+      # check that it matches the Cargo.toml version ON THE TAGGED COMMIT,
+      # so a mistyped/stale tag would publish a GitHub Release named vA with
+      # npm package version B (and burn the stable name). `build` needs
+      # `mode`, so a mismatch fails in seconds without building anything.
+      - name: Guard tag matches Cargo.toml version
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        shell: bash
+        run: |
+          ver=$(grep '^version' Cargo.toml | head -1 | sed -E 's/version = "([^"]+)"/\1/')
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag v${tag} does not match the Cargo.toml version on the tagged commit (${ver}); a mismatched tag would publish a GitHub Release and npm package under inconsistent names"
+            exit 1
+          fi
+
   build:
     name: ${{ matrix.label }}
     # Gated on `mode` so an invalid push (e.g. a suffix-less version on the

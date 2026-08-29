@@ -242,6 +242,10 @@ mod tests {
             TextKey::Refresh,
             TextKey::RefreshTooltip,
             TextKey::WorldViewPlaceholder,
+            // 2026-08-30 review: ConfigPendingHint (the 77th key) was
+            // missing from this array, so the "every lookup non-empty"
+            // invariant silently skipped it.
+            TextKey::ConfigPendingHint,
         ];
         for k in all {
             assert!(!lookup(k).is_empty(), "lookup returned empty for {k:?}");

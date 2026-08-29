@@ -355,9 +355,10 @@ impl EditConfig {
 /// Single writer for `i18n::current()` on the UI path (M-9).
 ///
 /// Called once per frame from [`App`::ui]: it synchronises the active i18n
-/// language with the persisted [`AppConfig::language`] and caches the
-/// last-seen language so the per-frame `read_config` acquisition is skipped
-/// once the language is stable.
+/// language with the persisted [`AppConfig::language`]. The cached
+/// last-seen language gates the `i18n::set` call (the read_config
+/// acquisition itself still happens every frame — only the redundant
+/// global write is skipped).
 ///
 /// The settings panel's Language dropdown binds DIRECTLY to
 /// `config.language` (no edit-buffer copy) and the `update_settings` MCP
@@ -525,8 +526,9 @@ impl App for MinecraftApp {
         // `i18n::current()` (M-9): the settings panel and the
         // `update_settings` MCP tool both write `config.language`, and this
         // per-frame sync applies the change on the next frame. The cached
-        // `last_language` avoids a `read_config` RwLock acquisition every
-        // frame once the language is stable.
+        // `last_language` skips the redundant `i18n::set` write once the
+        // language is stable (the read_config acquisition still happens
+        // every frame).
         sync_language_from_config(&self.state, &mut self.last_language);
 
         egui::CentralPanel::default().show_inside(ui, |ui| {

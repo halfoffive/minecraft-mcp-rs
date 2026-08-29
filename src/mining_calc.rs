@@ -13,8 +13,8 @@
 //! predict.
 
 use crate::block_data::{
-    BLOCK_HARDNESS, BLOCK_TO_TOOL_TYPE, HARVEST_LEVEL, MATERIAL_TIER_SPEED, harvest_level_of,
-    requires_tool_for_drops,
+    ALT_TOOL_FOR_BLOCK, BLOCK_HARDNESS, BLOCK_TO_TOOL_TYPE, HARVEST_LEVEL, MATERIAL_TIER_SPEED,
+    harvest_level_of, requires_tool_for_drops,
 };
 use crate::types::{MaterialTier, ToolType};
 
@@ -34,7 +34,12 @@ pub fn is_correct_tool(tool_type: ToolType, block_type: &str) -> bool {
         .get(block_type)
         .copied()
         .unwrap_or(ToolType::Hand);
-    tool_type == expected
+    if tool_type == expected {
+        return true;
+    }
+    // Cobweb-class blocks accept a second tool at the same vanilla speed
+    // (2026-08-30 review).
+    ALT_TOOL_FOR_BLOCK.get(block_type).copied() == Some(tool_type)
 }
 
 /// Checks whether the given block genuinely requires a specific (non-Hand)
@@ -83,10 +88,11 @@ pub fn block_requires_tool(block_type: &str) -> bool {
 ///   unknown blocks) still use the 30-tick branch with speed `1.0` for a
 ///   non-matching tool (audit L-1).
 /// - A correct tool whose material tier is below the block's harvest level
-///   (e.g. a wooden pickaxe on iron ore) also uses the non-harvest branch:
-///   it breaks the block slowly and yields no drop (audit F-20). Callers that
-///   need a guaranteed drop must still filter by harvest level before mining;
-///   this function only models break time.
+///   (e.g. a wooden pickaxe on iron ore) uses the non-harvest branch too —
+///   it yields no drop — but KEEPS its tool speed: vanilla gates only the
+///   tick branch on the harvest level, not the speed (2026-08-30 review).
+///   Callers that need a guaranteed drop must still filter by harvest level
+///   before mining; this function only models break time.
 ///
 /// Estimate scope (audit L-2): vanilla's underwater ×5 (no Aqua Affinity)
 /// and airborne ×5 penalties are NOT modeled — the returned time is
@@ -103,13 +109,15 @@ pub fn calculate_mine_time(block_type: &str, tool_type: ToolType, material: Mate
     let required_level = HARVEST_LEVEL.get(block_type).copied().unwrap_or(0);
     let tool_level = harvest_level_of(material);
 
-    // A tool only benefits from its material speed when it is the correct
-    // type and meets the block's harvest level. Hand always mines at 1.0.
+    // Vanilla applies the tool speed whenever the tool TYPE matches — the
+    // harvest level does NOT gate the speed, only the 30/100-tick branch
+    // below (2026-08-30 review: the old model priced an under-tier correct
+    // tool at hand speed, doubling the estimate; e.g. a wooden pickaxe on
+    // iron_ore takes 7.5 s in vanilla, not 15 s). Hand always mines at 1.0.
     // `required_level` defaults to 0, so a correct tool on a tier-0 block
     // (e.g. any pickaxe on cobbled_deepslate) keeps its speed.
-    let effective_tool =
-        tool_type != ToolType::Hand && correct_tool && tool_level >= required_level;
-    let speed = if effective_tool {
+    let speed_applies = tool_type != ToolType::Hand && correct_tool;
+    let speed = if speed_applies {
         *MATERIAL_TIER_SPEED.get(&material).unwrap_or(&1.0)
     } else {
         1.0
@@ -119,8 +127,9 @@ pub fn calculate_mine_time(block_type: &str, tool_type: ToolType, material: Mate
     // when the item can harvest it, and 100 ticks otherwise. A block that
     // does not require a tool is always harvestable, even with the wrong
     // tool (dirt with a pickaxe), so it stays on the 30-tick branch.
+    let can_harvest = tool_type != ToolType::Hand && correct_tool && tool_level >= required_level;
     let requires_tool = block_requires_tool(block_type);
-    let ticks_per_hardness = if !requires_tool || effective_tool {
+    let ticks_per_hardness = if !requires_tool || can_harvest {
         30.0
     } else {
         100.0
@@ -338,22 +347,38 @@ mod tests {
         );
     }
 
-    /// F-20: a correct tool whose material tier is below the block's harvest
-    /// level cannot harvest the block and must be priced like the wrong-tool
-    /// branch (15s for iron_ore with a wooden pickaxe in vanilla).
+    /// F-20 (updated 2026-08-30 review): a correct tool whose material tier
+    /// is below the block's harvest level cannot HARVEST the block (100-tick
+    /// branch) but KEEPS its tool speed — vanilla gates only the tick branch
+    /// on the harvest level. A wooden pickaxe (speed 2.0) on iron_ore
+    /// (hardness 3.0) therefore takes 3.0 * 5.0 / 2.0 = 7.5 s, not the
+    /// 15 s the old hand-speed model claimed.
     #[test]
     fn test_mine_time_correct_tool_insufficient_harvest_level() {
         let hardness = get_block_hardness("iron_ore");
         let time = calculate_mine_time("iron_ore", ToolType::Pickaxe, MaterialTier::Wood);
-        let expected = hardness * 5.0;
+        let expected = hardness * 5.0 / 2.0;
         assert!(
             (time - expected).abs() < 1e-9,
-            "wooden pickaxe on iron_ore must use the non-harvest branch ({expected}s), got {time}"
+            "wooden pickaxe on iron_ore must use the non-harvest branch at tool speed ({expected}s), got {time}"
         );
 
         // An iron pickaxe (level 2) harvests iron_ore at its material speed.
         let harvested = calculate_mine_time("iron_ore", ToolType::Pickaxe, MaterialTier::Iron);
         let expected_harvest = hardness * 1.5 / 6.0;
         assert!((harvested - expected_harvest).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_is_correct_tool_accepts_alt_tool() {
+        // 2026-08-30 review: cobweb accepts shears alongside the sword
+        // primary (same vanilla break speed).
+        assert!(is_correct_tool(ToolType::Sword, "cobweb"));
+        assert!(is_correct_tool(ToolType::Shears, "cobweb"));
+        assert!(!is_correct_tool(ToolType::Pickaxe, "cobweb"));
+        // The alt mechanism must not leak to other blocks.
+        assert!(!is_correct_tool(ToolType::Shears, "stone"));
+        // Hand-on-unknown stays correct.
+        assert!(is_correct_tool(ToolType::Hand, "unknown_block"));
     }
 }

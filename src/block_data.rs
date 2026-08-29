@@ -80,12 +80,17 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "cobbled_deepslate_wall",
         "tuff",
         "calcite",
-        // Copper family (all require stone+ — see HARVEST_LEVEL)
+        // Copper family (the tiered ones require stone+ — see
+        // HARVEST_LEVEL). exposed_cut_copper / waxed_copper_block were
+        // previously present in BLOCK_HARDNESS only and fell through to
+        // Hand + no M-16 refusal (2026-08-30 review).
         "copper_block",
         "exposed_copper",
         "weathered_copper",
         "oxidized_copper",
         "cut_copper",
+        "exposed_cut_copper",
+        "waxed_copper_block",
         "raw_copper_block",
         "raw_iron_block",
         "raw_gold_block",
@@ -123,6 +128,10 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "sandstone_stairs",
         "sandstone_slab",
         "red_sandstone_stairs",
+        // 2026-08-30 review: these two variants were missing while their
+        // siblings were tabled.
+        "smooth_sandstone_stairs",
+        "red_sandstone_slab",
         // Quartz family
         "quartz_block",
         "smooth_quartz",
@@ -162,6 +171,7 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         // Amethyst
         "amethyst_block",
         "budding_amethyst",
+        "amethyst_cluster",
         // Dripstone
         "dripstone_block",
         // Ice (pickaxe is the fastest tool; drops need silk touch either
@@ -193,6 +203,16 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "dispenser",
         "observer",
         "ender_chest",
+        // Iron fixtures / misc pickaxe blocks (2026-08-30 review:
+        // previously untabelled — the bot fell back to Hand and mined at
+        // hand speed; mineable/needs membership verified against the
+        // azalea-generated 1.21.11 tag data. Note the plain "chain" block
+        // was renamed "iron_chain" in this version).
+        "iron_bars",
+        "cauldron",
+        "lodestone",
+        "iron_chain",
+        "lightning_rod",
         // Netherite blocks
         "ancient_debris",
         "netherite_block",
@@ -320,6 +340,7 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
         "sand",
         "red_sand",
         "suspicious_sand",
+        "suspicious_gravel",
         "gravel",
         "clay",
         "farmland",
@@ -370,7 +391,10 @@ pub static BLOCK_TO_TOOL_TYPE: LazyLock<HashMap<&'static str, ToolType>> = LazyL
     }
 
     // --- Sword blocks ---
-    // Swords are the fastest tool for cobweb in Java Edition (faster than shears).
+    // Sword is cobweb's PRIMARY tool. Vanilla 1.21 gives sword and shears
+    // the SAME cobweb break speed (~0.45 s) — the old "faster than shears"
+    // comment was wrong. Shears are accepted via ALT_TOOL_FOR_BLOCK below
+    // (2026-08-30 review), so a shears-only bot is not refused.
     m.insert("cobweb", ToolType::Sword);
 
     // --- Hoe blocks ---
@@ -598,6 +622,7 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
     m.insert("sand", 0.5);
     m.insert("red_sand", 0.5);
     m.insert("suspicious_sand", 0.25);
+    m.insert("suspicious_gravel", 0.25);
     m.insert("gravel", 0.6);
     m.insert("clay", 0.6);
     m.insert("mud", 0.5);
@@ -795,6 +820,13 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
     m.insert("cut_copper", 3.0);
     m.insert("exposed_cut_copper", 3.0);
     m.insert("waxed_copper_block", 3.0);
+    // Iron fixtures / misc (2026-08-30 review) — azalea-generated
+    // strengths.
+    m.insert("iron_bars", 5.0);
+    m.insert("cauldron", 2.0);
+    m.insert("lodestone", 3.5);
+    m.insert("iron_chain", 5.0);
+    m.insert("lightning_rod", 3.0);
 
     // Deepslate building family (stone itself stays 3.0 above).
     m.insert("cobbled_deepslate", 3.5);
@@ -827,6 +859,7 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
     m.insert("sandstone_slab", 2.0);
     m.insert("smooth_sandstone", 2.0);
     m.insert("smooth_sandstone_stairs", 2.0);
+    m.insert("red_sandstone_slab", 2.0);
 
     // Quartz family (smooth quartz 2.0, the rest 0.8).
     m.insert("quartz_block", 0.8);
@@ -878,6 +911,7 @@ pub static BLOCK_HARDNESS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(
     // Amethyst.
     m.insert("amethyst_block", 1.5);
     m.insert("budding_amethyst", 1.5);
+    m.insert("amethyst_cluster", 1.5);
 
     // Common stone-family blocks missing from the original table.
     m.insert("mossy_cobblestone", 2.0);
@@ -1159,9 +1193,15 @@ pub static HARVEST_LEVEL: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(||
         "weathered_copper",
         "oxidized_copper",
         "cut_copper",
+        "exposed_cut_copper",
+        "waxed_copper_block",
         "raw_copper_block",
         "raw_iron_block",
         "iron_block",
+        // 2026-08-30 review: vanilla NEEDS_STONE_TOOL (azalea tag data) —
+        // previously untabelled, so a wooden pickaxe "mined" a lightning
+        // rod for no drops with no refusal.
+        "lightning_rod",
     ] {
         m.insert(block, 1u8);
     }
@@ -1277,6 +1317,8 @@ pub static TOOL_REQUIRED_FOR_DROPS: LazyLock<HashSet<&'static str>> = LazyLock::
         "weathered_copper",
         "oxidized_copper",
         "cut_copper",
+        "exposed_cut_copper",
+        "waxed_copper_block",
         "raw_copper_block",
         "raw_iron_block",
         "raw_gold_block",
@@ -1314,6 +1356,10 @@ pub static TOOL_REQUIRED_FOR_DROPS: LazyLock<HashSet<&'static str>> = LazyLock::
         "sandstone_stairs",
         "sandstone_slab",
         "red_sandstone_stairs",
+        // 2026-08-30 review: these two variants were missing while their
+        // siblings were tabled.
+        "smooth_sandstone_stairs",
+        "red_sandstone_slab",
         // Quartz family
         "quartz_block",
         "smooth_quartz",
@@ -1350,7 +1396,10 @@ pub static TOOL_REQUIRED_FOR_DROPS: LazyLock<HashSet<&'static str>> = LazyLock::
         "green_terracotta",
         "red_terracotta",
         "black_terracotta",
-        // Amethyst / dripstone
+        // Amethyst / dripstone. Note amethyst_cluster deliberately has no
+        // entry: azalea's generated behavior carries NO
+        // requires_correct_tool_for_drops for it (its shard drops are
+        // loot-table gated, which this two-table model does not express).
         "amethyst_block",
         "budding_amethyst",
         "dripstone_block",
@@ -1378,6 +1427,13 @@ pub static TOOL_REQUIRED_FOR_DROPS: LazyLock<HashSet<&'static str>> = LazyLock::
         "dropper",
         "dispenser",
         "observer",
+        // Iron fixtures / misc (2026-08-30 review — requires_correct_tool_
+        // for_drops in the azalea-generated behaviors).
+        "iron_bars",
+        "cauldron",
+        "lodestone",
+        "iron_chain",
+        "lightning_rod",
         // Hardest materials
         "obsidian",
         "ancient_debris",
@@ -1408,6 +1464,27 @@ pub fn requires_tool_for_drops(block_type: &str) -> bool {
 // ---------------------------------------------------------------------------
 // Lookup functions
 // ---------------------------------------------------------------------------
+
+/// Blocks that accept a SECOND tool besides the [`BLOCK_TO_TOOL_TYPE`]
+/// primary, because vanilla gives both the same break speed.
+///
+/// Only cobweb today: sword (primary) and shears both cut it in ~0.45 s.
+/// Consulted by `select_tool_for_block` (when the primary tool is nowhere
+/// in the inventory) and `is_correct_tool` (mine-time pricing), so a bot
+/// holding only shears can mine cobweb instead of being refused with
+/// ToolNotFound (2026-08-30 review).
+pub static ALT_TOOL_FOR_BLOCK: LazyLock<HashMap<&'static str, ToolType>> = LazyLock::new(|| {
+    let mut m = HashMap::new();
+    m.insert("cobweb", ToolType::Shears);
+    m
+});
+
+/// Returns the alternative [`ToolType`] accepted for the block, if any.
+///
+/// See [`ALT_TOOL_FOR_BLOCK`].
+pub fn alt_tool_for_block(block_type: &str) -> Option<ToolType> {
+    ALT_TOOL_FOR_BLOCK.get(block_type).copied()
+}
 
 /// Returns the best [`ToolType`] for mining the given block.
 ///
@@ -1493,6 +1570,87 @@ mod tests {
         // stone_slab corrected to the vanilla 2.0 (all sibling slabs were
         // already 2.0).
         assert_eq!(get_block_hardness("stone_slab"), 2.0);
+    }
+
+    #[test]
+    fn test_previously_orphaned_blocks_fully_tabled() {
+        // 2026-08-30 review: these blocks sat in BLOCK_HARDNESS only (or in
+        // no table at all), so the bot fell back to Hand speed, never fired
+        // the M-16 drop-gate refusal, and for the level-1 ones a wooden
+        // pickaxe "mined" them for no drops with no refusal. Tool/level/
+        // drop membership verified against the azalea-generated 1.21.11
+        // tag data (M-21 standard). Note "chain" was renamed "iron_chain"
+        // in 1.21.11, so the entry uses the current registry name.
+        for block in [
+            "exposed_cut_copper",
+            "waxed_copper_block",
+            "smooth_sandstone_stairs",
+            "red_sandstone_slab",
+            "amethyst_cluster",
+            "iron_bars",
+            "cauldron",
+            "lodestone",
+            "iron_chain",
+            "lightning_rod",
+        ] {
+            assert_eq!(best_tool_for_block(block), ToolType::Pickaxe, "{block}");
+        }
+        assert_eq!(best_tool_for_block("suspicious_gravel"), ToolType::Shovel);
+
+        // Hardness: azalea-generated strengths.
+        assert_eq!(get_block_hardness("iron_bars"), 5.0);
+        assert_eq!(get_block_hardness("cauldron"), 2.0);
+        assert_eq!(get_block_hardness("lodestone"), 3.5);
+        assert_eq!(get_block_hardness("iron_chain"), 5.0);
+        assert_eq!(get_block_hardness("lightning_rod"), 3.0);
+        assert_eq!(get_block_hardness("amethyst_cluster"), 1.5);
+        assert_eq!(get_block_hardness("suspicious_gravel"), 0.25);
+        assert_eq!(get_block_hardness("red_sandstone_slab"), 2.0);
+
+        // Harvest level: vanilla NEEDS_STONE_TOOL members only.
+        assert_eq!(HARVEST_LEVEL.get("exposed_cut_copper"), Some(&1u8));
+        assert_eq!(HARVEST_LEVEL.get("waxed_copper_block"), Some(&1u8));
+        assert_eq!(HARVEST_LEVEL.get("lightning_rod"), Some(&1u8));
+        // The rest carry no tier requirement (level 0 = absent entry).
+        for block in [
+            "iron_bars",
+            "cauldron",
+            "lodestone",
+            "iron_chain",
+            "amethyst_cluster",
+        ] {
+            assert_eq!(HARVEST_LEVEL.get(block), None, "{block}");
+        }
+
+        // Drop gate: requires_correct_tool_for_drops members; amethyst_
+        // cluster / suspicious_gravel deliberately absent (no such property
+        // in the generated behaviors).
+        for block in [
+            "exposed_cut_copper",
+            "waxed_copper_block",
+            "smooth_sandstone_stairs",
+            "red_sandstone_slab",
+            "iron_bars",
+            "cauldron",
+            "lodestone",
+            "iron_chain",
+            "lightning_rod",
+        ] {
+            assert!(requires_tool_for_drops(block), "{block}");
+        }
+        assert!(!requires_tool_for_drops("amethyst_cluster"));
+        assert!(!requires_tool_for_drops("suspicious_gravel"));
+    }
+
+    #[test]
+    fn test_cobweb_alt_tool_is_shears() {
+        // 2026-08-30 review: vanilla gives sword and shears the same cobweb
+        // break speed; the primary stays Sword but shears must be accepted.
+        assert_eq!(best_tool_for_block("cobweb"), ToolType::Sword);
+        assert_eq!(alt_tool_for_block("cobweb"), Some(ToolType::Shears));
+        // Blocks without an alternative return None.
+        assert_eq!(alt_tool_for_block("stone"), None);
+        assert_eq!(alt_tool_for_block("unknown_block"), None);
     }
 
     #[test]

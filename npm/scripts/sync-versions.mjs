@@ -7,7 +7,10 @@
 //   2. writes that version into every npm/*/package.json,
 //   3. for the main package, also stamps every optionalDependencies value
 //      (they must always match the main version — platform packages are
-//      released in lockstep).
+//      released in lockstep),
+//   4. rewrites the pinned `minecraft-mcp-rs@x.y.z` install examples in
+//      npm/README.md (2026-08-30 review: the pins were hand-maintained and
+//      drifted from the release version with no sync mechanism).
 //
 // Usage: node npm/scripts/sync-versions.mjs
 // Exit code 1 with a message if Cargo.toml is unreadable or the version
@@ -56,4 +59,25 @@ for (const dir of packageDirs) {
   }
   writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
   console.log(`sync-versions: ${dir} -> ${version}`);
+}
+
+// npm/README.md pins: rewrite every `minecraft-mcp-rs@<semver>` occurrence
+// (npx/bunx install examples and the JSON args block). Only the version
+// after the @ changes — the package name spelling is untouched.
+const readmePath = join(npmRoot, "README.md");
+let readme;
+try {
+  readme = readFileSync(readmePath, "utf8");
+} catch (err) {
+  console.error(`sync-versions: cannot read ${readmePath}: ${err.message}`);
+  process.exit(1);
+}
+const pinPattern = /minecraft-mcp-rs@\d+\.\d+\.\d+(?:-[\w.-]+)?/g;
+const stale = readme.match(pinPattern) ?? [];
+if (stale.length > 0) {
+  readme = readme.replace(pinPattern, `minecraft-mcp-rs@${version}`);
+  writeFileSync(readmePath, readme);
+  console.log(`sync-versions: npm/README.md -> ${version} (${stale.length} pin(s))`);
+} else {
+  console.log("sync-versions: npm/README.md has no version pins to update");
 }
